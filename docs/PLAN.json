@@ -1,0 +1,21 @@
+{
+  "status": "draft",
+  "phases": [
+    {
+      "name": "Phase 0",
+      "goal": "Foundation skeleton",
+      "tasks": [
+        "Repository skeleton",
+        "FastAPI base app",
+        "SDLC state machine",
+        "Approval gate system",
+        "Domain models",
+        "Action ledger",
+        "Bedrock adapter stub",
+        "Workspace manager stub",
+        "Vue frontend base",
+        "API contract stubs"
+      ]
+    }
+  ]
+}

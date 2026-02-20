@@ -14,6 +14,18 @@ def test_project_summary_with_planner_tasks():
     project = create_resp.json()
     project_id = project["id"]
 
+    # Ingest and approve requirements graph so gating passes
+    prd_resp = client.post(
+        f"/api/v1/projects/{project_id}/prd",
+        json={"text": "Must support login\nSystem should be reliable"},
+    )
+    assert prd_resp.status_code == 200
+    approve_graph = client.post(
+        f"/api/v1/projects/{project_id}/requirements-graph/approve",
+        json={"approved_by": "tester"},
+    )
+    assert approve_graph.status_code == 200
+
     advance_resp = client.post(
         f"/api/v1/projects/{project_id}/advance",
         json={"to_stage": "REQUIREMENTS_DRAFTED"},

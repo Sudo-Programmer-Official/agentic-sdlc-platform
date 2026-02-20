@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol
 from uuid import uuid4
 
@@ -34,7 +34,7 @@ class ActionLogInput:
     agent_name: str
     tool_name: str
     message: Optional[str] = None
-    files_touched: List[str]
+    files_touched: List[str] = field(default_factory=list)
     command: Optional[str] = None
     details: Optional[dict] = None
 

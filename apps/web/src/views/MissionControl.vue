@@ -1,11 +1,30 @@
 <template>
-  <div class="space-y-6">
+  <div v-if="hasActiveRun" class="space-y-6">
     <div>
       <h1 class="text-3xl font-semibold text-slate-900">Mission Control</h1>
       <p class="text-slate-600">
         Monitor the SDLC stage, control execution, and keep full audit visibility.
       </p>
     </div>
+
+    <el-alert
+      v-if="summary && summary.plan_exists && !summary.plan_fresh"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="Plan is stale"
+      description="Requirements changed since the plan was generated. Regenerate the plan before executing runs."
+      class="shadow-sm"
+    >
+      <template #default>
+        <div class="flex items-center gap-3 text-sm">
+          <span>Plan outdated. Regenerate to continue.</span>
+          <el-button size="small" type="primary" :loading="regenerating" @click="regeneratePlan">
+            Regenerate Plan
+          </el-button>
+        </div>
+      </template>
+    </el-alert>
 
     <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -26,7 +45,7 @@
           <span class="ml-2 font-mono text-slate-900">{{ projectId || "—" }}</span>
         </div>
         <el-button :loading="loading" @click="loadAll">Refresh Overview</el-button>
-        <el-button :disabled="!summary?.latest_run" @click="executeTasks">
+        <el-button :disabled="!summary?.latest_run || !planReady" @click="executeTasks">
           Execute Tasks
         </el-button>
         <el-button @click="goToOverview">Switch Project</el-button>
@@ -34,15 +53,24 @@
       </div>
     </div>
 
-    <div v-if="summary" class="grid gap-4 md:grid-cols-4">
-      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div class="text-xs uppercase tracking-wide text-slate-400">Stage</div>
-        <div class="mt-2 flex items-center gap-2 text-lg font-semibold text-slate-900">
-          <StageBadge :label="summary.current_stage" />
-          <span>{{ summary.current_stage }}</span>
-        </div>
-        <div class="mt-1 text-xs text-slate-500">Project: {{ summary.name }}</div>
+  <div v-if="summary" class="grid gap-4 md:grid-cols-4">
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-xs uppercase tracking-wide text-slate-400">Stage</div>
+      <div class="mt-2 flex items-center gap-2 text-lg font-semibold text-slate-900">
+        <StageBadge :label="summary.current_stage" />
+        <span>{{ summary.current_stage }}</span>
       </div>
+      <div class="mt-1 text-xs text-slate-500">Project: {{ summary.name }}</div>
+    </div>
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-xs uppercase tracking-wide text-slate-400">Plan Status</div>
+      <div class="mt-2 flex items-center gap-2 text-lg font-semibold" :class="planReady ? 'text-emerald-600' : 'text-amber-600'">
+        <span>{{ planReady ? 'PLAN_READY' : 'STALE' }}</span>
+      </div>
+      <div class="mt-1 text-xs text-slate-500 break-all">
+        Plan SHA: {{ summary.plan_requirements_sha ? summary.plan_requirements_sha.slice(0, 8) : '—' }}
+      </div>
+    </div>
       <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="text-xs uppercase tracking-wide text-slate-400">Agents</div>
         <div class="mt-3 flex items-center gap-4">
@@ -134,6 +162,9 @@
       Select a project to view Mission Control data.
     </div>
   </div>
+  <div v-else class="rounded-xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
+    Mission Control requires an active run. Returning to project overview...
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -161,8 +192,13 @@ const changes = ref<any[]>([]);
 const loading = ref(false);
 const error = ref("");
 const advancedMode = ref(false);
+const regenerating = ref(false);
 
 const projectId = computed(() => (route.params.projectId as string) || "");
+const hasActiveRun = computed(() => Boolean(summary.value?.latest_run?.run_id));
+const planFresh = computed(() => Boolean(summary.value?.plan_fresh));
+const planExists = computed(() => Boolean(summary.value?.plan_exists));
+const planReady = computed(() => planExists.value && planFresh.value);
 
 const agentSnapshot = computed(() => {
   const byAgent: Record<string, { running: number; pending: number; failed: number }> = {};
@@ -233,6 +269,12 @@ watch(
   { immediate: true }
 );
 
+watch(hasActiveRun, (active) => {
+  if (!active && !loading.value) {
+    router.replace(`/projects/${projectId.value}`);
+  }
+});
+
 function resetState() {
   summary.value = null;
   metrics.value = null;
@@ -263,6 +305,10 @@ function syncContext() {
     runStatus: summary.value.latest_run?.status || "IDLE",
     latestRunId: summary.value.latest_run?.run_id || "",
     activeAgents: agentSnapshot.value.active,
+    hasActiveRun: Boolean(summary.value.latest_run?.run_id),
+    architectureRefreshNeeded: summary.value.architecture_refresh_needed ?? false,
+    planRefreshNeeded: summary.value.plan_refresh_needed ?? false,
+    testRefreshNeeded: summary.value.test_refresh_needed ?? false,
     updatedAt: new Date().toISOString()
   });
 }
@@ -397,6 +443,10 @@ async function executeTasks() {
   if (!summary.value?.latest_run?.run_id) {
     return;
   }
+  if (!planReady.value) {
+    error.value = "Plan is stale or missing. Regenerate before executing tasks.";
+    return;
+  }
   try {
     const runId = summary.value.latest_run.run_id;
     const response = await fetch(`${API_BASE}/runs/${runId}/execute?max_parallel_tasks=2`, {
@@ -413,5 +463,40 @@ async function executeTasks() {
 
 function goToOverview() {
   router.push("/");
+}
+
+async function regeneratePlan() {
+  if (!projectId.value.trim()) return;
+  regenerating.value = true;
+  error.value = "";
+  try {
+    const runResp = await fetch(`${API_BASE}/projects/${projectId.value}/runs`, { method: "POST" });
+    if (!runResp.ok) throw new Error(await runResp.text());
+    const runId = (await runResp.json()).run_id;
+
+    const startResp = await fetch(`${API_BASE}/runs/${runId}/start`, { method: "POST" });
+    if (!startResp.ok) throw new Error(await startResp.text());
+
+    await pollRunCompletion(runId);
+    await loadAll();
+    ElMessage.success("Plan regeneration completed.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to regenerate plan.";
+  } finally {
+    regenerating.value = false;
+  }
+}
+
+async function pollRunCompletion(runId: string, attempts = 10, delayMs = 500) {
+  for (let i = 0; i < attempts; i += 1) {
+    const resp = await fetch(`${API_BASE}/runs/${runId}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (["COMPLETED", "FAILED", "CANCELED"].includes(data.status)) {
+        return;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }
 </script>

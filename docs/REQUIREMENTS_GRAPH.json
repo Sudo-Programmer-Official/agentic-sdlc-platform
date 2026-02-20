@@ -1,0 +1,40 @@
+{
+  "project_id": "6448d62f-367c-41e9-8af3-6a91e26a0e34",
+  "version": 2,
+  "status": "APPROVED",
+  "created_at": "2026-02-19T19:19:35.588903",
+  "updated_at": "2026-02-19T19:19:35.591179",
+  "approved_at": "2026-02-19T19:19:35.591179",
+  "approved_by": "tester",
+  "nodes": [
+    {
+      "id": "FR-001",
+      "type": "FR",
+      "text": "Must allow SSO login",
+      "confidence": 0.9,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-001",
+      "type": "QR",
+      "text": "System should be secure and reliable",
+      "confidence": 0.9,
+      "source": "AI_EXTRACTED",
+      "quality_type": "security",
+      "tags": []
+    }
+  ],
+  "edges": [
+    {
+      "id": "EDGE-001",
+      "from_id": "FR-001",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    }
+  ],
+  "sha256": "2722fbf106550d32df3c366a82770da1b7ebcf2acc3dc97b5f37826b70998b83"
+}

@@ -8,6 +8,10 @@ export type ProjectContext = {
   latestRunId: string;
   activeAgents: number;
   updatedAt: string | null;
+  hasActiveRun: boolean;
+  architectureRefreshNeeded: boolean;
+  planRefreshNeeded: boolean;
+  testRefreshNeeded: boolean;
 };
 
 export const projectContext = reactive<ProjectContext>({
@@ -17,7 +21,11 @@ export const projectContext = reactive<ProjectContext>({
   runStatus: "IDLE",
   latestRunId: "",
   activeAgents: 0,
-  updatedAt: null
+  updatedAt: null,
+  hasActiveRun: false,
+  architectureRefreshNeeded: false,
+  planRefreshNeeded: false,
+  testRefreshNeeded: false
 });
 
 export function updateProjectContext(update: Partial<ProjectContext>) {

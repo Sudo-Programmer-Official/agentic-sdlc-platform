@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
+import hashlib
+import json
 
 
 class Stage(str, Enum):
@@ -76,6 +78,30 @@ class ChangeStatus(str, Enum):
     APPLIED = "APPLIED"
 
 
+class RequirementType(str, Enum):
+    FR = "FR"
+    QR = "QR"
+
+
+class QualityType(str, Enum):
+    PERFORMANCE = "performance"
+    SECURITY = "security"
+    RELIABILITY = "reliability"
+    USABILITY = "usability"
+    SCALABILITY = "scalability"
+    MAINTAINABILITY = "maintainability"
+    AVAILABILITY = "availability"
+    PRIVACY = "privacy"
+    COMPLIANCE = "compliance"
+    COST = "cost"
+
+
+class RequirementGraphStatus(str, Enum):
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+    STALE = "STALE"
+
+
 @dataclass
 class Project:
     id: str
@@ -83,6 +109,9 @@ class Project:
     description: Optional[str] = None
     current_stage: Stage = Stage.INTAKE
     created_at: datetime = field(default_factory=datetime.utcnow)
+    architecture_refresh_needed: bool = False
+    plan_refresh_needed: bool = False
+    test_refresh_needed: bool = False
 
 
 @dataclass
@@ -146,6 +175,12 @@ class AgentTask:
     depends_on: List[str] = field(default_factory=list)
     parallel_group: str = "A"
     outputs: List[str] = field(default_factory=list)
+    linked_requirements: List[str] = field(default_factory=list)
+    plan_id: str = ""
+    plan_version: int = 1
+    parent_task_id: Optional[str] = None
+    superseded_by: Optional[str] = None
+    deprecated: bool = False
     created_at: datetime = field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -193,3 +228,81 @@ class ActionLog:
     command: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
     details: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RequirementNode:
+    id: str
+    type: RequirementType
+    text: str
+    confidence: float
+    source: str
+    quality_type: Optional[QualityType] = None
+    tags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RequirementEdge:
+    id: str
+    from_id: str
+    to_id: str
+    relation: str
+    weight: float
+    rationale: Optional[str] = None
+
+
+@dataclass
+class RequirementGraph:
+    project_id: str
+    version: int
+    nodes: List[RequirementNode] = field(default_factory=list)
+    edges: List[RequirementEdge] = field(default_factory=list)
+    status: RequirementGraphStatus = RequirementGraphStatus.DRAFT
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
+
+    def compute_hash(self) -> str:
+        """Deterministic hash independent of node/edge ordering."""
+        payload = {
+            "project_id": self.project_id,
+            "version": self.version,
+            "nodes": [self._node_to_dict(node) for node in sorted(self.nodes, key=lambda n: n.id)],
+            "edges": [self._edge_to_dict(edge) for edge in sorted(self.edges, key=lambda e: e.id)],
+            "status": self.status.value,
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _node_to_dict(node: RequirementNode) -> Dict[str, Any]:
+        return {
+            "id": node.id,
+            "type": node.type.value,
+            "text": node.text,
+            "confidence": node.confidence,
+            "source": node.source,
+            "quality_type": node.quality_type.value if node.quality_type else None,
+            "tags": list(node.tags),
+        }
+
+    @staticmethod
+    def _edge_to_dict(edge: RequirementEdge) -> Dict[str, Any]:
+        return {
+            "id": edge.id,
+            "from_id": edge.from_id,
+            "to_id": edge.to_id,
+            "relation": edge.relation,
+            "weight": edge.weight,
+            "rationale": edge.rationale,
+        }
+
+
+@dataclass
+class RequirementGraphSnapshot:
+    project_id: str
+    graph_version: int
+    sha256: str
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_by: str = "system"

@@ -1,20 +1,70 @@
 {
-  "status": "draft",
-  "phases": [
+  "plan_id": "PLAN-E085027B",
+  "project_id": "867bacec-9184-4308-af0c-3defea0158b6",
+  "stage": "DESIGN_DRAFTED",
+  "max_parallel_tasks": 2,
+  "created_at": "2026-02-19T19:19:35.573508",
+  "requirements_sha": "9e9e0521c5bf2cec84d9411f674817749c891de3ffb6410e376c4c9e347d58cd",
+  "tasks": [
     {
-      "name": "Phase 0",
-      "goal": "Foundation skeleton",
-      "tasks": [
-        "Repository skeleton",
-        "FastAPI base app",
-        "SDLC state machine",
-        "Approval gate system",
-        "Domain models",
-        "Action ledger",
-        "Bedrock adapter stub",
-        "Workspace manager stub",
-        "Vue frontend base",
-        "API contract stubs"
+      "task_id": "T-UI-001",
+      "title": "Draft UI wireframe for intake and approvals",
+      "agent": "UI_AGENT",
+      "inputs": [
+        "PRD.md",
+        "USER_STORIES.md",
+        "ACCEPTANCE.md",
+        "REQUIREMENTS_GRAPH.json"
+      ],
+      "outputs": [
+        "docs/design/UI_WIREFRAME.md"
+      ],
+      "depends_on": [],
+      "parallel_group": "A",
+      "est_effort": "S",
+      "linked_requirements": [
+        "FR-001"
+      ]
+    },
+    {
+      "task_id": "T-API-001",
+      "title": "Define API contract for planning endpoints",
+      "agent": "BACKEND_AGENT",
+      "inputs": [
+        "PRD.md",
+        "USER_STORIES.md",
+        "ACCEPTANCE.md",
+        "REQUIREMENTS_GRAPH.json"
+      ],
+      "outputs": [
+        "docs/design/API_CONTRACT.md"
+      ],
+      "depends_on": [],
+      "parallel_group": "A",
+      "est_effort": "S",
+      "linked_requirements": [
+        "FR-001"
+      ]
+    },
+    {
+      "task_id": "T-ARCH-001",
+      "title": "Update architecture notes for planner integration",
+      "agent": "ARCH_AGENT",
+      "inputs": [
+        "docs/design/UI_WIREFRAME.md",
+        "docs/design/API_CONTRACT.md"
+      ],
+      "outputs": [
+        "docs/design/ARCH_NOTES.md"
+      ],
+      "depends_on": [
+        "T-UI-001",
+        "T-API-001"
+      ],
+      "parallel_group": "B",
+      "est_effort": "S",
+      "linked_requirements": [
+        "FR-001"
       ]
     }
   ]

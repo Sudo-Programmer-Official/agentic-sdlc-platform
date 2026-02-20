@@ -40,3 +40,19 @@ class ChangeRequestNotFoundError(ServiceError):
 
 class InvalidChangeStatusError(ServiceError):
     pass
+
+
+class RequirementGraphNotFoundError(ServiceError):
+    pass
+
+
+class RequirementGraphNotApprovedError(ServiceError):
+    pass
+
+
+class RequirementGraphStaleError(ServiceError):
+    pass
+
+
+class PlanStaleError(ServiceError):
+    pass

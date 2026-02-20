@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Request
 
 from app.api.v1.schemas import (
     AdvanceStageRequest,
     ApprovalResponse,
     AuditLogResponse,
     CreateProjectRequest,
+    CreateRunRequest,
     ChangeRequestCreate,
     ChangeRequestDecision,
     ChangeRequestResponse,
     DecideApprovalRequest,
+    PRDIngestRequest,
     ProjectResponse,
     ProjectSummaryResponse,
     ProjectMetricsResponse,
@@ -23,15 +25,28 @@ from app.api.v1.schemas import (
     StatusResponse,
     TransitionResponse,
     TriggerAgentRunRequest,
+    RequirementGraphApproveRequest,
+    RequirementGraphApproveResponse,
+    RequirementGraphModel,
+    RequirementGraphUpdateRequest,
+    PlanRegenerateRequest,
+    PlanRegenerateResponse,
+    PlanHistoryResponse,
 )
 from app.services import (
     approval_service,
     audit_service,
     change_service,
     metrics_service,
+    planner_service,
     project_service,
+    requirements_service,
     run_service,
+    github_adapter,
+    documentation_guard,
+    github_store,
 )
+from app.services.vcs.github_store import GitHubIntegration
 from app.services.errors import (
     ApprovalNotFoundError,
     ApprovalRequiredError,
@@ -43,8 +58,12 @@ from app.services.errors import (
     ProjectNotFoundError,
     RunNotFoundError,
     StaleArtifactsError,
+    RequirementGraphNotFoundError,
+    RequirementGraphNotApprovedError,
+    RequirementGraphStaleError,
 )
 from core.models import TaskStatus
+from app.services.requirements_service import graph_to_dict, build_edges, build_nodes
 
 router = APIRouter()
 projects_router = APIRouter(prefix="/projects", tags=["projects"])
@@ -60,6 +79,9 @@ def _project_response(project) -> ProjectResponse:
         name=project.name,
         description=project.description,
         current_stage=project.current_stage.value,
+        architecture_refresh_needed=project.architecture_refresh_needed,
+        plan_refresh_needed=project.plan_refresh_needed,
+        test_refresh_needed=project.test_refresh_needed,
         created_at=project.created_at,
     )
 
@@ -112,6 +134,12 @@ def _task_response(task) -> TaskResponse:
         depends_on=list(task.depends_on),
         parallel_group=task.parallel_group,
         outputs=list(task.outputs),
+        linked_requirements=list(getattr(task, "linked_requirements", [])),
+        plan_id=getattr(task, "plan_id", None),
+        plan_version=getattr(task, "plan_version", None),
+        parent_task_id=getattr(task, "parent_task_id", None),
+        superseded_by=getattr(task, "superseded_by", None),
+        deprecated=getattr(task, "deprecated", False),
         created_at=task.created_at,
         started_at=task.started_at,
         finished_at=task.finished_at,
@@ -164,6 +192,21 @@ def _change_response(change) -> ChangeRequestResponse:
     )
 
 
+def _render_guard_comment(guard: dict) -> str:
+    impacted = guard.get("impacted_requirements") or []
+    impacted_lines = "\n".join(f"- {req}" for req in impacted) if impacted else "- None"
+    plan_status = "❌ Stale" if guard.get("plan_stale") else "✅ Fresh"
+    return (
+        "## 🧠 Agentic SDLC Documentation Guard\n\n"
+        "Impacted Requirements:\n"
+        f"{impacted_lines}\n\n"
+        f"Plan Status: {plan_status}\n\n"
+        "Action Required:\n"
+        "- Regenerate Plan\n"
+        "- Confirm documentation alignment\n"
+    )
+
+
 @projects_router.post("", response_model=ProjectResponse)
 def create_project(payload: CreateProjectRequest) -> ProjectResponse:
     project = project_service.create_project(payload.name, payload.description)
@@ -198,6 +241,10 @@ def advance_stage(project_id: str, payload: AdvanceStageRequest) -> TransitionRe
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except StaleArtifactsError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except RequirementGraphNotApprovedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except RequirementGraphStaleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @projects_router.post("/{project_id}/approvals", response_model=ApprovalResponse)
@@ -222,13 +269,22 @@ def request_approval(
 
 
 @projects_router.post("/{project_id}/runs", response_model=RunResponse)
-def create_run(project_id: str) -> RunResponse:
+def create_run(project_id: str, payload: CreateRunRequest | None = None) -> RunResponse:
     try:
         project = project_service.get_project(project_id)
-        run = run_service.create_run(project_id=project.id, stage=project.current_stage)
+        if payload and payload.stage:
+            try:
+                stage = Stage(payload.stage)
+            except ValueError:
+                stage = Stage[payload.stage.upper()]
+        else:
+            stage = project.current_stage
+        run = run_service.create_run(project_id=project.id, stage=stage)
         return _run_response(run)
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @projects_router.get("/{project_id}/runs", response_model=list[RunResponse])
@@ -253,6 +309,16 @@ def fetch_artifacts(project_id: str) -> StatusResponse:
 def get_project_summary(project_id: str) -> ProjectSummaryResponse:
     try:
         project = project_service.get_project(project_id)
+        graph = None
+        graph_hash = None
+        try:
+            graph = requirements_service.get_graph(project_id)
+            graph_hash = graph.compute_hash()
+        except RequirementGraphNotFoundError:
+            graph = None
+            graph_hash = None
+
+        plan_status = run_service.get_plan_status(project_id, graph_hash)
         runs = run_service.list_runs(project_id)
         latest_run = runs[-1] if runs else None
         if latest_run is None:
@@ -263,6 +329,17 @@ def get_project_summary(project_id: str) -> ProjectSummaryResponse:
                 current_stage=project.current_stage.value,
                 latest_run=None,
                 task_counts=task_counts,
+                architecture_refresh_needed=project.architecture_refresh_needed,
+                plan_refresh_needed=project.plan_refresh_needed,
+                test_refresh_needed=project.test_refresh_needed,
+                requirements_status=graph.status.value if graph else None,
+                requirements_version=graph.version if graph else None,
+                requirements_sha=graph_hash,
+                plan_exists=plan_status["exists"],
+                plan_fresh=plan_status["fresh"],
+                plan_id=plan_status["plan_id"],
+                plan_requirements_sha=plan_status["requirements_sha"],
+                plan_created_at=plan_status["created_at"],
             )
         tasks = run_service.list_tasks(latest_run.run_id)
         return ProjectSummaryResponse(
@@ -271,11 +348,111 @@ def get_project_summary(project_id: str) -> ProjectSummaryResponse:
             current_stage=project.current_stage.value,
             latest_run=_run_summary(latest_run),
             task_counts=_task_counts(tasks),
+            architecture_refresh_needed=project.architecture_refresh_needed,
+            plan_refresh_needed=project.plan_refresh_needed,
+            test_refresh_needed=project.test_refresh_needed,
+            requirements_status=graph.status.value if graph else None,
+            requirements_version=graph.version if graph else None,
+            requirements_sha=graph_hash,
+            plan_exists=plan_status["exists"],
+            plan_fresh=plan_status["fresh"],
+            plan_id=plan_status["plan_id"],
+            plan_requirements_sha=plan_status["requirements_sha"],
+            plan_created_at=plan_status["created_at"],
         )
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@projects_router.post("/{project_id}/prd", response_model=RequirementGraphModel)
+def ingest_prd(project_id: str, payload: PRDIngestRequest) -> RequirementGraphModel:
+    try:
+        graph = requirements_service.ingest_prd(
+            project_id=project_id,
+            text=payload.text,
+            source=payload.source,
+            fmt=payload.format,
+        )
+        return RequirementGraphModel(**graph_to_dict(graph))
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@projects_router.get("/{project_id}/requirements-graph", response_model=RequirementGraphModel)
+def get_requirements_graph(project_id: str) -> RequirementGraphModel:
+    try:
+        graph = requirements_service.get_graph(project_id)
+        return RequirementGraphModel(**graph_to_dict(graph))
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RequirementGraphNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@projects_router.post("/{project_id}/plan/regenerate", response_model=PlanRegenerateResponse)
+def regenerate_plan(project_id: str, payload: PlanRegenerateRequest) -> PlanRegenerateResponse:
+    try:
+        result = planner_service.regenerate_plan(
+            project_id,
+            triggered_by=payload.triggered_by,
+            mode=payload.mode,
+        )
+        return PlanRegenerateResponse(**result)
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (RequirementGraphNotApprovedError, RequirementGraphStaleError, StaleArtifactsError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@projects_router.get("/{project_id}/plan/history", response_model=PlanHistoryResponse)
+def get_plan_history(project_id: str) -> PlanHistoryResponse:
+    try:
+        project_service.get_project(project_id)
+        entries = planner_service.list_history(project_id)
+        return PlanHistoryResponse(project_id=project_id, entries=entries)
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@projects_router.put("/{project_id}/requirements-graph", response_model=RequirementGraphModel)
+def update_requirements_graph(
+    project_id: str, payload: RequirementGraphUpdateRequest
+) -> RequirementGraphModel:
+    try:
+        nodes = build_nodes([node.model_dump() for node in payload.nodes])
+        edges = build_edges([edge.model_dump() for edge in payload.edges])
+        graph = requirements_service.update_graph(project_id, nodes, edges)
+        return RequirementGraphModel(**graph_to_dict(graph))
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RequirementGraphNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@projects_router.post(
+    "/{project_id}/requirements-graph/approve",
+    response_model=RequirementGraphApproveResponse,
+)
+def approve_requirements_graph(
+    project_id: str, payload: RequirementGraphApproveRequest
+) -> RequirementGraphApproveResponse:
+    try:
+        snapshot = requirements_service.approve_graph(
+            project_id=project_id, approved_by=payload.approved_by
+        )
+        graph = requirements_service.get_graph(project_id)
+        return RequirementGraphApproveResponse(
+            project_id=project_id,
+            version=graph.version,
+            sha256=snapshot.sha256,
+            status=graph.status.value,
+        )
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RequirementGraphNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @projects_router.get("/{project_id}/metrics", response_model=ProjectMetricsResponse)
@@ -461,6 +638,65 @@ def reject_change(change_id: str, payload: ChangeRequestDecision) -> ChangeReque
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except InvalidChangeStatusError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/webhooks/github")
+async def github_webhook(request: Request) -> dict:
+    if github_adapter is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GitHub integration not configured",
+        )
+
+    body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not github_adapter.verify_signature(body, signature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+
+    event = request.headers.get("X-GitHub-Event")
+    if event != "pull_request":
+        return {"status": "ignored", "reason": "event_not_supported"}
+
+    payload = await request.json()
+    action = payload.get("action")
+    if action not in {"opened", "synchronize", "reopened"}:
+        return {"status": "ignored", "reason": f"action_{action}"}
+
+    repo = payload.get("repository", {}).get("full_name")
+    org_login = (
+        payload.get("organization", {}) or payload.get("repository", {}).get("owner", {}) or {}
+    ).get("login")
+    installation_id = payload.get("installation", {}).get("id")
+    pr_number = payload.get("pull_request", {}).get("number")
+
+    try:
+        github_adapter.assert_org_allowed(org_login or "")
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    try:
+        files = github_adapter.get_pr_files(repo, pr_number, installation_id=installation_id)
+    except Exception as exc:  # pragma: no cover - network failure handling
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    guard = documentation_guard.evaluate_guard(repo, pr_number, files)
+
+    # store integration for reuse
+    if installation_id and org_login:
+        github_store.save(
+            GitHubIntegration(
+                installation_id=installation_id, org_login=org_login, allowed_repos=[repo] if repo else []
+            )
+        )
+
+    # optional PR comment
+    try:
+        comment_body = _render_guard_comment(guard)
+        github_adapter.post_pr_comment(repo, pr_number, comment_body, installation_id=installation_id)
+    except Exception:
+        # best-effort; ignore comment failures
+        pass
+
+    return {"status": "ok", "action": action, "guard_status": guard.get("status")}
 
 
 router.include_router(projects_router)

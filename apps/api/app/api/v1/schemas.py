@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +40,9 @@ class ProjectResponse(BaseModel):
     description: Optional[str] = None
     current_stage: str
     created_at: datetime
+    architecture_refresh_needed: bool = False
+    plan_refresh_needed: bool = False
+    test_refresh_needed: bool = False
 
 
 class TransitionResponse(BaseModel):
@@ -77,6 +80,10 @@ class RunSummary(BaseModel):
     finished_at: Optional[datetime] = None
 
 
+class CreateRunRequest(BaseModel):
+    stage: Optional[str] = None
+
+
 class TaskCounts(BaseModel):
     pending: int
     running: int
@@ -91,6 +98,17 @@ class ProjectSummaryResponse(BaseModel):
     current_stage: str
     latest_run: Optional[RunSummary] = None
     task_counts: TaskCounts
+    architecture_refresh_needed: bool = False
+    plan_refresh_needed: bool = False
+    test_refresh_needed: bool = False
+    requirements_status: Optional[str] = None
+    requirements_version: Optional[int] = None
+    requirements_sha: Optional[str] = None
+    plan_exists: bool = False
+    plan_fresh: bool = False
+    plan_id: Optional[str] = None
+    plan_requirements_sha: Optional[str] = None
+    plan_created_at: Optional[str] = None
 
 
 class ProjectMetricsResponse(BaseModel):
@@ -152,6 +170,12 @@ class TaskResponse(BaseModel):
     depends_on: list[str]
     parallel_group: str
     outputs: list[str]
+    linked_requirements: list[str] = Field(default_factory=list)
+    plan_id: str | None = None
+    plan_version: int | None = None
+    parent_task_id: str | None = None
+    superseded_by: str | None = None
+    deprecated: bool = False
     created_at: datetime
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -171,3 +195,92 @@ class AuditLogResponse(BaseModel):
 class StatusResponse(BaseModel):
     status: str
     message: Optional[str] = None
+
+
+# Requirements engine schemas
+class PRDIngestRequest(BaseModel):
+    text: str
+    format: str = Field(default="markdown")
+    source: str = Field(default="typed")
+
+
+class RequirementNodeModel(BaseModel):
+    id: str
+    type: str
+    text: str
+    confidence: float = 0.8
+    source: str = "human"
+    quality_type: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+
+
+class RequirementEdgeModel(BaseModel):
+    id: Optional[str] = None
+    from_id: str
+    to_id: str
+    relation: str = "constrains"
+    weight: float = 0.5
+    rationale: Optional[str] = None
+
+
+class RequirementGraphModel(BaseModel):
+    project_id: str
+    version: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
+    nodes: List[RequirementNodeModel]
+    edges: List[RequirementEdgeModel]
+
+
+class RequirementGraphUpdateRequest(BaseModel):
+    nodes: List[RequirementNodeModel]
+    edges: List[RequirementEdgeModel]
+
+
+class RequirementGraphApproveRequest(BaseModel):
+    approved_by: str
+
+
+class RequirementGraphApproveResponse(BaseModel):
+    project_id: str
+    version: int
+    sha256: str
+    status: str
+
+
+class PlanRegenerateRequest(BaseModel):
+    triggered_by: str = "system"
+    mode: str = "AUTO"  # AUTO|FULL|PARTIAL
+
+
+class PlanRegenerateResponse(BaseModel):
+    plan_path: str
+    created_at: str
+    plan_id: str
+    requirements_sha: str | None = None
+    raw: str
+    regeneration_mode: str
+    reused_task_ids: list[str] = []
+    regenerated_task_ids: list[str] = []
+    changed_requirements: list[str] = []
+
+
+class PlanHistoryEntry(BaseModel):
+    version: int
+    plan_id: str
+    requirements_sha: str | None = None
+    created_at: str
+    triggered_by: str
+    plan_path: str
+    regeneration_mode: str
+    changed_requirements_count: int
+    reused_count: int
+    regenerated_count: int
+
+
+class PlanHistoryResponse(BaseModel):
+    project_id: str
+    entries: list[PlanHistoryEntry]

@@ -3,9 +3,11 @@ from __future__ import annotations
 from typing import List, Optional, Set
 
 from pydantic import BaseModel, Field, model_validator
+from pydantic import ConfigDict
 
 
 class PlanTask(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     task_id: str
     title: str
     agent: str
@@ -14,13 +16,23 @@ class PlanTask(BaseModel):
     depends_on: List[str] = Field(default_factory=list)
     parallel_group: str = "A"
     est_effort: Optional[str] = None
+    linked_requirements: List[str] = Field(default_factory=list)
 
 
 class Plan(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     plan_id: str
     project_id: str
     stage: str
+    plan_version: int | None = None
+    parent_plan_id: str | None = None
+    regeneration_mode: str | None = None
+    changed_requirements: List[str] = Field(default_factory=list)
+    reused_task_ids: List[str] = Field(default_factory=list)
+    regenerated_task_ids: List[str] = Field(default_factory=list)
     max_parallel_tasks: int = 2
+    requirements_sha: str | None = None
+    created_at: str | None = None
     tasks: List[PlanTask]
 
     @model_validator(mode="after")

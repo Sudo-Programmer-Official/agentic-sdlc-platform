@@ -13,6 +13,8 @@ from .errors import (
     InvalidTransitionError,
     ProjectNotFoundError,
 )
+from .errors import RequirementGraphNotApprovedError, RequirementGraphStaleError
+from .requirements_service import RequirementGraphService
 
 
 class InMemoryProjectStore:
@@ -38,12 +40,16 @@ class ProjectService:
         state_store: InMemoryStateStore,
         approval_gate: ApprovalGate,
         artifact_service: ArtifactSnapshotService,
+        requirements_service: RequirementGraphService | None = None,
+        plan_checker=None,
         approval_required: Optional[Set[Tuple[Stage, Stage]]] = None,
     ) -> None:
         self._project_store = project_store
         self._state_store = state_store
         self._approval_gate = approval_gate
         self._artifact_service = artifact_service
+        self._requirements_service = requirements_service
+        self._plan_checker = plan_checker
         self._state_machine = SDLCStateMachine(state_store)
         self._approval_required = approval_required or {
             (Stage.REQUIREMENTS_DRAFTED, Stage.REQUIREMENTS_APPROVED),
@@ -66,6 +72,24 @@ class ProjectService:
         next_stage = self._parse_stage(to_stage)
         current_stage = self._state_machine.get_stage(project_id)
 
+        if self._requirements_service:
+            if next_stage == Stage.REQUIREMENTS_APPROVED:
+                self._requirements_service.assert_approved(project_id)
+            if next_stage in {
+                Stage.DESIGN_DRAFTED,
+                Stage.DESIGN_APPROVED,
+                Stage.IMPLEMENTING,
+                Stage.TESTING,
+                Stage.READY_FOR_REVIEW,
+                Stage.MERGED,
+                Stage.DEPLOYED,
+            }:
+                self._requirements_service.assert_fresh(project_id)
+            if next_stage == Stage.PLAN_READY:
+                graph = self._requirements_service.get_graph(project_id)
+                if self._plan_checker and not self._plan_checker(project_id, graph.compute_hash()):
+                    raise StaleArtifactsError("Plan is missing or stale relative to requirements graph.")
+
         self._artifact_service.assert_not_stale(project_id, next_stage)
 
         if not self._state_machine.can_transition(project_id, next_stage):
@@ -86,6 +110,24 @@ class ProjectService:
         project = self.get_project(project_id)
         self._state_store.set_stage(project_id, stage)
         project.current_stage = stage
+        self._project_store.update(project)
+        return project
+
+    def set_refresh_flags(
+        self,
+        project_id: str,
+        *,
+        architecture: Optional[bool] = None,
+        plan: Optional[bool] = None,
+        tests: Optional[bool] = None,
+    ) -> Project:
+        project = self._project_store.get(project_id)
+        if architecture is not None:
+            project.architecture_refresh_needed = architecture
+        if plan is not None:
+            project.plan_refresh_needed = plan
+        if tests is not None:
+            project.test_refresh_needed = tests
         self._project_store.update(project)
         return project
 

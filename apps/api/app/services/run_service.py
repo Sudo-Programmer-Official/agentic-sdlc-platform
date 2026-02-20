@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 from uuid import uuid4
+import json
 
 from core.execution import AgentRegistry, AgentResult, AgentType, ExecutionContext
 from core.ledger import ActionLedger
@@ -64,6 +65,7 @@ class RunService:
         artifact_service: Optional[ArtifactSnapshotService] = None,
         task_service: Optional[TaskService] = None,
         docs_root: Optional[Path] = None,
+        requirements_service=None,
     ) -> None:
         self._store = store
         self._ledger = ledger
@@ -72,6 +74,7 @@ class RunService:
         self._artifact_service = artifact_service
         self._task_service = task_service
         self._docs_root = docs_root or self._resolve_docs_root()
+        self._requirements_service = requirements_service
 
     def create_run(self, project_id: str, stage: Stage) -> Run:
         run = Run(
@@ -110,6 +113,16 @@ class RunService:
         run = self._store.get(run_id)
         if self._artifact_service is not None:
             self._artifact_service.assert_not_stale(run.project_id, run.stage)
+        if self._requirements_service is not None and run.stage in {
+            Stage.DESIGN_APPROVED,
+            Stage.PLAN_READY,
+            Stage.IMPLEMENTING,
+            Stage.TESTING,
+            Stage.READY_FOR_REVIEW,
+            Stage.MERGED,
+            Stage.DEPLOYED,
+        }:
+            self._assert_plan_fresh(run.project_id)
         run = self._transition(run_id, RunStatus.RUNNING, "Run started")
 
         if self._agent_registry and run.stage == Stage.REQUIREMENTS_DRAFTED:
@@ -165,18 +178,33 @@ class RunService:
                 agent = self._agent_registry.get(AgentType.PLANNER, run.stage)
                 result: AgentResult = agent.run(context)
                 plan_path = result.output if result.output is not None else self._docs_root / "PLAN.json"
-                plan = Plan.model_validate_json(Path(plan_path).read_text())
+                plan_json = Path(plan_path).read_text()
+                plan = Plan.model_validate_json(plan_json)
                 if self._task_service is not None:
-                    tasks = self._task_service.create_tasks_from_plan(run.run_id, plan)
+                    tasks = self._task_service.sync_tasks_from_plan(run.run_id, plan)
                     self._ledger.log(
                         run_id=run.run_id,
                         project_id=run.project_id,
                         stage=run.stage,
                         agent_name="planner_agent",
                         tool_name="task_service",
-                        message="Created agent tasks from PLAN.json",
+                        message="Synced agent tasks from PLAN.json",
                         details={"task_ids": [task.task_id for task in tasks]},
                     )
+                if self._task_service and not self._task_service.list_tasks(run.run_id):
+                    fallback_plan = Plan(
+                        plan_id=f"PLAN-{run.run_id[:8]}",
+                        project_id=run.project_id,
+                        stage=run.stage.value,
+                        tasks=[
+                            PlanTask(
+                                task_id="T-FALLBACK-001",
+                                title="Fallback planning task",
+                                agent="PLANNER",
+                            )
+                        ],
+                    )
+                    self._task_service.sync_tasks_from_plan(run.run_id, fallback_plan)
             except Exception as exc:
                 self._ledger.log(
                     run_id=run.run_id,
@@ -190,6 +218,50 @@ class RunService:
                 return self.fail_run(run.run_id, reason=str(exc))
 
         return run
+
+    def _assert_plan_fresh(self, project_id: str) -> None:
+        try:
+            status = self.get_plan_status(project_id, None)
+            if not status["exists"]:
+                raise ValueError("PLAN.json not found")
+            if not status["requirements_sha"] or not status["fresh"]:
+                raise ValueError("Plan is stale relative to requirements graph.")
+        except Exception as exc:
+            raise StaleArtifactsError(str(exc)) from exc
+
+    def get_plan_status(self, project_id: str, graph_hash: Optional[str]) -> Dict[str, object]:
+        plan_path = self._docs_root / "PLAN.json"
+        if not plan_path.exists():
+            return {
+                "exists": False,
+                "fresh": False if graph_hash else False,
+                "requirements_sha": None,
+                "plan_id": None,
+                "created_at": None,
+            }
+        try:
+            plan = json.loads(plan_path.read_text())
+            req_sha = plan.get("requirements_sha")
+            fresh = req_sha == graph_hash if graph_hash else False
+            return {
+                "exists": True,
+                "fresh": fresh,
+                "requirements_sha": req_sha,
+                "plan_id": plan.get("plan_id"),
+                "created_at": plan.get("created_at"),
+            }
+        except Exception:
+            return {
+                "exists": True,
+                "fresh": False,
+                "requirements_sha": None,
+                "plan_id": None,
+                "created_at": None,
+            }
+
+    def is_plan_fresh(self, project_id: str, graph_hash: Optional[str]) -> bool:
+        status = self.get_plan_status(project_id, graph_hash)
+        return status["exists"] and bool(status["fresh"])
 
     def execute_tasks_bounded(self, run_id: str, max_parallel_tasks: int = 2) -> None:
         if self._task_service is None:

@@ -3,6 +3,9 @@ from core.ledger import ActionLedger, InMemoryActionLogStore
 from core.sdlc import ApprovalGate, InMemoryStateStore
 
 from agent.runtime import BedrockAgentAdapter, PlannerAgent, RequirementsAgent
+from agent.runtime.requirements_intelligence import extract_graph_from_prd
+from app.services.vcs import InMemoryGitHubIntegrationStore, build_github_adapter
+from app.services.documentation_guard import DocumentationGuardService
 
 from .approval_service import ApprovalService
 from .audit_service import AuditService
@@ -10,6 +13,8 @@ from .artifact_service import ArtifactSnapshotService, InMemoryArtifactSnapshotS
 from .change_service import ChangeRequestService, InMemoryChangeStore
 from .metrics_service import MetricsService
 from .project_service import InMemoryProjectStore, ProjectService
+from .planner_service import PlannerService
+from .requirements_service import InMemoryRequirementGraphStore, RequirementGraphService
 from .run_service import InMemoryRunStore, RunService
 from .task_service import InMemoryTaskStore, TaskService
 
@@ -41,8 +46,29 @@ project_service = ProjectService(
     state_store=_state_store,
     approval_gate=_approval_gate,
     artifact_service=_artifact_service,
+    requirements_service=None,
+    plan_checker=None,
 )
 approval_service = ApprovalService(_approval_gate, _artifact_service)
+_requirements_store = InMemoryRequirementGraphStore()
+_requirements_service = RequirementGraphService(
+    _requirements_store,
+    _action_ledger,
+    project_service.get_project,
+    project_service.set_refresh_flags,
+    extractor=extract_graph_from_prd,
+    docs_root=_artifact_service._docs_root if hasattr(_artifact_service, "_docs_root") else None,
+)
+# attach after construction to avoid circular init
+project_service._requirements_service = _requirements_service
+project_service._plan_checker = lambda pid, gh: run_service.is_plan_fresh(pid, gh)
+planner_service = PlannerService(
+    planner_agent=_planner_agent,
+    ledger=_action_ledger,
+    project_getter=project_service.get_project,
+    requirements_service=_requirements_service,
+    docs_root=_artifact_service._docs_root if hasattr(_artifact_service, "_docs_root") else None,
+)
 run_service = RunService(
     _run_store,
     _action_ledger,
@@ -50,7 +76,9 @@ run_service = RunService(
     project_getter=project_service.get_project,
     artifact_service=_artifact_service,
     task_service=_task_service,
+    requirements_service=_requirements_service,
 )
+project_service._plan_checker = lambda pid, gh: run_service.is_plan_fresh(pid, gh)
 audit_service = AuditService(_action_ledger)
 change_service = ChangeRequestService(
     _change_store,
@@ -64,3 +92,14 @@ metrics_service = MetricsService(
     artifact_service=_artifact_service,
     change_service=change_service,
 )
+
+requirements_service = _requirements_service
+
+# GitHub integration
+_github_store = InMemoryGitHubIntegrationStore()
+github_adapter = build_github_adapter(_github_store)
+documentation_guard = DocumentationGuardService(
+    ledger=_action_ledger,
+    docs_root=_artifact_service._docs_root if hasattr(_artifact_service, "_docs_root") else None,
+)
+github_store = _github_store

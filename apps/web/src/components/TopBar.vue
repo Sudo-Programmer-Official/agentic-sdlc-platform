@@ -1,9 +1,9 @@
 <template>
   <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
     <div>
-      <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Mission Control</div>
+      <div class="text-xs uppercase tracking-[0.3em] text-slate-400">{{ headerLabel }}</div>
       <div class="text-2xl font-semibold text-slate-900">
-        {{ projectContext.projectName }}
+        {{ titleText }}
       </div>
       <div class="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
         <span>Project ID: {{ projectContext.projectId || "—" }}</span>
@@ -26,22 +26,32 @@
           :value="project.id"
         />
       </el-select>
-      <div class="flex items-center gap-2 text-xs text-slate-500">
+      <div v-if="projectContext.projectId" class="flex items-center gap-2 text-xs text-slate-500">
         <span class="uppercase">Stage</span>
         <StageBadge :label="projectContext.stage" />
       </div>
-      <div class="flex items-center gap-2 text-xs text-slate-500">
+      <div v-if="projectContext.projectId" class="flex items-center gap-2 text-xs text-slate-500">
         <span class="uppercase">Run</span>
         <el-tag :type="runTagType" effect="light">{{ projectContext.runStatus }}</el-tag>
       </div>
-      <div class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+      <div v-if="showAgents" class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
         Active agents
         <span class="ml-2 text-sm font-semibold text-slate-900">
           {{ projectContext.activeAgents }}
         </span>
       </div>
-      <el-button type="danger" plain :disabled="!canPause" :loading="pausing" @click="pauseRun">
+      <el-button
+        v-if="showStop"
+        type="danger"
+        plain
+        :disabled="!canPause"
+        :loading="pausing"
+        @click="pauseRun"
+      >
         Emergency Stop
+      </el-button>
+      <el-button v-if="showEnterMc" type="primary" @click="goToRun">
+        Enter Mission Control
       </el-button>
     </div>
   </div>
@@ -63,10 +73,31 @@ const router = useRouter();
 type RecentProject = { id: string; name: string };
 const recentProjects = ref<RecentProject[]>(loadRecentProjects());
 const selectedProject = ref(projectContext.projectId);
+const route = useRouter();
 
 const canPause = computed(() =>
   Boolean(projectContext.latestRunId) && projectContext.runStatus === "RUNNING"
 );
+
+const hasProject = computed(() => Boolean(projectContext.projectId));
+const hasRun = computed(() => Boolean(projectContext.latestRunId));
+const inMissionControl = computed(() => route.currentRoute.value.name === "mission-control");
+
+const headerLabel = computed(() => {
+  if (!hasProject.value) return "Workspace";
+  if (inMissionControl.value) return "Mission Control";
+  return "Project";
+});
+
+const titleText = computed(() => {
+  if (!hasProject.value) return "Agentic SDLC";
+  if (inMissionControl.value) return projectContext.projectName || "Project";
+  return projectContext.projectName || "Project";
+});
+
+const showAgents = computed(() => inMissionControl.value && hasRun.value);
+const showStop = computed(() => inMissionControl.value && projectContext.runStatus !== "IDLE");
+const showEnterMc = computed(() => hasProject.value && !inMissionControl.value && hasRun.value);
 
 const runTagType = computed(() => {
   if (projectContext.runStatus === "RUNNING") return "warning";
@@ -100,6 +131,11 @@ function projectLabel(project: RecentProject) {
 function switchProject(id: string | number | null) {
   if (!id) return;
   router.push(`/projects/${id}`);
+}
+
+function goToRun() {
+  if (!projectContext.projectId || !projectContext.latestRunId) return;
+  router.push(`/projects/${projectContext.projectId}/run`);
 }
 
 async function pauseRun() {

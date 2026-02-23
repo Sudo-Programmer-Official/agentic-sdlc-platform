@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       IMAGE_NAME: ${{ secrets.ECR_WEB_REPOSITORY }}
-      VITE_API_BASE: ${{ secrets.VITE_API_BASE || '/api/v1' }}
+      VITE_API_BASE: ${{ secrets.VITE_API_BASE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,10 +51,10 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --load \
-            --build-arg VITE_API_BASE="${VITE_API_BASE}" \
+            --build-arg VITE_API_BASE="${VITE_API_BASE:-/api/v1}" \
             -t ${IMAGE_NAME}:${GITHUB_SHA} \
             -t ${IMAGE_NAME}:latest \
-            -f Dockerfile \
+            -f apps/web/Dockerfile \
             apps/web
 
       - name: Push web image

@@ -1,0 +1,119 @@
+name: Deploy Monorepo to ECS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  detect-changes:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.filter.outputs.web }}
+      api: ${{ steps.filter.outputs.api }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            web:
+              - 'apps/web/**'
+            api:
+              - 'apps/api/**'
+
+  deploy-web:
+    name: Build & Deploy Web
+    needs: detect-changes
+    if: needs.detect-changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ${{ secrets.ECR_WEB_REPOSITORY }}
+      VITE_API_BASE: ${{ secrets.VITE_API_BASE || '/api/v1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr
+
+      - name: Build web image (linux/amd64)
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --build-arg VITE_API_BASE="${VITE_API_BASE}" \
+            -t ${IMAGE_NAME}:${GITHUB_SHA} \
+            -t ${IMAGE_NAME}:latest \
+            -f Dockerfile \
+            apps/web
+
+      - name: Push web image
+        run: |
+          REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          docker tag ${IMAGE_NAME}:${GITHUB_SHA} ${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}
+          docker tag ${IMAGE_NAME}:latest ${REGISTRY}/${IMAGE_NAME}:latest
+          docker push ${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}
+          docker push ${REGISTRY}/${IMAGE_NAME}:latest
+
+      - name: Force ECS deploy (web)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service ${{ secrets.ECS_WEB_SERVICE }} \
+            --force-new-deployment
+
+  deploy-api:
+    name: Build & Deploy API
+    needs: detect-changes
+    if: needs.detect-changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ${{ secrets.ECR_API_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr
+
+      - name: Build api image (linux/amd64)
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            -t ${IMAGE_NAME}:${GITHUB_SHA} \
+            -t ${IMAGE_NAME}:latest \
+            -f apps/api/Dockerfile \
+            .
+
+      - name: Push api image
+        run: |
+          REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          docker tag ${IMAGE_NAME}:${GITHUB_SHA} ${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}
+          docker tag ${IMAGE_NAME}:latest ${REGISTRY}/${IMAGE_NAME}:latest
+          docker push ${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}
+          docker push ${REGISTRY}/${IMAGE_NAME}:latest
+
+      - name: Force ECS deploy (api)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service ${{ secrets.ECS_API_SERVICE }} \
+            --force-new-deployment

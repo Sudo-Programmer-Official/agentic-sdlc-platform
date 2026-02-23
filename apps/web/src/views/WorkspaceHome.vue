@@ -40,7 +40,11 @@ import { useRouter } from "vue-router";
 
 import { updateProjectContext } from "../state/projectContext";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000/api/v1";
+const DEFAULT_API_BASE = import.meta.env.DEV
+  ? "http://localhost:8000/api/v1"
+  : `${window.location.origin}/api/v1`;
+
+const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
 const router = useRouter();
 const projectName = ref("");

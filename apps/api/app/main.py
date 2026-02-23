@@ -10,9 +10,9 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name)
 
-    @app.get("/health")
+    @app.get("/health", include_in_schema=False)
     def health() -> dict:
-        return {"status": "ok", "env": settings.env}
+        return {"status": "ok"}
 
     @app.on_event("startup")
     async def on_startup() -> None:

@@ -1,68 +1,124 @@
-# Architecture
+# Agentic SDLC – Architecture & Data Model (V1)
 
-## Overview
-Modular monolith with clear boundaries across frontend, backend, core domain, and agent layer.
+## Purpose
+A document‑centric, AI‑assisted software factory that keeps every project artifact traceable: Requirements → Design → Tasks → Artifacts → Approvals. This locks in control and auditability while leaving room for automated execution in later phases.
 
-## Components
-- FastAPI orchestrator
-- Vue 3 frontend
-- Core SDLC state machine and approvals
-- Bedrock agent adapter stubs
+## System Shape
+- **Frontend (apps/web)**: Vue + Vite SPA consuming `/api/v1`.
+- **Backend (apps/api)**: FastAPI service; will add PostgreSQL for persistence.
+- **Infra**: ECS Fargate + ALB; CI/CD auto‑builds and deploys on `main`.
 
-## Run Lifecycle
+## Domain Model (minimum viable)
+### Project
+- `id (uuid, pk)`
+- `name, description`
+- `status` (`INTAKE|PLAN|BUILD|TEST|RELEASE`)
+- `created_at, updated_at`
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING : create_run()
+### Document (versioned, typed)
+- `id (uuid, pk)`
+- `project_id (fk projects)`
+- `type` (`requirement|design|plan|test_plan|impl_notes`)
+- `version (int, starts at 1, increment per project_id+type)`
+- `title`
+- `body` (markdown or structured JSON)
+- `content_hash` (sha256 of body)
+- `created_by`
+- `generated_by` (`ai|human`)
+- `created_at`
+- Unique `(project_id, type, version)`
 
-    PENDING --> RUNNING : start_run()
-    RUNNING --> PAUSED : pause_run()
-    PAUSED --> RUNNING : resume_run()
+### Task
+- `id (uuid, pk)`
+- `project_id (fk projects)`
+- `document_id (fk documents)` — source document/version
+- `generated_from_document_version (int)`
+- `title, description`
+- `category` (`func|nonfunc|test|deploy`)
+- `stage` (`PLAN|BUILD|TEST`)
+- `status` (`PENDING|RUNNING|DONE|FAILED|APPROVED|REJECTED`)
+- `assignee`
+- `created_at, updated_at`
+- Index on `(project_id, status)`
 
-    RUNNING --> COMPLETED : complete_run()
-    RUNNING --> FAILED : fail_run()
-    RUNNING --> CANCELED : cancel_run()
+### ActivityLog (audit trail)
+- `id (uuid, pk)`
+- `project_id (fk projects)`
+- `entity_type` (`project|document|task|artifact|trace|approval`)
+- `entity_id`
+- `action_type` (e.g., `document.created`, `impact.preview`, `tasks.generated`)
+- `metadata` (JSONB)
+- `actor` (reserved for future auth)
+- `created_at`
 
-    COMPLETED --> [*]
-    FAILED --> [*]
-    CANCELED --> [*]
+### Artifact
+- `id (uuid, pk)`
+- `project_id (fk projects)`
+- `task_id (fk tasks)`
+- `type` (`code|doc|diagram|log`)
+- `uri` (s3/git path)
+- `checksum`
+- `created_at`
 
-    note right of PENDING
-        Run created for a specific
-        project and SDLC stage
-    end note
+### Approval
+- `id (uuid, pk)`
+- `project_id (fk projects)`
+- `target_type` (`document|task|artifact`)
+- `target_id`
+- `status` (`PENDING|APPROVED|REJECTED`)
+- `decided_by, decided_at, comment`
 
-    note right of RUNNING
-        Execution in progress
-        (agents plug in here)
-    end note
+### Trace (link anything to anything)
+- `id (uuid, pk)`
+- `from_type`, `from_id`
+- `to_type`, `to_id`
+- `rationale` (short text)
+- Use for Requirement → Task, Task → Artifact, Task → Test Plan, etc.
 
-    note bottom of PAUSED
-        Human or system can
-        pause/resume execution
-    end note
-```
+### (Soon) AgentRun
+- `id (uuid, pk)`
+- `project_id`
+- `input_document_version`
+- `status`, `started_at`, `finished_at`
+- Links to produced Tasks/Artifacts.
 
-Each autonomous execution is modeled as a Run with a deterministic lifecycle. Runs are
-explicitly created for a given project and SDLC stage and progress through well-defined
-states (Pending, Running, Paused, Completed, Failed, or Canceled). All state transitions
-are governed by the orchestrator and logged in the audit ledger, ensuring execution
-remains controllable, auditable, and interruptible before agents are added.
+## API Surface (initial)
+- `POST /projects` → create project
+- `GET /projects/{id}` → fetch project
+- `POST /projects/{id}/documents` (type + content) → creates new version
+- `GET /projects/{id}/documents?type=requirement` → latest + history
+- `POST /projects/{id}/generate-plan` → AI plan → creates Tasks + Traces
+- `GET /projects/{id}/tasks` → list/filter
+- `POST /tasks/{id}/artifacts` → attach artifact
+- `POST /approvals` → generic approval for document/task/artifact
+- `POST /projects/{id}/documents/{doc_id}/generate-tasks` → AI-assisted task generation with trace + provenance
 
-## Change Intake & Continuous Evolution
+## Data Flow (happy path)
+1) Create Project.
+2) Add Requirements Document (version 1).
+3) Call Generate Plan → tasks + traces (Requirement → Task).
+4) Execute tasks → attach artifacts; create traces Task → Artifact.
+5) Submit approvals (doc/task/artifact) → gated stage movement.
 
-ChangeRequests provide a lightweight, human-governed intake mechanism for ongoing work.
-Each request captures the source, affected area, severity, and suggested SDLC stage.
-When a change is accepted, the orchestrator routes the project back to the suggested
-stage and marks downstream stages as stale. This reuses the existing staleness mechanism
-so that no agent runs on outdated specifications. ChangeRequests never auto-run agents
-or advance stages; they make the re-planning path explicit and auditable.
+## Persistence & Migration Plan
+- Database: **PostgreSQL** (prod), SQLite acceptable for local dev.
+- ORM: SQLAlchemy 2.x with Pydantic models for I/O.
+- Migrations: Alembic with autogenerate enabled.
+- Connection settings via env: `DATABASE_URL` (e.g., `postgresql+psycopg://user:pass@host/db`).
 
-## Observability & Metrics
+## Security & Audit
+- Every write records `created_by` / `generated_by`.
+- Approvals are explicit records, not flags on entities.
+- Traces make lineage queryable for audits and reporting.
 
-Metrics are derived directly from existing state (runs, tasks, change requests, and the
-audit ledger). This keeps observability read-only and avoids new background jobs or
-external dependencies. The API exposes lightweight JSON summaries per project and run,
-including counts of active runs, open changes, stale stages, task status totals, and
-execution duration. The ledger remains the source of truth for audits, while metrics
-provide an operational view for demos and future dashboards.
+## Why this works
+- Document-first: everything starts from controlled documents.
+- Traceability: explicit Trace table keeps Requirement → Task → Artifact → Test linked.
+- Incremental: V1 delivers persistence + trace; V2 can add agent runs and execution logs without reshaping the core.
+
+## Next Implementation Steps
+1) Add DB dependency (`sqlalchemy`, `alembic`, `psycopg[binary]`) to API.
+2) Create models + Alembic migrations for tables above.
+3) Add DB session dependency in FastAPI.
+4) Implement project/document/task endpoints using the new models.
+5) Wire UI Workspace to real endpoints (create/open project, list tasks, show document versions and traces).

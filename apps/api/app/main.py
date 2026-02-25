@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.routes import router as v1_router
 from app.api.v1.persistence import router as store_router
@@ -18,6 +19,18 @@ from app.core.config import get_settings
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name)
+
+    # CORS (frontend at prompt2pr.com calls api.prompt2pr.com)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "https://www.prompt2pr.com",
+            "https://prompt2pr.com",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health", include_in_schema=False)
     def health() -> dict:

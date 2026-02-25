@@ -14,7 +14,7 @@ ENV VITE_API_BASE=${VITE_API_BASE}
 RUN npm run build
 
 # Serve with nginx
-FROM nginx:alpine
+FROM 495849799931.dkr.ecr.us-east-1.amazonaws.com/base-nginx:alpine
 
 RUN rm /etc/nginx/conf.d/default.conf
 COPY nginx.conf /etc/nginx/conf.d/default.conf

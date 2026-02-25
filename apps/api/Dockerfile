@@ -17,6 +17,11 @@ COPY core/pyproject.toml core/pyproject.toml
 COPY core/src core/src
 RUN pip install --no-cache-dir --prefix=/install /app/core
 
+# --- Install agent package (runtime adapters used by API) ---
+COPY agent/pyproject.toml agent/pyproject.toml
+COPY agent/src agent/src
+RUN pip install --no-cache-dir --prefix=/install /app/agent
+
 # --- Install API package ---
 COPY apps/api/pyproject.toml api/pyproject.toml
 COPY apps/api /app/api
@@ -40,6 +45,8 @@ COPY --from=builder /install /usr/local
 # Optional: include source for debugging / migrations
 COPY apps/api/app /app/app
 COPY core /app/core
+# Optional: include agent assets (e.g., prompts)
+COPY agent /app/agent
 
 EXPOSE 8000
 

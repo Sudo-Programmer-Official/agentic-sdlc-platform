@@ -204,7 +204,55 @@ ALB target group and ECS service target group must match.
 
 ⸻
 
-🔎 10️⃣ Verification Checklist
+⚠️ 10️⃣ Architecture Mismatch (Apple Silicon Warning)
+
+Problem
+
+When building Docker images on Apple Silicon (M1/M2/M3), Docker defaults to:
+
+linux/arm64
+
+However:
+	•	GitHub Actions runners use linux/amd64
+	•	ECS Fargate uses linux/amd64
+
+If an ARM image is pushed to ECR and used in CI or ECS, deployment will fail with:
+
+exec format error
+InvalidBaseImagePlatform
+
+Solution
+
+Always build production images for linux/amd64.
+
+Example:
+
+docker buildx build \
+  --platform linux/amd64 \
+  -t <image> \
+  --push .
+
+To verify architecture:
+
+docker manifest inspect <image>
+
+Ensure:
+
+"architecture": "amd64"
+
+Rule
+
+All ECS production images must be linux/amd64.
+
+Extra Safeguard
+
+Force platform in Dockerfile to prevent regressions:
+
+FROM --platform=linux/amd64 nginx:alpine
+
+⸻
+
+🔎 11️⃣ Verification Checklist
 
 When debugging 503 in future:
 	1.	ALB listener forwarding correct target group
@@ -216,7 +264,7 @@ When debugging 503 in future:
 
 ⸻
 
-📈 11️⃣ Production Improvements (Next Level)
+📈 12️⃣ Production Improvements (Next Level)
 
 Future upgrades:
 
@@ -231,7 +279,7 @@ Future upgrades:
 
 ⸻
 
-🧾 12️⃣ Suggested Repo Structure for Infra Docs
+🧾 13️⃣ Suggested Repo Structure for Infra Docs
 
 Create in repo:
 

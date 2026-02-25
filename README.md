@@ -48,3 +48,7 @@ These examples demonstrate:
 
 This document-first approach allows requirement issues to be identified and resolved before
 design or implementation begins, reducing downstream rework.
+
+source apps/api/.venv/bin/activate
+python -m pip install -e core -e agent -e apps/api
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --app-dir apps/api

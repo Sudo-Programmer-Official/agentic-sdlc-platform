@@ -27,7 +27,6 @@ SessionLocal = async_sessionmaker(
 )
 
 
-@contextlib.asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency for DB session."""
     async with SessionLocal() as session:

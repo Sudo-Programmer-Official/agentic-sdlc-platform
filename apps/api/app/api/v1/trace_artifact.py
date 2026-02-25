@@ -4,17 +4,20 @@ import uuid
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Project, Task, Document, Artifact, Trace, Approval
 from app.db.session import get_session
+from app.core.config import get_settings
+from app.api.v1.health import project_health
 from app.schemas.trace import TraceCreate, TraceOut
 from app.schemas.artifact import ArtifactCreate, ArtifactOut
 from app.schemas.approval import ApprovalCreate, ApprovalOut
 from app.schemas.graph import GraphResult, GraphNode, GraphEdge
 from app.schemas.provenance import Provenance
 from app.schemas.explain import ExplainTaskResponse
+from app.schemas.persistence import DocumentOut, TaskOut
 
 router = APIRouter(prefix="/store", tags=["store-graph"])
 

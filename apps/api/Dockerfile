@@ -1,21 +1,26 @@
-# ---------- Builder ----------
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install build deps for crypto
+# Build deps for crypto, wheels
 RUN apt-get update && apt-get install -y \
     build-essential \
     libssl-dev \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only dependency files first (better caching)
-COPY apps/api/pyproject.toml /app/pyproject.toml
-
-# Install dependencies
+# Upgrade pip once
 RUN pip install --upgrade pip
-RUN pip install --prefix=/install .
+
+# --- Install core package (needed by API) ---
+COPY core/pyproject.toml core/pyproject.toml
+COPY core/src core/src
+RUN pip install --no-cache-dir --prefix=/install /app/core
+
+# --- Install API package ---
+COPY apps/api/pyproject.toml api/pyproject.toml
+COPY apps/api /app/api
+RUN pip install --no-cache-dir --prefix=/install /app/api
 
 # ---------- Runtime ----------
 FROM python:3.11-slim AS runtime
@@ -29,10 +34,10 @@ RUN apt-get update && apt-get install -y \
     libffi8 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed packages
+# Installed python packages
 COPY --from=builder /install /usr/local
 
-# Copy app source
+# Optional: include source for debugging / migrations
 COPY apps/api/app /app/app
 COPY core /app/core
 

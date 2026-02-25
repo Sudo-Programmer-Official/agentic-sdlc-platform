@@ -20,13 +20,12 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name)
 
-    # CORS (frontend at prompt2pr.com calls api.prompt2pr.com)
+    # CORS (frontend at prompt2pr.com calls api.prompt2pr.com; localhost during dev)
+    local_origin_regex = r"https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?"
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "https://www.prompt2pr.com",
-            "https://prompt2pr.com",
-        ],
+        allow_origins=settings.allowed_origins,
+        allow_origin_regex=local_origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

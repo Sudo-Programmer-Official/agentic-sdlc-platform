@@ -5,7 +5,13 @@
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
+# Find the repo root that contains core/src (works both locally and in the container)
+_here = Path(__file__).resolve()
+ROOT = next(
+    (p for p in _here.parents if (p / "core" / "src").exists()),
+    _here.parent,  # fallback: app package directory
+)
+
 EXTRA_PATHS = [
     ROOT / "core" / "src",
     ROOT / "agent" / "src",

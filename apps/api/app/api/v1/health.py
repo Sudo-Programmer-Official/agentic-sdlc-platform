@@ -3,12 +3,18 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import os
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, exists, func
+from sqlalchemy import select, exists, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from app.db.models import Project, Document, Task, Trace
 from app.db.session import get_session
+from app.core.config import get_settings
 
 # Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
 router = APIRouter(prefix="/store", tags=["health"])
@@ -146,4 +152,32 @@ async def project_health(project_id: uuid.UUID, session: AsyncSession = Depends(
             "longest_chain": longest_chain,
         },
         "sample_cycles": cycles,
+    }
+
+
+def _alembic_head() -> str | None:
+    try:
+        root = Path(__file__).resolve().parents[3]  # /app
+        cfg = Config(str(root / "api" / "alembic.ini"))
+        script = ScriptDirectory.from_config(cfg)
+        return script.get_current_head()
+    except Exception:
+        return None
+
+
+@public_router.get("/health/detail")
+async def health_detail(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    settings = get_settings()
+    # DB connectivity
+    try:
+        await session.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "version": os.getenv("BUILD_VERSION", "build-2026-02-26-1"),
+        "environment": settings.env,
+        "database_connected": db_ok,
+        "alembic_head": _alembic_head(),
     }

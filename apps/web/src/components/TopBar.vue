@@ -5,11 +5,13 @@
       <div class="text-2xl font-semibold text-slate-900">
         {{ titleText }}
       </div>
-      <div class="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
-        <span>Project ID: {{ projectContext.projectId || "—" }}</span>
-        <span v-if="projectContext.updatedAt">Updated {{ projectContext.updatedAt }}</span>
-      </div>
+    <div class="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
+      <span>Project ID: {{ projectContext.projectId || "—" }}</span>
+      <span v-if="projectContext.updatedAt">Updated {{ projectContext.updatedAt }}</span>
+      <span v-if="versionText">Build {{ versionText }}</span>
+      <span v-if="envText">Env: {{ envText }}</span>
     </div>
+  </div>
     <div class="flex flex-wrap items-center gap-3">
       <el-select
         v-model="selectedProject"
@@ -73,6 +75,8 @@ const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 const error = ref("");
 const pausing = ref(false);
 const router = useRouter();
+const versionText = ref<string | null>(null);
+const envText = ref<string | null>(null);
 
 type RecentProject = { id: string; name: string };
 const recentProjects = ref<RecentProject[]>(loadRecentProjects());
@@ -184,6 +188,7 @@ async function hydrateRecentProjectsFromApi() {
 
 onMounted(() => {
   void hydrateRecentProjectsFromApi();
+  void fetchVersionInfo();
 });
 
 function loadRecentProjects(): RecentProject[] {
@@ -203,6 +208,23 @@ function saveRecentProjects(projects: RecentProject[]) {
     localStorage.setItem("recentProjects", JSON.stringify(projects));
   } catch {
     // ignore storage errors
+  }
+}
+
+async function fetchVersionInfo() {
+  const apiHost = API_BASE.replace(/\/api\/v1$/, "");
+  try {
+    const ver = await fetch(`${apiHost}/version`).then((r) => r.json());
+    versionText.value = ver?.version || null;
+  } catch {
+    versionText.value = null;
+  }
+  try {
+    const detail = await fetch(`${API_BASE}/health/detail`).then((r) => r.json());
+    envText.value = detail?.environment || null;
+    if (!versionText.value && detail?.version) versionText.value = detail.version;
+  } catch {
+    envText.value = null;
   }
 }
 </script>

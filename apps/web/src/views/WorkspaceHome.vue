@@ -42,7 +42,7 @@ import { updateProjectContext } from "../state/projectContext";
 
 const DEFAULT_API_BASE = import.meta.env.DEV
   ? "http://localhost:8000/api/v1"
-  : `${window.location.origin}/api/v1`;
+  : "https://api.prompt2pr.com/api/v1";
 
 // Use the DB-backed persistence routes under /store.
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;

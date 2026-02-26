@@ -40,6 +40,43 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
     # Structural (from health counts)
     health = await project_health(project_id, session)
     counts = health.get("counts", {})
+
+    # Empty-state short-circuit: no docs, no tasks, no traces → return neutral payload, no logging
+    docs_count = await session.scalar(
+        select(func.count()).select_from(
+            select(Document.id)
+            .where(Document.project_id == project_id, Document.deleted_at.is_(None))
+            .subquery()
+        )
+    ) or 0
+    tasks_count = await session.scalar(
+        select(func.count()).select_from(
+            select(Task.id)
+            .where(Task.project_id == project_id, Task.deleted_at.is_(None))
+            .subquery()
+        )
+    ) or 0
+    traces_count = await session.scalar(
+        select(func.count()).select_from(
+            select(Trace.id)
+            .where(Trace.project_id == project_id, Trace.deleted_at.is_(None))
+            .subquery()
+        )
+    ) or 0
+    if docs_count == 0 and tasks_count == 0 and traces_count == 0:
+        return {
+            "health_index": None,
+            "grade": None,
+            "risk_level": "UNKNOWN",
+            "structural_score": None,
+            "stability_score": None,
+            "confidence_score": None,
+            "governance_score": None,
+            "counts": counts,
+            "regen_count": 0,
+            "supersede_depth": 0,
+            "warnings": ["No documents, tasks, or traces yet; generate requirements and tasks first."],
+        }
     structural_penalty = (
         counts.get("cycles", 0) * 10
         + counts.get("orphan_tasks", 0) * 2

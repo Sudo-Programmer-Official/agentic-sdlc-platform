@@ -59,7 +59,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onMounted } from "vue";
 import { useRouter } from "vue-router";
 
 import StageBadge from "./StageBadge.vue";
@@ -163,6 +163,28 @@ async function pauseRun() {
     pausing.value = false;
   }
 }
+
+async function hydrateRecentProjectsFromApi() {
+  try {
+    const resp = await fetch(`${API_BASE}/store/projects`);
+    if (!resp.ok) return;
+    const data: { id: string; name: string }[] = await resp.json();
+    const merged = [...data, ...recentProjects.value]
+      .filter((p) => p && p.id)
+      .reduce<RecentProject[]>((acc, p) => {
+        if (!acc.find((x) => x.id === p.id)) acc.push({ id: p.id, name: p.name || "Project" });
+        return acc;
+      }, []);
+    recentProjects.value = merged.slice(0, 10);
+    saveRecentProjects(recentProjects.value);
+  } catch {
+    // ignore fetch errors; local recent list still works
+  }
+}
+
+onMounted(() => {
+  void hydrateRecentProjectsFromApi();
+});
 
 function loadRecentProjects(): RecentProject[] {
   try {

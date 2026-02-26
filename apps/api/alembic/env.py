@@ -1,11 +1,25 @@
 import asyncio
 import os
+import sys
+from pathlib import Path
 from logging.config import fileConfig
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
+
+# Ensure local packages are importable when running Alembic from CLI
+ROOT = Path(__file__).resolve().parents[2]
+EXTRA = [
+    ROOT / "apps" / "api",
+    ROOT / "core" / "src",
+    ROOT / "agent" / "src",
+]
+for path in EXTRA:
+    p = str(path)
+    if path.exists() and p not in sys.path:
+        sys.path.insert(0, p)
 
 from app.db.base import Base  # noqa: F401
 from app.db import models  # noqa: F401

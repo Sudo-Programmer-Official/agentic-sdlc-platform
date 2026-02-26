@@ -10,10 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Project, ActivityLog
 from app.db.session import get_session
 
+# Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
 router = APIRouter(prefix="/store", tags=["lifecycle"])
+public_router = APIRouter(tags=["lifecycle"])
 
 
 @router.get("/projects/{project_id}/lifecycle-score-history")
+@public_router.get("/projects/{project_id}/lifecycle-score-history")
 async def lifecycle_score_history(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> List[dict[str, Any]]:
     project = await session.get(Project, project_id)
     if not project:

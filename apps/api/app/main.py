@@ -14,9 +14,9 @@ from app.api.v1.generation import router as gen_router
 from app.api.v1.impact import router as impact_router
 from app.api.v1.activity import router as activity_router
 from app.api.v1.snapshot import router as snapshot_router
-from app.api.v1.health import router as health_router
-from app.api.v1.lifecycle_score import router as lifecycle_router
-from app.api.v1.lifecycle_history import router as lifecycle_history_router
+from app.api.v1.health import router as health_router, public_router as public_health_router
+from app.api.v1.lifecycle_score import router as lifecycle_router, public_router as public_lifecycle_router
+from app.api.v1.lifecycle_history import router as lifecycle_history_router, public_router as public_lifecycle_history_router
 from app.core.config import get_settings
 
 
@@ -62,9 +62,13 @@ def create_app() -> FastAPI:
     app.include_router(impact_router, prefix=settings.api_prefix)
     app.include_router(activity_router, prefix=settings.api_prefix)
     app.include_router(snapshot_router, prefix=settings.api_prefix)
+    # Legacy /store/... and public /projects/... routes
     app.include_router(health_router, prefix=settings.api_prefix)
+    app.include_router(public_health_router, prefix=settings.api_prefix)
     app.include_router(lifecycle_router, prefix=settings.api_prefix)
+    app.include_router(public_lifecycle_router, prefix=settings.api_prefix)
     app.include_router(lifecycle_history_router, prefix=settings.api_prefix)
+    app.include_router(public_lifecycle_history_router, prefix=settings.api_prefix)
     return app
 
 

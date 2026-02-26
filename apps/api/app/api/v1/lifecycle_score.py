@@ -7,13 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Project, Document, Task, Trace, Approval
+from app.db.models import Project, Document, Task, Trace, Approval, ActivityLog
 from app.db.session import get_session
 from app.api.v1.health import project_health
 from app.services.activity_log import log_activity
 from datetime import datetime, timedelta
 
+# Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
 router = APIRouter(prefix="/store", tags=["lifecycle"])
+public_router = APIRouter(tags=["lifecycle"])
 
 
 def grade(score: float) -> str:
@@ -29,6 +31,7 @@ def grade(score: float) -> str:
 
 
 @router.get("/projects/{project_id}/lifecycle-score")
+@public_router.get("/projects/{project_id}/lifecycle-score")
 async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     project = await session.get(Project, project_id)
     if not project:

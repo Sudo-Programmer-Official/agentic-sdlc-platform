@@ -10,10 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Project, Document, Task, Trace
 from app.db.session import get_session
 
+# Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
 router = APIRouter(prefix="/store", tags=["health"])
+public_router = APIRouter(tags=["health"])
 
 
 @router.get("/projects/{project_id}/health")
+@public_router.get("/projects/{project_id}/health")
 async def project_health(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     project = await session.get(Project, project_id)
     if not project:

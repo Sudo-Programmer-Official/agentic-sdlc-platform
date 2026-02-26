@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
@@ -11,7 +12,6 @@ from app.db.models import Project, Document, Task, Trace, Approval, ActivityLog
 from app.db.session import get_session
 from app.api.v1.health import project_health
 from app.services.activity_log import log_activity
-from datetime import datetime, timedelta
 
 # Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
 router = APIRouter(prefix="/store", tags=["lifecycle"])
@@ -155,7 +155,10 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
         last_score = last_log.extra_metadata.get("health_index") if last_log.extra_metadata else None
         last_time = last_log.created_at
         if last_score is not None and abs(last_score - health_index) <= 1 and last_time:
-            if datetime.utcnow() - last_time < timedelta(minutes=10):
+            # Normalise to aware datetimes to avoid naive/aware subtraction errors
+            now = datetime.now(timezone.utc)
+            last_ts = last_time if last_time.tzinfo else last_time.replace(tzinfo=timezone.utc)
+            if now - last_ts < timedelta(minutes=10):
                 should_log = False
 
     if should_log:

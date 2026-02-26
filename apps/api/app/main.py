@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.routes import router as v1_router
-from app.api.v1.persistence import router as store_router
+from app.api.v1.persistence import router as store_router, public_router as public_store_router
 from app.api.v1.trace_artifact import router as trace_router
 from app.api.v1.generation import router as gen_router
 from app.api.v1.impact import router as impact_router
@@ -57,6 +57,7 @@ def create_app() -> FastAPI:
 
     app.include_router(v1_router, prefix=settings.api_prefix)
     app.include_router(store_router, prefix=settings.api_prefix)
+    app.include_router(public_store_router, prefix=settings.api_prefix)
     app.include_router(trace_router, prefix=settings.api_prefix)
     app.include_router(gen_router, prefix=settings.api_prefix)
     app.include_router(impact_router, prefix=settings.api_prefix)

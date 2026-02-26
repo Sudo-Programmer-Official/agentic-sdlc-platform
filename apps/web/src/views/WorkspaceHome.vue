@@ -44,6 +44,7 @@ const DEFAULT_API_BASE = import.meta.env.DEV
   ? "http://localhost:8000/api/v1"
   : `${window.location.origin}/api/v1`;
 
+// Use the DB-backed persistence routes under /store.
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
 const router = useRouter();
@@ -61,7 +62,7 @@ async function createProject() {
   error.value = "";
   loading.value = true;
   try {
-    const response = await fetch(`${API_BASE}/projects`, {
+    const response = await fetch(`${API_BASE}/store/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

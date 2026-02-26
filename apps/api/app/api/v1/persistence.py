@@ -20,10 +20,13 @@ from app.schemas.persistence import (
 from app.services.activity_log import log_activity
 
 
+# Legacy store prefix (DB-backed) and public projects prefix to align with UI.
 router = APIRouter(prefix="/store", tags=["store"])
+public_router = APIRouter(tags=["projects"])
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
+@public_router.post("/projects", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 async def create_project(payload: ProjectCreate, session: AsyncSession = Depends(get_session)) -> ProjectOut:
     async with session.begin():
         project = Project(name=payload.name, description=payload.description)
@@ -42,6 +45,7 @@ async def create_project(payload: ProjectCreate, session: AsyncSession = Depends
 
 
 @router.get("/projects", response_model=List[ProjectOut])
+@public_router.get("/projects", response_model=List[ProjectOut])
 async def list_projects(session: AsyncSession = Depends(get_session)) -> List[ProjectOut]:
     result = await session.execute(select(Project).order_by(Project.created_at.desc()))
     projects = result.scalars().all()
@@ -49,6 +53,7 @@ async def list_projects(session: AsyncSession = Depends(get_session)) -> List[Pr
 
 
 @router.get("/projects/{project_id}", response_model=ProjectOut)
+@public_router.get("/projects/{project_id}", response_model=ProjectOut)
 async def get_project(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> ProjectOut:
     project = await session.get(Project, project_id)
     if not project:
@@ -57,6 +62,11 @@ async def get_project(project_id: uuid.UUID, session: AsyncSession = Depends(get
 
 
 @router.post(
+    "/projects/{project_id}/documents",
+    response_model=DocumentOut,
+    status_code=status.HTTP_201_CREATED,
+)
+@public_router.post(
     "/projects/{project_id}/documents",
     response_model=DocumentOut,
     status_code=status.HTTP_201_CREATED,
@@ -109,6 +119,7 @@ async def create_document(
 
 
 @router.get("/projects/{project_id}/tasks", response_model=List[TaskOut])
+@public_router.get("/projects/{project_id}/tasks", response_model=List[TaskOut])
 async def list_tasks(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> List[TaskOut]:
     project = await session.get(Project, project_id)
     if not project:
@@ -119,6 +130,11 @@ async def list_tasks(project_id: uuid.UUID, session: AsyncSession = Depends(get_
 
 
 @router.post(
+    "/projects/{project_id}/tasks",
+    response_model=TaskOut,
+    status_code=status.HTTP_201_CREATED,
+)
+@public_router.post(
     "/projects/{project_id}/tasks",
     response_model=TaskOut,
     status_code=status.HTTP_201_CREATED,

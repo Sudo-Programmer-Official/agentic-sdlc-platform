@@ -4,7 +4,7 @@ import uuid
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Project, Document, Task
@@ -18,6 +18,7 @@ from app.schemas.persistence import (
     TaskOut,
 )
 from app.services.activity_log import log_activity
+from app.api.v1.schemas import ProjectSummaryResponse, TaskCounts, ProjectMetricsResponse
 
 
 # Legacy store prefix (DB-backed) and public projects prefix to align with UI.
@@ -180,3 +181,65 @@ async def create_task(
         )
     await session.refresh(task)
     return TaskOut.model_validate(task)
+
+
+async def _task_counts(session: AsyncSession, project_id: uuid.UUID) -> TaskCounts:
+    """Aggregate task counts by status for summary/metrics."""
+    result = await session.execute(
+        select(Task.status, func.count())
+        .where(Task.project_id == project_id, Task.deleted_at.is_(None))
+        .group_by(Task.status)
+    )
+    counts = {row[0]: row[1] for row in result.all()}
+    return TaskCounts(
+        pending=counts.get("PENDING", 0),
+        running=counts.get("RUNNING", 0),
+        done=counts.get("DONE", 0),
+        failed=counts.get("FAILED", 0),
+        canceled=counts.get("CANCELED", 0),
+    )
+
+
+@router.get("/projects/{project_id}/summary", response_model=ProjectSummaryResponse)
+@public_router.get("/projects/{project_id}/summary", response_model=ProjectSummaryResponse)
+async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> ProjectSummaryResponse:
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    task_counts = await _task_counts(session, project_id)
+    # No plan/requirements/run data in persistence layer yet; return safe defaults.
+    return ProjectSummaryResponse(
+        project_id=str(project.id),
+        name=project.name,
+        current_stage=project.status,
+        latest_run=None,
+        task_counts=task_counts,
+        architecture_refresh_needed=getattr(project, "architecture_refresh_needed", False),
+        plan_refresh_needed=getattr(project, "plan_refresh_needed", False),
+        test_refresh_needed=getattr(project, "test_refresh_needed", False),
+        requirements_status=None,
+        requirements_version=None,
+        requirements_sha=None,
+        plan_exists=False,
+        plan_fresh=False,
+        plan_id=None,
+        plan_requirements_sha=None,
+        plan_created_at=None,
+    )
+
+
+@router.get("/projects/{project_id}/metrics", response_model=ProjectMetricsResponse)
+@public_router.get("/projects/{project_id}/metrics", response_model=ProjectMetricsResponse)
+async def project_metrics(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> ProjectMetricsResponse:
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # With persistence only, we don't yet track runs/changes; return zeros.
+    return ProjectMetricsResponse(
+        total_runs=0,
+        active_runs=0,
+        stale_count=0,
+        open_changes=0,
+    )

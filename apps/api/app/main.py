@@ -40,6 +40,11 @@ def create_app() -> FastAPI:
     def health() -> dict:
         return {"status": "ok"}
 
+    @app.get("/version", include_in_schema=False)
+    def version() -> dict:
+        # Update this string per deploy to confirm the running image
+        return {"version": "build-2026-02-26-1"}
+
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request, exc):
         """Log and surface a short error id for faster prod debugging."""

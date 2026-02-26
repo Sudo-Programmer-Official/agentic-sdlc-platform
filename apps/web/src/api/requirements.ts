@@ -45,11 +45,13 @@ export async function ingestPrd(projectId: string, text: string, source = "typed
 }
 
 export async function fetchProjectSummary(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/summary`);
+  // Use DB-backed persistence endpoint
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/summary`);
   return handle(resp);
 }
 
 export async function fetchPlanHistory(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/plan/history`);
+  // Use DB-backed persistence endpoint
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/plan/history`);
   return handle(resp);
 }

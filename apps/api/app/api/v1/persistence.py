@@ -18,7 +18,12 @@ from app.schemas.persistence import (
     TaskOut,
 )
 from app.services.activity_log import log_activity
-from app.api.v1.schemas import ProjectSummaryResponse, TaskCounts, ProjectMetricsResponse
+from app.api.v1.schemas import (
+    ProjectSummaryResponse,
+    TaskCounts,
+    ProjectMetricsResponse,
+    PlanHistoryResponse,
+)
 
 
 # Legacy store prefix (DB-backed) and public projects prefix to align with UI.
@@ -243,3 +248,13 @@ async def project_metrics(project_id: uuid.UUID, session: AsyncSession = Depends
         stale_count=0,
         open_changes=0,
     )
+
+
+@router.get("/projects/{project_id}/plan/history", response_model=PlanHistoryResponse)
+@public_router.get("/projects/{project_id}/plan/history", response_model=PlanHistoryResponse)
+async def plan_history(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> PlanHistoryResponse:
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    # Persistence layer does not yet store plan history; return empty list to keep UI happy.
+    return PlanHistoryResponse(project_id=str(project.id), entries=[])

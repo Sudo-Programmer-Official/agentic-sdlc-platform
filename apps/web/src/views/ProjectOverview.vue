@@ -170,7 +170,23 @@
 
     <el-dialog v-model="showImpactDialog" title="Preview Impact" width="520px">
       <div class="space-y-3">
-        <el-input v-model="impactDocId" placeholder="Document ID" />
+        <el-select
+          v-model="impactDocId"
+          placeholder="Select document"
+          filterable
+          :loading="documentsLoading"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="doc in documents"
+            :key="doc.id"
+            :label="doc.title || doc.id"
+            :value="doc.id"
+          />
+        </el-select>
+        <div v-if="!documents.length" class="text-xs text-amber-700">
+          Add a document first before previewing impact.
+        </div>
         <el-input v-model="proposedBody" type="textarea" :rows="4" placeholder="Proposed document body" />
         <el-button type="primary" :loading="impactLoading" @click="doPreviewImpact">Preview</el-button>
         <div v-if="impactResult" class="text-sm text-slate-700 space-y-1">
@@ -187,9 +203,27 @@
 
     <el-dialog v-model="showRegenDialog" title="Regenerate Tasks" width="480px">
       <div class="space-y-3">
-        <el-input v-model="regenDocId" placeholder="Document ID" />
+        <el-select
+          v-model="regenDocId"
+          placeholder="Select document"
+          filterable
+          :loading="documentsLoading"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="doc in documents"
+            :key="doc.id"
+            :label="doc.title || doc.id"
+            :value="doc.id"
+          />
+        </el-select>
+        <div v-if="!documents.length" class="text-xs text-amber-700">
+          Add a document first before regenerating tasks.
+        </div>
         <el-checkbox v-model="regenForce">Force (override existing tasks for this version)</el-checkbox>
-        <el-button type="success" :loading="regenLoading" @click="doRegenerate">Regenerate</el-button>
+        <el-button type="success" :disabled="!documents.length" :loading="regenLoading" @click="doRegenerate">
+          Regenerate
+        </el-button>
         <div v-if="regenMessage" class="text-sm text-emerald-700">{{ regenMessage }}</div>
         <div v-if="regenError" class="text-sm text-rose-600">{{ regenError }}</div>
       </div>
@@ -238,7 +272,7 @@ import { useRoute, useRouter } from "vue-router";
 import StageBadge from "../components/StageBadge.vue";
 import { projectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
-import { previewImpact, regenerateTasks, listTasks, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory } from "../api/lifecycle";
+import { previewImpact, regenerateTasks, listTasks, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments } from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -292,6 +326,8 @@ const explainTaskId = ref("");
 const explainResult = ref<any | null>(null);
 const explainError = ref("");
 const explainLoading = ref(false);
+const documents = ref<any[]>([]);
+const documentsLoading = ref(false);
 
 function goHome() {
   router.push("/");
@@ -320,7 +356,7 @@ async function doPreviewImpact() {
 
 async function doRegenerate() {
   if (!projectId.value || !regenDocId.value) {
-    regenError.value = "Project ID and Document ID required.";
+    regenError.value = "Add/select a document first.";
     return;
   }
   regenError.value = "";
@@ -344,6 +380,19 @@ async function openTasksDialog() {
     tasks.value = await listTasks(projectId.value);
   } catch (err: any) {
     tasksError.value = err?.message || "Failed to load tasks";
+  }
+}
+
+async function loadDocuments() {
+  if (!projectId.value) return;
+  documentsLoading.value = true;
+  try {
+    documents.value = await listDocuments(projectId.value);
+  } catch (err: any) {
+    regenError.value = err?.message || "Failed to load documents";
+    impactError.value = err?.message || "Failed to load documents";
+  } finally {
+    documentsLoading.value = false;
   }
 }
 
@@ -429,5 +478,6 @@ onMounted(async () => {
   await loadHealth();
   await loadLifecycleScore();
   await loadLifecycleHistory();
+  await loadDocuments();
 });
 </script>

@@ -42,6 +42,12 @@ export async function listActivity(projectId: string) {
   return resp.json();
 }
 
+export async function listDocuments(projectId: string) {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
 export async function fetchHealth(projectId: string) {
   const resp = await fetch(`${API_BASE}/store/projects/${projectId}/health`);
   if (!resp.ok) throw new Error(await resp.text());

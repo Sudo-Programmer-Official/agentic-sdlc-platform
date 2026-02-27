@@ -124,6 +124,23 @@ async def create_document(
     return DocumentOut.model_validate(document)
 
 
+@router.get("/projects/{project_id}/documents", response_model=List[DocumentOut])
+@public_router.get("/projects/{project_id}/documents", response_model=List[DocumentOut])
+async def list_documents(
+    project_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> List[DocumentOut]:
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    result = await session.execute(
+        select(Document).where(Document.project_id == project_id, Document.deleted_at.is_(None)).order_by(Document.created_at.desc())
+    )
+    docs = result.scalars().all()
+    return [DocumentOut.model_validate(d) for d in docs]
+
+
 @router.get("/projects/{project_id}/tasks", response_model=List[TaskOut])
 @public_router.get("/projects/{project_id}/tasks", response_model=List[TaskOut])
 async def list_tasks(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> List[TaskOut]:

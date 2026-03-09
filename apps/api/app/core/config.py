@@ -19,6 +19,22 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     health_regen_threshold: float = 60.0  # below this require force for regen
     health_cycles_block: bool = False  # set true to block trace creation when cycles exist
+    runtime_mode: str = "external"  # embedded | external (prod default external)
+    max_workitem_concurrency: int = 3
+    codex_model: str = "gpt-4.1"
+    codex_temperature: float = 0.1
+    codex_max_tokens: int = 1200
+    codex_timeout_seconds: int = 120
+    codex_max_context_bytes: int = 400_000
+    codex_max_write_bytes_total: int = 200_000
+    codex_redaction_enabled: bool = True
+    codex_max_run_tokens: int = 200_000
+    max_fix_attempts_per_run: int = 2
+    test_command: str = "pytest -q"
+    test_timeout_seconds: int = 180
+    test_output_max_bytes: int = 200_000
+    openai_api_key: str | None = None
+    tenancy_enforcement: bool = False
     allowed_origins: List[str] = [
         "https://www.prompt2pr.com",
         "https://prompt2pr.com",

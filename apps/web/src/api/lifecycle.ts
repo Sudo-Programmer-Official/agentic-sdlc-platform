@@ -42,8 +42,51 @@ export async function listActivity(projectId: string) {
   return resp.json();
 }
 
+export async function fetchProjectMeta(projectId: string) {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export async function updateProjectStage(projectId: string, toStage: string) {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/stage`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ to_stage: toStage })
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
 export async function listDocuments(projectId: string) {
   const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+// Runs
+export async function listRuns(projectId: string) {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/runs`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export async function createRun(projectId: string, executor = "dummy") {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ executor }),
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export async function updateRunStatus(runId: string, status: string) {
+  const resp = await fetch(`${API_BASE}/store/runs/${runId}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status })
+  });
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
@@ -62,6 +105,25 @@ export async function fetchLifecycleScore(projectId: string) {
 
 export async function fetchLifecycleScoreHistory(projectId: string) {
   const resp = await fetch(`${API_BASE}/store/projects/${projectId}/lifecycle-score-history`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+// Work items / DAG / events
+export async function listWorkItems(projectId: string, runId: string) {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/runs/${runId}/work-items`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export async function getWorkDag(runId: string) {
+  const resp = await fetch(`${API_BASE}/store/runs/${runId}/work-dag`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export async function listRunEvents(runId: string) {
+  const resp = await fetch(`${API_BASE}/store/runs/${runId}/events`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }

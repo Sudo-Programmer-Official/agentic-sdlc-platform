@@ -7,12 +7,13 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, exists, func, text
+from sqlalchemy import select, exists, func, text, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from app.db.models import Project, Document, Task, Trace
+from app.db.models import Run, WorkItem
 from app.db.session import get_session
 from app.core.config import get_settings
 
@@ -180,4 +181,123 @@ async def health_detail(session: AsyncSession = Depends(get_session)) -> dict[st
         "environment": settings.env,
         "database_connected": db_ok,
         "alembic_head": _alembic_head(),
+    }
+
+
+@public_router.get("/health/metrics")
+async def health_metrics(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    # Lightweight aggregate metrics (DB-based)
+    runs_row = (
+        await session.execute(
+            select(
+                func.count().filter(Run.status == "RUNNING"),
+                func.count().filter(Run.status == "COMPLETED"),
+                func.count().filter(Run.status == "FAILED"),
+            )
+        )
+    ).first()
+    work_items_row = (
+        await session.execute(
+            select(
+                func.count().filter(WorkItem.status == "RUNNING"),
+                func.count().filter(WorkItem.status == "DONE"),
+                func.count().filter(WorkItem.status == "FAILED"),
+                func.count().filter(WorkItem.status == "CLAIMED"),
+                func.count().filter(WorkItem.status == "QUEUED"),
+            )
+        )
+    ).first()
+
+    # Load recent runs for telemetry (limit to keep light)
+    recent_runs = (
+        await session.execute(select(Run).order_by(desc(Run.created_at)).limit(200))
+    ).scalars().all()
+    recent_run_ids = [r.id for r in recent_runs]
+    if recent_run_ids:
+        wi_rows = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id.in_(recent_run_ids))
+            )
+        ).scalars().all()
+    else:
+        wi_rows = []
+
+    # Aggregate usage and metrics in Python to avoid heavy SQL JSON manipulation
+    total_input = total_output = 0
+    tokens_per_run: dict[uuid.UUID, int] = {}
+    fix_attempts_per_run: dict[uuid.UUID, int] = {}
+    review_fail_runs: set[uuid.UUID] = set()
+    patch_guard_failures = 0
+    durations: list[float] = []
+    risk_scores: list[float] = []
+    confidences: list[float] = []
+    patch_lines: list[int] = []
+
+    for wi in wi_rows:
+        usage = (wi.result or {}).get("usage") or {}
+        it = usage.get("input_tokens") or 0
+        ot = usage.get("output_tokens") or 0
+        total_input += it
+        total_output += ot
+        tokens_per_run[wi.run_id] = tokens_per_run.get(wi.run_id, 0) + it + ot
+
+        if wi.type == "FIX_TEST_FAILURE":
+            fix_attempts_per_run[wi.run_id] = fix_attempts_per_run.get(wi.run_id, 0) + 1
+        if wi.type == "REVIEW_DIFF" and wi.status == "FAILED":
+            review_fail_runs.add(wi.run_id)
+        if wi.status == "FAILED":
+            msg = (wi.result or {}).get("message") or ""
+            if isinstance(msg, str) and (
+                "Patch too" in msg or "Patch apply" in msg or "secret_pattern_detected" in msg
+            ):
+                patch_guard_failures += 1
+        # Review metrics
+        review = (wi.result or {}).get("review") or {}
+        if isinstance(review, dict):
+            rs = review.get("risk_score")
+            cf = review.get("confidence")
+            pl = review.get("patch_lines")
+            if isinstance(rs, (int, float)):
+                risk_scores.append(float(rs))
+            if isinstance(cf, (int, float)):
+                confidences.append(float(cf))
+            if isinstance(pl, (int, float)):
+                patch_lines.append(int(pl))
+
+    for run in recent_runs:
+        if run.status == "COMPLETED" and run.finished_at and run.created_at:
+            durations.append((run.finished_at - run.created_at).total_seconds())
+
+    completed_token_totals = [tokens_per_run[r.id] for r in recent_runs if r.status == "COMPLETED" and r.id in tokens_per_run]
+
+    return {
+        "runs": {
+            "running": runs_row[0],
+            "completed": runs_row[1],
+            "failed": runs_row[2],
+        },
+        "work_items": {
+            "running": work_items_row[0],
+            "done": work_items_row[1],
+            "failed": work_items_row[2],
+            "claimed": work_items_row[3],
+            "queued": work_items_row[4],
+        },
+        "usage": {
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_input + total_output,
+            "avg_tokens_per_successful_run": (sum(completed_token_totals) / len(completed_token_totals))
+            if completed_token_totals
+            else 0,
+        },
+        "telemetry": {
+            "avg_fix_attempts_per_run": (sum(fix_attempts_per_run.values()) / len(recent_run_ids)) if recent_run_ids else 0,
+            "runs_failed_due_to_review": len(review_fail_runs),
+            "runs_failed_due_to_patch_guard": patch_guard_failures,
+            "time_to_green_avg_seconds": (sum(durations) / len(durations)) if durations else 0,
+            "avg_risk_score": (sum(risk_scores) / len(risk_scores)) if risk_scores else 0,
+            "avg_confidence": (sum(confidences) / len(confidences)) if confidences else 0,
+            "avg_patch_lines": (sum(patch_lines) / len(patch_lines)) if patch_lines else 0,
+        },
     }

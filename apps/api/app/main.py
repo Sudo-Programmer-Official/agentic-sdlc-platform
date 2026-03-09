@@ -22,6 +22,11 @@ from app.core.config import get_settings
 
 def create_app() -> FastAPI:
     settings = get_settings()
+
+    # Safety guard: external mode required outside local environments
+    if settings.env.lower() != "local" and settings.runtime_mode.lower() != "external":
+        raise RuntimeError("runtime_mode must be 'external' when env is not local.")
+
     app = FastAPI(title=settings.app_name)
     log = logging.getLogger("app")
 

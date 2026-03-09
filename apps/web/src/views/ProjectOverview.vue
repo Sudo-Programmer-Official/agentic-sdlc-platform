@@ -10,12 +10,16 @@
       </el-button>
     </div>
 
-    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div class="text-xs uppercase tracking-wide text-slate-400">Project</div>
-        <div class="mt-2 text-lg font-semibold text-slate-900">{{ projectName || "—" }}</div>
-        <div class="text-xs text-slate-500 break-all">ID: {{ projectId || "—" }}</div>
+  <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="text-xs uppercase tracking-wide text-slate-400">Project</div>
+      <div class="mt-2 text-lg font-semibold text-slate-900">{{ projectName || "—" }}</div>
+      <div class="text-xs text-slate-500 break-all">ID: {{ projectId || "—" }}</div>
+      <div class="mt-1 text-xs text-slate-500">
+        Stage: <span class="font-semibold">{{ projectStatus || "INTAKE" }}</span>
+        <span v-if="allowedTransitions.length"> · Next: {{ allowedTransitions.join(", ") }}</span>
       </div>
+    </div>
       <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="text-xs uppercase tracking-wide text-slate-400">Stage</div>
         <div class="mt-2 flex items-center gap-2 text-lg font-semibold text-slate-900">
@@ -72,7 +76,7 @@
         <div class="flex items-center justify-between">
           <div>
             <div class="text-xs uppercase tracking-wide text-slate-400">Lifecycle Score</div>
-            <div class="mt-1 text-sm font-semibold" :class="(lifecycleScore?.risk_level || 'LOW') === 'LOW' ? 'text-emerald-600' : 'text-amber-600'">
+            <div class="mt-1 text-sm font-semibold" :class="riskClass">
               {{ lifecycleScore?.health_index ?? '—' }} ({{ lifecycleScore?.grade || '—' }})
             </div>
           </div>
@@ -81,9 +85,11 @@
         <ul class="mt-2 text-xs text-slate-600 space-y-1">
           <li>Risk: {{ lifecycleScore?.risk_level || '—' }}</li>
           <li>Structural: {{ lifecycleScore?.structural_score ?? '—' }}</li>
+          <li>Execution: {{ lifecycleScore?.execution_score ?? '—' }}</li>
           <li>Stability: {{ lifecycleScore?.stability_score ?? '—' }}</li>
           <li>Confidence: {{ lifecycleScore?.confidence_score ?? '—' }}</li>
           <li>Governance: {{ lifecycleScore?.governance_score ?? '—' }}</li>
+          <li>Coverage: {{ lifecycleScore?.coverage_score ?? '—' }}</li>
           <li v-if="lifecycleScore?.warnings?.length">Warnings: {{ lifecycleScore?.warnings?.join(', ') }}</li>
           <li v-if="lifecycleError" class="text-rose-600">Error: {{ lifecycleError }}</li>
         </ul>
@@ -143,11 +149,19 @@
       <div class="text-sm uppercase tracking-wide text-slate-400">Actions</div>
       <div class="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
         <el-button @click="goHome">Switch Project</el-button>
-        <el-button :disabled="!projectId" @click="goToRun">Enter Mission Control</el-button>
+        <el-tooltip
+          content="Enter Mission Control is available in RUN stage."
+          placement="top"
+          :disabled="projectStatus === 'RUN'"
+        >
+          <el-button :disabled="!projectId || projectStatus !== 'RUN'" @click="goToRun">
+            Enter Mission Control
+          </el-button>
+        </el-tooltip>
         <el-button type="primary" plain :disabled="!projectId" @click="showImpactDialog = true">
           Preview Impact
         </el-button>
-        <el-button type="success" plain :disabled="!projectId" @click="showRegenDialog = true">
+        <el-button type="success" plain :disabled="!projectId || !documents.length" @click="showRegenDialog = true">
           Regenerate Tasks
         </el-button>
         <el-button type="info" plain :disabled="!projectId" @click="openTasksDialog">
@@ -159,6 +173,103 @@
         <el-button type="default" plain :disabled="!projectId" @click="openActivityDialog">
           Activity Log
         </el-button>
+        <div class="col-span-full grid grid-cols-3 gap-2">
+          <el-button
+            :disabled="!allowedTransitions.includes('PLAN') || stageUpdating"
+            @click="advanceStage('PLAN')"
+          >
+            Move to PLAN
+          </el-button>
+          <el-button
+            :disabled="!allowedTransitions.includes('RUN') || stageUpdating"
+            @click="advanceStage('RUN')"
+          >
+            Move to RUN
+          </el-button>
+          <el-button
+            :disabled="!allowedTransitions.includes('EVALUATE') || stageUpdating"
+            @click="advanceStage('EVALUATE')"
+          >
+            Move to EVALUATE
+          </el-button>
+        </div>
+      </div>
+      <div v-if="stageMessage" class="mt-2 text-xs text-emerald-600">{{ stageMessage }}</div>
+      <div v-if="stageError" class="mt-2 text-xs text-rose-600 whitespace-pre-line">{{ stageError }}</div>
+    </div>
+
+    <div class="grid gap-4 lg:grid-cols-3">
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
+        <div class="flex items-center justify-between">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Runs</div>
+          <div class="flex gap-2">
+            <el-select v-model="selectedExecutor" size="small" style="width: 140px" placeholder="Executor">
+              <el-option label="Dummy" value="dummy" />
+              <el-option label="Codex" value="codex" />
+            </el-select>
+            <el-button size="small" :disabled="projectStatus !== 'RUN' || runs.some(r => r.status === 'RUNNING')" @click="startRun">
+              Start Run
+            </el-button>
+            <el-button size="small" plain @click="loadRuns">Refresh</el-button>
+          </div>
+        </div>
+        <div v-if="runError" class="text-xs text-rose-600 mt-2">{{ runError }}</div>
+        <el-table :data="runs" size="small" class="mt-3" v-loading="runsLoading">
+          <el-table-column prop="id" label="Run ID" width="230" />
+          <el-table-column prop="status" label="Status" width="110" />
+          <el-table-column prop="executor" label="Executor" width="100" />
+          <el-table-column prop="started_at" label="Started" width="150" />
+          <el-table-column prop="finished_at" label="Finished" width="150" />
+          <el-table-column label="Actions" width="160">
+            <template #default="{ row }">
+              <el-button size="small" plain :disabled="!['RUNNING','QUEUED'].includes(row.status)" @click="setRunStatus(row.id, 'CANCELED')">
+                Cancel
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Lifecycle Trend</div>
+        <div class="mt-2 text-xs text-slate-500">Shows recent lifecycle scores</div>
+        <div class="mt-3 space-y-1 text-xs text-slate-700 max-h-64 overflow-auto">
+          <div v-if="!lifecycleHistory?.length" class="text-slate-500">No history yet.</div>
+          <div v-for="(item, idx) in lifecycleHistory" :key="idx" class="flex justify-between">
+            <span>{{ item.timestamp }}</span>
+            <span>{{ item.score }} ({{ item.grade || '—' }})</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid gap-4 lg:grid-cols-3">
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm lg:col-span-2">
+        <div class="flex items-center justify-between">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Work Items (latest run)</div>
+          <el-button size="small" plain @click="loadWorkItems">Refresh</el-button>
+        </div>
+        <div v-if="workItemError" class="text-xs text-rose-600 mt-2">{{ workItemError }}</div>
+        <el-table :data="workItems" size="small" class="mt-3" v-loading="workItemsLoading">
+          <el-table-column prop="id" label="ID" width="230" />
+          <el-table-column prop="type" label="Type" width="100" />
+          <el-table-column prop="status" label="Status" width="100" />
+          <el-table-column prop="executor" label="Exec" width="90" />
+          <el-table-column prop="attempt" label="Attempt" width="80" />
+          <el-table-column prop="priority" label="Priority" width="80" />
+          <el-table-column prop="updated_at" label="Updated" />
+        </el-table>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Run Events (latest)</div>
+        <div class="mt-2 text-xs text-slate-500">Recent 10</div>
+        <div class="mt-3 space-y-1 text-xs text-slate-700 max-h-64 overflow-auto">
+          <div v-if="!runEvents.length" class="text-slate-500">No events yet.</div>
+          <div v-for="(ev, idx) in runEvents.slice(-10).reverse()" :key="idx" class="flex justify-between">
+            <span>{{ ev.ts }}</span>
+            <span>{{ ev.event_type }}</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -272,7 +383,7 @@ import { useRoute, useRouter } from "vue-router";
 import StageBadge from "../components/StageBadge.vue";
 import { projectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
-import { previewImpact, regenerateTasks, listTasks, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments } from "../api/lifecycle";
+import { previewImpact, regenerateTasks, listTasks, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, listRuns, createRun, updateRunStatus } from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -328,13 +439,36 @@ const explainError = ref("");
 const explainLoading = ref(false);
 const documents = ref<any[]>([]);
 const documentsLoading = ref(false);
+const projectStatus = ref<string | null>(null);
+const allowedTransitions = ref<string[]>([]);
+const stageUpdating = ref(false);
+const stageMessage = ref("");
+const stageError = ref("");
+const runs = ref<any[]>([]);
+const runsLoading = ref(false);
+const runError = ref("");
+const selectedExecutor = ref("dummy");
+const workItems = ref<any[]>([]);
+const workItemsLoading = ref(false);
+const workItemError = ref("");
+const runEvents = ref<any[]>([]);
+const riskClass = computed(() => {
+  const risk = lifecycleScore.value?.risk_level || "UNKNOWN";
+  if (risk === "HIGH") return "text-rose-600";
+  if (risk === "MEDIUM") return "text-amber-600";
+  if (risk === "LOW") return "text-emerald-600";
+  return "text-slate-500";
+});
 
 function goHome() {
   router.push("/");
 }
 
 function goToRun() {
-  if (!projectId.value) return;
+  if (!projectId.value || projectStatus.value !== "RUN") {
+    error.value = "Enter Mission Control is available only in RUN stage.";
+    return;
+  }
   router.push(`/projects/${projectId.value}/run`);
 }
 
@@ -393,6 +527,108 @@ async function loadDocuments() {
     impactError.value = err?.message || "Failed to load documents";
   } finally {
     documentsLoading.value = false;
+  }
+}
+
+async function loadProjectMeta() {
+  if (!projectId.value) return;
+  try {
+    const meta = await fetchProjectMeta(projectId.value);
+    projectStatus.value = meta.status || null;
+    allowedTransitions.value = meta.allowed_transitions || [];
+  } catch {
+    // non-blocking
+  }
+}
+
+async function loadRuns() {
+  if (!projectId.value) return;
+  runsLoading.value = true;
+  runError.value = "";
+  try {
+    runs.value = await listRuns(projectId.value);
+    await loadWorkItems();
+    await loadRunEvents();
+  } catch (err: any) {
+    runError.value = err?.message || "Failed to load runs";
+  } finally {
+    runsLoading.value = false;
+  }
+}
+
+async function startRun() {
+  if (!projectId.value) return;
+  runError.value = "";
+  try {
+    await createRun(projectId.value, selectedExecutor.value);
+    await loadRuns();
+    await loadWorkItems();
+    await loadRunEvents();
+  } catch (err: any) {
+    runError.value = err?.message || "Failed to create run";
+  }
+}
+
+async function setRunStatus(runId: string, status: string) {
+  runError.value = "";
+  try {
+    await updateRunStatus(runId, status);
+    await loadRuns();
+    await loadWorkItems();
+    await loadRunEvents();
+    await loadLifecycleScore();
+    await loadLifecycleHistory();
+  } catch (err: any) {
+    runError.value = err?.message || "Failed to update run status";
+  }
+}
+
+async function loadWorkItems() {
+  if (!projectId.value || !runs.value.length) {
+    workItems.value = [];
+    return;
+  }
+  workItemsLoading.value = true;
+  workItemError.value = "";
+  const currentRunId = runs.value[0].id;
+  try {
+    workItems.value = await listWorkItems(projectId.value, currentRunId);
+  } catch (err: any) {
+    workItemError.value = err?.message || "Failed to load work items";
+  } finally {
+    workItemsLoading.value = false;
+  }
+}
+
+async function loadRunEvents() {
+  if (!runs.value.length) {
+    runEvents.value = [];
+    return;
+  }
+  const currentRunId = runs.value[0].id;
+  try {
+    runEvents.value = await listRunEvents(currentRunId);
+  } catch (err) {
+    // ignore
+  }
+}
+
+async function advanceStage(target: string) {
+  if (!projectId.value) return;
+  stageMessage.value = "";
+  stageError.value = "";
+  stageUpdating.value = true;
+  try {
+    const updated = await updateProjectStage(projectId.value, target);
+    projectStatus.value = updated.status;
+    allowedTransitions.value = updated.allowed_transitions || [];
+    stageMessage.value = `Stage advanced to ${updated.status}.`;
+    // refresh dependent data
+    await Promise.all([loadLifecycleScore(), loadLifecycleHistory(), loadHealth()]);
+  } catch (err: any) {
+    stageError.value = err?.message || "Failed to advance stage.";
+  } finally {
+    stageUpdating.value = false;
   }
 }
 
@@ -479,5 +715,9 @@ onMounted(async () => {
   await loadLifecycleScore();
   await loadLifecycleHistory();
   await loadDocuments();
+  await loadProjectMeta();
+  await loadRuns();
+  await loadWorkItems();
+  await loadRunEvents();
 });
 </script>

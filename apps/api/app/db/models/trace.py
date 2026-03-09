@@ -20,6 +20,7 @@ class Trace(TimestampMixin, SoftDeleteMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=False, default=uuid.UUID(int=0))
     project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
     from_type: Mapped[str] = mapped_column(String(32), nullable=False)
     from_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)

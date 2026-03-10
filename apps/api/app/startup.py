@@ -13,6 +13,12 @@ from app.core.config import Settings, get_settings
 log = logging.getLogger("app.startup")
 
 
+def _escape_ini_value(value: str) -> str:
+    # Alembic uses ConfigParser interpolation, so literal percent signs in URLs
+    # must be doubled before set_main_option().
+    return value.replace("%", "%%")
+
+
 def resolve_alembic_config_path(settings: Settings | None = None) -> Path | None:
     settings = settings or get_settings()
     if settings.alembic_config_path:
@@ -37,8 +43,8 @@ def build_alembic_config(settings: Settings | None = None) -> Config:
         raise RuntimeError("Alembic config file not found; cannot apply startup migrations.")
 
     cfg = Config(str(config_path))
-    cfg.set_main_option("script_location", str(config_path.parent / "alembic"))
-    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    cfg.set_main_option("script_location", _escape_ini_value(str(config_path.parent / "alembic")))
+    cfg.set_main_option("sqlalchemy.url", _escape_ini_value(settings.database_url))
     return cfg
 
 

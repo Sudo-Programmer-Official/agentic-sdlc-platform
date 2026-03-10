@@ -38,6 +38,19 @@ async def test_run_startup_migrations_invokes_alembic_upgrade(monkeypatch, tmp_p
     }
 
 
+def test_build_alembic_config_preserves_percent_encoded_database_urls(monkeypatch, tmp_path):
+    alembic_ini = tmp_path / "alembic.ini"
+    alembic_ini.write_text("[alembic]\nscript_location = alembic\n", encoding="utf-8")
+
+    database_url = "postgresql+asyncpg://postgres:DevPassword123%21@db.example.com:5432/app?ssl=require"
+    monkeypatch.setenv("ALEMBIC_CONFIG_PATH", str(alembic_ini))
+    monkeypatch.setenv("DATABASE_URL", database_url)
+
+    cfg = startup.build_alembic_config()
+
+    assert cfg.get_main_option("sqlalchemy.url") == database_url
+
+
 @pytest.mark.anyio
 async def test_run_startup_migrations_is_noop_when_disabled(monkeypatch):
     called = False

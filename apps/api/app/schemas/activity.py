@@ -11,10 +11,10 @@ class ActivityOut(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
     entity_type: str
-    entity_id: Optional[uuid.UUID]
+    entity_id: Optional[uuid.UUID] = None
     action_type: str
-    metadata: Optional[dict]
-    actor: Optional[str]
+    metadata: Optional[dict] = None
+    actor: Optional[str] = None
     created_at: datetime
 
     class Config:

@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir --prefix=/install /app/api
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1
+ENV RUN_MIGRATIONS_ON_STARTUP=1
 WORKDIR /app
 
 # Runtime libs for crypto
@@ -44,6 +45,8 @@ COPY --from=builder /install /usr/local
 
 # Optional: include source for debugging / migrations
 COPY apps/api/app /app/app
+COPY apps/api/alembic /app/api/alembic
+COPY apps/api/alembic.ini /app/api/alembic.ini
 COPY core /app/core
 # Optional: include agent assets (e.g., prompts)
 COPY agent /app/agent

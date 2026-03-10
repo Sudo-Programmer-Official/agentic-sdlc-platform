@@ -51,7 +51,10 @@ docker push $ECR_WEB:latest && docker push $ECR_WEB:v1 && docker push $ECR_WEB:$
   - **API task**: container `agentic-sdlc-api`, image `$ECR_API:<tag>`, port 8000, CPU/Memory per your load, health check path `/health`.
   - **Web task**: container `agentic-sdlc-web`, image `$ECR_WEB:<tag>`, port 80.
 - Set environment variables via task definition or SSM:
-  - `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_ALLOWED_ORG`, `VITE_API_BASE` (only used at build time; not required at runtime for the static web).
+  - API runtime: `DATABASE_URL`, `OPENAI_API_KEY`, `ENV=production`, `RUN_MIGRATIONS_ON_STARTUP=1` as needed for your rollout strategy.
+  - GitHub integration: `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_ALLOWED_ORG`.
+  - Web build only: `VITE_API_BASE` (only used at build time; not required at runtime for the static web).
+  - Prefer AWS Secrets Manager or SSM Parameter Store for secrets such as `OPENAI_API_KEY` and database credentials instead of baking them into images or committing `.env` files.
 - Create an Application Load Balancer:
   - Target group for API (HTTP 8000) with health check path `/health`, matcher 200.
   - (Optional) Target group for Web if you want to front it with ALB instead of CloudFront/S3.
@@ -69,7 +72,12 @@ docker compose up --build
 # API: http://localhost:8000/health
 ```
 
-## 7) Image Tagging Strategy
+## 7) Troubleshooting
+- A local `.env` file is not shipped to ECS automatically. Set runtime secrets on the ECS task definition or inject them from Secrets Manager/SSM.
+- `POST /api/v1/store/projects` is database-backed. A `500` on that route usually points to DB connectivity, migrations, or task env configuration, not to a missing `OPENAI_API_KEY`.
+- Use `GET /api/v1/health/detail` to confirm whether the running task can reach the database before debugging OpenAI-related flows.
+
+## 8) Image Tagging Strategy
 - `:latest` — mutable dev/staging tag
 - `:v1` — stable major line for pinned ECS services
 - `:<git-sha>` — immutable for rollbacks/audits

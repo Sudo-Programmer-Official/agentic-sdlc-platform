@@ -18,6 +18,7 @@ from app.api.v1.health import router as health_router, public_router as public_h
 from app.api.v1.lifecycle_score import router as lifecycle_router, public_router as public_lifecycle_router
 from app.api.v1.lifecycle_history import router as lifecycle_history_router, public_router as public_lifecycle_history_router
 from app.core.config import get_settings
+from app.startup import run_startup_migrations
 
 
 def create_app() -> FastAPI:
@@ -31,11 +32,12 @@ def create_app() -> FastAPI:
     log = logging.getLogger("app")
 
     # CORS (frontend at prompt2pr.com calls api.prompt2pr.com; localhost during dev)
+    prompt2pr_origin_regex = r"https://(www\\.)?prompt2pr\\.com"
     local_origin_regex = r"https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?"
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
-        allow_origin_regex=local_origin_regex,
+        allow_origin_regex=f"{prompt2pr_origin_regex}|{local_origin_regex}",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -62,8 +64,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def on_startup() -> None:
-        # Placeholder for startup hooks (DB connections, caches, etc.)
-        return None
+        await run_startup_migrations()
 
     app.include_router(v1_router, prefix=settings.api_prefix)
     app.include_router(store_router, prefix=settings.api_prefix)

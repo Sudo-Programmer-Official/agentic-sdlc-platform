@@ -138,6 +138,7 @@ Total deploy time: ~1–2 minutes.
 Currently configured inside ECS:
 
 DATABASE_URL
+OPENAI_API_KEY
 
 Future improvement:
 	•	Move secrets to AWS Secrets Manager

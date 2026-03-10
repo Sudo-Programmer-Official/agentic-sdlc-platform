@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     test_output_max_bytes: int = 200_000
     openai_api_key: str | None = None
     tenancy_enforcement: bool = False
+    run_migrations_on_startup: bool = False
+    alembic_config_path: str | None = None
     allowed_origins: List[str] = [
         "https://www.prompt2pr.com",
         "https://prompt2pr.com",

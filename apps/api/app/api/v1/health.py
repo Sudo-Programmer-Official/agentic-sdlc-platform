@@ -4,7 +4,6 @@ import uuid
 from typing import Any
 
 import os
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, exists, func, text, desc
@@ -16,6 +15,7 @@ from app.db.models import Project, Document, Task, Trace
 from app.db.models import Run, WorkItem
 from app.db.session import get_session
 from app.core.config import get_settings
+from app.startup import resolve_alembic_config_path
 
 # Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
 router = APIRouter(prefix="/store", tags=["health"])
@@ -158,8 +158,11 @@ async def project_health(project_id: uuid.UUID, session: AsyncSession = Depends(
 
 def _alembic_head() -> str | None:
     try:
-        root = Path(__file__).resolve().parents[3]  # /app
-        cfg = Config(str(root / "api" / "alembic.ini"))
+        config_path = resolve_alembic_config_path()
+        if config_path is None:
+            return None
+        cfg = Config(str(config_path))
+        cfg.set_main_option("script_location", str(config_path.parent / "alembic"))
         script = ScriptDirectory.from_config(cfg)
         return script.get_current_head()
     except Exception:

@@ -9,17 +9,37 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
-# Ensure local packages are importable when running Alembic from CLI
-ROOT = Path(__file__).resolve().parents[2]
-EXTRA = [
-    ROOT / "apps" / "api",
-    ROOT / "core" / "src",
-    ROOT / "agent" / "src",
-]
-for path in EXTRA:
-    p = str(path)
-    if path.exists() and p not in sys.path:
-        sys.path.insert(0, p)
+
+def _bootstrap_local_packages() -> None:
+    """Support Alembic runs from both repo root and apps/api."""
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[1],  # .../apps/api
+        here.parents[3],  # repo root
+    ]
+    ordered_paths: list[Path] = []
+    seen: set[str] = set()
+
+    for root in candidates:
+        for path in (
+            root,
+            root / "apps" / "api",
+            root / "core" / "src",
+            root / "agent" / "src",
+        ):
+            path_str = str(path)
+            if not path.exists() or path_str in seen:
+                continue
+            ordered_paths.append(path)
+            seen.add(path_str)
+
+    for path in reversed(ordered_paths):
+        path_str = str(path)
+        if path_str not in sys.path:
+            sys.path.insert(0, path_str)
+
+
+_bootstrap_local_packages()
 
 from app.db.base import Base  # noqa: F401
 from app.db import models  # noqa: F401

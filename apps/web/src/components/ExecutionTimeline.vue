@@ -281,7 +281,12 @@ function deriveWaitingStep(tasks: Array<any>, runStatus?: string, currentStage?:
   const running = tasks.filter((task) => task.status === "RUNNING");
   const failed = tasks.filter((task) => task.status === "FAILED");
   const tasksById = new Map(tasks.map((task) => [task.task_id, task.status]));
+  const dependencyCount = (task: any) =>
+    Array.isArray(task.depends_on) && task.depends_on.length > 0
+      ? task.depends_on.length
+      : Number(task.depends_on_count || 0);
   const ready = pending.filter((task) =>
+    dependencyCount(task) === 0 ||
     (task.depends_on || []).every((dep: string) => tasksById.get(dep) === "DONE")
   );
 
@@ -314,13 +319,16 @@ function deriveWaitingStep(tasks: Array<any>, runStatus?: string, currentStage?:
         }
       });
     });
+    const blockedCount = pending.filter((task) => dependencyCount(task) > 0).length;
     const depsList = Array.from(blockedDeps).slice(0, 3).join(", ");
     return {
       timestamp: "Now",
       title: "Waiting for dependencies",
       because: depsList
         ? `No tasks started because dependencies are incomplete: ${depsList}.`
-        : "No tasks started because dependencies are incomplete.",
+        : blockedCount === pending.length
+          ? "No tasks started because upstream work is still in progress."
+          : "No tasks started because dependencies are incomplete.",
       next: "Complete dependency tasks or adjust the plan.",
       kind: "WAITING"
     };

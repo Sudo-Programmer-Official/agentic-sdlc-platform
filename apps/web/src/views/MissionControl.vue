@@ -1,263 +1,332 @@
 <template>
-  <div v-if="hasActiveRun" class="space-y-6">
+  <div v-if="hasRun" class="space-y-6">
     <div>
       <h1 class="text-3xl font-semibold text-slate-900">Mission Control</h1>
       <p class="text-slate-600">
-        Monitor the SDLC stage, control execution, and keep full audit visibility.
+        Watch the active runtime, inspect agent steps, and follow execution as it happens.
       </p>
     </div>
 
     <el-alert
-      v-if="summary && summary.plan_exists && !summary.plan_fresh"
+      v-if="lifecycleWarnings.length"
       type="warning"
       show-icon
       :closable="false"
-      title="Plan is stale"
-      description="Requirements changed since the plan was generated. Regenerate the plan before executing runs."
+      title="Runtime warnings"
+      :description="lifecycleWarnings.join(' · ')"
       class="shadow-sm"
-    >
-      <template #default>
-        <div class="flex items-center gap-3 text-sm">
-          <span>Plan outdated. Regenerate to continue.</span>
-          <el-button size="small" type="primary" :loading="regenerating" @click="regeneratePlan">
-            Regenerate Plan
-          </el-button>
-        </div>
-      </template>
-    </el-alert>
+    />
 
     <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div class="text-sm uppercase tracking-wide text-slate-400">Project Controls</div>
+          <div class="text-sm uppercase tracking-wide text-slate-400">Runtime Controls</div>
           <div class="text-xs text-slate-500">
-            Refresh status, execute bounded tasks, or switch projects.
+            Refresh the latest run, cancel it if needed, or jump back to the project overview.
           </div>
         </div>
-        <div class="flex items-center gap-2">
-          <span class="text-xs uppercase tracking-wide text-slate-400">Advanced Mode</span>
-          <el-switch v-model="advancedMode" />
+        <div class="flex flex-wrap items-center gap-2">
+          <el-button :loading="loading" @click="loadAll">Refresh</el-button>
+          <el-button type="danger" plain :disabled="!cancelEnabled" @click="cancelLatestRun">
+            Cancel Run
+          </el-button>
+          <el-button @click="goToOverview">Project Overview</el-button>
         </div>
       </div>
-      <div class="mt-4 flex flex-wrap items-center gap-3">
-        <div class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+      <div class="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+        <div class="rounded-lg bg-slate-50 px-3 py-2">
           Project ID
           <span class="ml-2 font-mono text-slate-900">{{ projectId || "—" }}</span>
         </div>
-        <el-button :loading="loading" @click="loadAll">Refresh Overview</el-button>
-        <el-button :disabled="!summary?.latest_run || !planReady" @click="executeTasks">
-          Execute Tasks
-        </el-button>
-        <el-button @click="goToOverview">Switch Project</el-button>
-        <span v-if="error" class="text-sm text-rose-600">{{ error }}</span>
-      </div>
-    </div>
-
-  <div v-if="summary" class="grid gap-4 md:grid-cols-4">
-    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="text-xs uppercase tracking-wide text-slate-400">Stage</div>
-      <div class="mt-2 flex items-center gap-2 text-lg font-semibold text-slate-900">
-        <StageBadge :label="summary.current_stage" />
-        <span>{{ summary.current_stage }}</span>
-      </div>
-      <div class="mt-1 text-xs text-slate-500">Project: {{ summary.name }}</div>
-    </div>
-    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="text-xs uppercase tracking-wide text-slate-400">Plan Status</div>
-      <div class="mt-2 flex items-center gap-2 text-lg font-semibold" :class="planReady ? 'text-emerald-600' : 'text-amber-600'">
-        <span>{{ planReady ? 'PLAN_READY' : 'STALE' }}</span>
-      </div>
-      <div class="mt-1 text-xs text-slate-500 break-all">
-        Plan SHA: {{ summary.plan_requirements_sha ? summary.plan_requirements_sha.slice(0, 8) : '—' }}
-      </div>
-    </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div class="text-xs uppercase tracking-wide text-slate-400">Agents</div>
-        <div class="mt-3 flex items-center gap-4">
-          <div>
-            <div class="text-xl font-semibold text-slate-900">{{ agentSnapshot.active }}</div>
-            <div class="text-xs uppercase text-slate-400">Active</div>
-          </div>
-          <div>
-            <div class="text-xl font-semibold text-slate-900">{{ agentSnapshot.idle }}</div>
-            <div class="text-xs uppercase text-slate-400">Idle</div>
-          </div>
-          <div>
-            <div class="text-xl font-semibold text-slate-900">{{ agentSnapshot.blocked }}</div>
-            <div class="text-xs uppercase text-slate-400">Blocked</div>
-          </div>
+        <div class="rounded-lg bg-slate-50 px-3 py-2">
+          Latest Run
+          <span class="ml-2 font-mono text-slate-900">{{ latestRun?.id || "—" }}</span>
         </div>
-      </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div class="text-xs uppercase tracking-wide text-slate-400">Tasks</div>
-        <div class="mt-2 text-lg font-semibold text-slate-900">
-          {{ summary.task_counts.running }} running
-        </div>
-        <div class="mt-1 text-xs text-slate-500">
-          {{ summary.task_counts.pending }} pending · {{ summary.task_counts.done }} done
-        </div>
-      </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div class="text-xs uppercase tracking-wide text-slate-400">Changes</div>
-        <div class="mt-2 text-lg font-semibold text-slate-900">
-          {{ changeSnapshot.open }} open
-        </div>
-        <div class="mt-1 text-xs text-slate-500">
-          {{ changeSnapshot.accepted }} accepted · {{ changeSnapshot.rejected }} rejected
+        <div v-if="error" class="rounded-lg bg-rose-50 px-3 py-2 text-rose-600">
+          {{ error }}
         </div>
       </div>
     </div>
 
-    <div v-if="summary" class="grid gap-4 lg:grid-cols-2">
+    <div v-if="project" class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Project Stage</div>
+        <div class="mt-2 flex items-center gap-2 text-lg font-semibold text-slate-900">
+          <StageBadge :label="currentStage" />
+          <span>{{ currentStage }}</span>
+        </div>
+        <div class="mt-1 text-xs text-slate-500">Project: {{ project.name }}</div>
+      </div>
+
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Lifecycle Health</div>
+        <div class="mt-2 flex items-center gap-2">
+          <span class="text-2xl font-semibold text-slate-900">
+            {{ lifecycleScore?.health_index ?? "—" }}
+          </span>
+          <el-tag v-if="lifecycleScore?.grade" effect="light" type="success">
+            {{ lifecycleScore.grade }}
+          </el-tag>
+        </div>
+        <div class="mt-1 text-xs text-slate-500">
+          Risk: {{ lifecycleScore?.risk_level || "UNKNOWN" }}
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Latest Run</div>
+        <div class="mt-2 flex items-center gap-2">
+          <el-tag :type="runStatusTagType(latestRun?.status)" effect="light">
+            {{ latestRun?.status || "IDLE" }}
+          </el-tag>
+          <span class="text-sm text-slate-500">{{ latestRun?.executor || "—" }}</span>
+        </div>
+        <div class="mt-1 text-xs text-slate-500">
+          Started: {{ formatTimestamp(latestRun?.started_at) }}
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Work Items</div>
+        <div class="mt-2 text-lg font-semibold text-slate-900">
+          {{ runtimeCounts.running }} running
+        </div>
+        <div class="mt-1 text-xs text-slate-500">
+          {{ runtimeCounts.queued }} queued · {{ runtimeCounts.done }} done · {{ runtimeCounts.failed }} failed
+        </div>
+      </div>
+    </div>
+
+    <div v-if="project" class="grid gap-4 lg:grid-cols-2">
       <AgentPanel :agents="agentRows" />
+
       <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div class="text-sm uppercase tracking-wide text-slate-400">Metrics Snapshot</div>
-        <div v-if="metrics" class="mt-4 grid gap-3 sm:grid-cols-2">
+        <div class="text-sm uppercase tracking-wide text-slate-400">Project Signals</div>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
           <div class="rounded-lg bg-slate-50 p-4">
-            <div class="text-xs uppercase text-slate-400">Total Runs</div>
-            <div class="mt-1 text-xl font-semibold text-slate-900">{{ metrics.total_runs }}</div>
+            <div class="text-xs uppercase text-slate-400">Run Completion</div>
+            <div class="mt-1 text-xl font-semibold text-slate-900">
+              {{ lifecycleScore?.execution?.completed_runs ?? 0 }}/{{ lifecycleScore?.execution?.total_runs ?? 0 }}
+            </div>
           </div>
           <div class="rounded-lg bg-slate-50 p-4">
-            <div class="text-xs uppercase text-slate-400">Active Runs</div>
-            <div class="mt-1 text-xl font-semibold text-slate-900">{{ metrics.active_runs }}</div>
+            <div class="text-xs uppercase text-slate-400">Trace Coverage</div>
+            <div class="mt-1 text-xl font-semibold text-slate-900">
+              {{ coveragePercent }}
+            </div>
           </div>
           <div class="rounded-lg bg-slate-50 p-4">
-            <div class="text-xs uppercase text-slate-400">Stale Stages</div>
-            <div class="mt-1 text-xl font-semibold text-slate-900">{{ metrics.stale_count }}</div>
+            <div class="text-xs uppercase text-slate-400">Graph Cycles</div>
+            <div class="mt-1 text-xl font-semibold text-slate-900">
+              {{ health?.counts?.cycles ?? 0 }}
+            </div>
           </div>
           <div class="rounded-lg bg-slate-50 p-4">
-            <div class="text-xs uppercase text-slate-400">Open Changes</div>
-            <div class="mt-1 text-xl font-semibold text-slate-900">{{ metrics.open_changes }}</div>
+            <div class="text-xs uppercase text-slate-400">Orphan Tasks</div>
+            <div class="mt-1 text-xl font-semibold text-slate-900">
+              {{ health?.counts?.orphan_tasks ?? 0 }}
+            </div>
           </div>
         </div>
-        <div v-else class="mt-4 text-sm text-slate-500">No metrics yet.</div>
       </div>
     </div>
 
-    <div v-if="summary">
-      <ExecutionTimeline
-        :logs="auditLogs"
-        :tasks="tasks"
-        :current-stage="summary.current_stage"
-        :run-status="summary.latest_run?.status || 'IDLE'"
-        :run-id="summary.latest_run?.run_id"
-      />
-    </div>
+    <ExecutionTimeline
+      :logs="timelineLogs"
+      :tasks="displayWorkItems"
+      :current-stage="currentStage"
+      :run-status="latestRun?.status || 'IDLE'"
+      :run-id="latestRun?.id"
+    />
 
-    <div v-if="advancedMode && summary" class="grid gap-4 xl:grid-cols-2">
-      <TaskTable :tasks="tasks" />
-      <ChangePanel
-        :changes="changes"
-        @create="createChangeRequest"
-        @accept="acceptChange"
-        @reject="rejectChange"
-      />
-    </div>
+    <div class="grid gap-4 xl:grid-cols-[2fr,1fr]">
+      <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-sm uppercase tracking-wide text-slate-400">Agent Tasks</div>
+            <div class="text-xs text-slate-500">Work items for the latest run.</div>
+          </div>
+          <el-tag :type="runStatusTagType(latestRun?.status)" effect="light">
+            {{ latestRun?.status || "IDLE" }}
+          </el-tag>
+        </div>
+        <el-table
+          v-if="displayWorkItems.length"
+          :data="displayWorkItems"
+          class="mt-4"
+          style="width: 100%"
+        >
+          <el-table-column prop="title" label="Step" min-width="220" />
+          <el-table-column prop="agent" label="Agent" min-width="140" />
+          <el-table-column prop="executor" label="Executor" min-width="120" />
+          <el-table-column label="Status" width="130">
+            <template #default="{ row }">
+              <el-tag :type="workItemStatusTagType(row.rawStatus)" effect="light">
+                {{ row.rawStatus }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="Started" min-width="180">
+            <template #default="{ row }">
+              {{ formatTimestamp(row.started_at) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="Finished" min-width="180">
+            <template #default="{ row }">
+              {{ formatTimestamp(row.finished_at) }}
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-else class="mt-4 text-sm text-slate-500">No work items yet.</div>
+      </div>
 
-    <div v-if="advancedMode && summary">
-      <AuditTimeline :logs="auditLogs" />
-    </div>
-
-    <div v-if="!summary && !loading" class="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-500">
-      Select a project to view Mission Control data.
+      <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div class="text-sm uppercase tracking-wide text-slate-400">Deferred Panels</div>
+        <div class="mt-4 space-y-3 text-sm text-slate-500">
+          <p>Change requests and raw audit panels are hidden in this pass.</p>
+          <p>They will come back once they are backed by the same store-based runtime APIs.</p>
+          <p>Artifacts are the next natural addition after this runtime view is stable.</p>
+        </div>
+      </div>
     </div>
   </div>
+
   <div v-else class="rounded-xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
-    Mission Control requires an active run. Returning to project overview...
+    Mission Control needs at least one run. Returning to project overview...
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import AgentPanel from "../components/AgentPanel.vue";
-import AuditTimeline from "../components/AuditTimeline.vue";
-import ChangePanel from "../components/ChangePanel.vue";
 import ExecutionTimeline from "../components/ExecutionTimeline.vue";
 import StageBadge from "../components/StageBadge.vue";
-import TaskTable from "../components/TaskTable.vue";
+import {
+  fetchHealth,
+  fetchLifecycleScore,
+  fetchProjectMeta,
+  listRunEvents,
+  listRuns,
+  listWorkItems,
+  updateRunStatus,
+} from "../api/lifecycle";
 import { updateProjectContext } from "../state/projectContext";
-
-const DEFAULT_API_BASE = import.meta.env.DEV
-  ? "http://localhost:8000/api/v1"
-  : "https://api.prompt2pr.com/api/v1";
-
-const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
 const route = useRoute();
 const router = useRouter();
 
-const summary = ref<any | null>(null);
-const metrics = ref<any | null>(null);
-const tasks = ref<any[]>([]);
-const auditLogs = ref<any[]>([]);
-const changes = ref<any[]>([]);
+const WORK_ITEM_LABELS: Record<string, string> = {
+  PLAN_DAG: "Planner Agent",
+  CODE_BACKEND: "Backend Builder",
+  CODE_FRONTEND: "Frontend Builder",
+  WRITE_TESTS: "Test Writer",
+  REVIEW_DIFF: "Diff Reviewer",
+  RUN_TESTS: "Test Runner",
+  REVIEW_INTEGRATION: "Integration Reviewer",
+};
+
+const project = ref<any | null>(null);
+const health = ref<any | null>(null);
+const lifecycleScore = ref<any | null>(null);
+const runs = ref<any[]>([]);
+const workItems = ref<any[]>([]);
+const runEvents = ref<any[]>([]);
 const loading = ref(false);
 const error = ref("");
-const advancedMode = ref(false);
-const regenerating = ref(false);
 
 const projectId = computed(() => (route.params.projectId as string) || "");
-const hasActiveRun = computed(() => Boolean(summary.value?.latest_run?.run_id));
-const planFresh = computed(() => Boolean(summary.value?.plan_fresh));
-const planExists = computed(() => Boolean(summary.value?.plan_exists));
-const planReady = computed(() => planExists.value && planFresh.value);
+const latestRun = computed(() => runs.value[0] || null);
+const hasRun = computed(() => Boolean(latestRun.value?.id));
+const currentStage = computed(() => project.value?.status || "UNKNOWN");
+const lifecycleWarnings = computed<string[]>(() => lifecycleScore.value?.warnings || []);
+const cancelEnabled = computed(() => ["QUEUED", "RUNNING"].includes(latestRun.value?.status || ""));
+const coveragePercent = computed(() => {
+  const ratio = lifecycleScore.value?.coverage?.coverage_ratio;
+  return typeof ratio === "number" ? `${Math.round(ratio * 100)}%` : "—";
+});
+
+let pollHandle: ReturnType<typeof setInterval> | null = null;
+let pollInFlight = false;
+
+const displayWorkItems = computed(() =>
+  workItems.value.map((wi) => {
+    const payload = wi.payload || {};
+    return {
+      task_id: wi.id,
+      title: payload.title || WORK_ITEM_LABELS[wi.type] || humanizeToken(wi.key || wi.type || "work_item"),
+      agent: payload.agent || WORK_ITEM_LABELS[wi.type] || humanizeToken(wi.type || wi.executor || "agent"),
+      executor: wi.executor,
+      status: normalizeTimelineStatus(wi.status),
+      rawStatus: wi.status,
+      depends_on: Array.isArray(payload.depends_on) ? payload.depends_on : [],
+      depends_on_count: wi.depends_on_count || 0,
+      outputs: Array.isArray(payload.outputs) ? payload.outputs : [],
+      parallel_group: payload.parallel_group || null,
+      started_at: wi.started_at,
+      finished_at: wi.finished_at,
+      last_error: wi.last_error,
+    };
+  })
+);
+
+const displayWorkItemMap = computed(
+  () => new Map(displayWorkItems.value.map((item) => [item.task_id, item]))
+);
+
+const timelineLogs = computed(() =>
+  runEvents.value.map((event) => {
+    const taskId = event.task_id || event.payload?.work_item_id || null;
+    const workItem = taskId ? displayWorkItemMap.value.get(taskId) : null;
+    return {
+      timestamp: event.ts,
+      run_id: event.run_id,
+      stage: currentStage.value,
+      message: event.message || mapEventMessage(event.event_type, workItem?.title),
+      details: { ...(event.payload || {}), task_id: taskId },
+      tool: event.actor_type || "runtime",
+    };
+  })
+);
+
+const agentRows = computed(() =>
+  displayWorkItems.value.map((item) => ({
+    name: item.title,
+    status: panelStatusFor(item.rawStatus),
+    taskCount: 1,
+  }))
+);
 
 const agentSnapshot = computed(() => {
-  const byAgent: Record<string, { running: number; pending: number; failed: number }> = {};
-  tasks.value.forEach((task) => {
-    const entry = byAgent[task.agent] || { running: 0, pending: 0, failed: 0 };
-    if (task.status === "RUNNING") entry.running += 1;
-    else if (task.status === "FAILED" || task.status === "CANCELED") entry.failed += 1;
-    else entry.pending += 1;
-    byAgent[task.agent] = entry;
+  let active = 0;
+  let idle = 0;
+  let blocked = 0;
+  agentRows.value.forEach((row) => {
+    if (row.status === "Running") active += 1;
+    else if (row.status === "Blocked") blocked += 1;
+    else idle += 1;
   });
-
-  const agents = Object.values(byAgent);
-  const active = agents.filter((agent) => agent.running > 0).length;
-  const blocked = agents.filter((agent) => agent.failed > 0).length;
-  const idle = Math.max(agents.length - active - blocked, 0);
   return { active, idle, blocked };
 });
 
-const agentRows = computed(() => {
-  const rows: Array<{ name: string; status: string; taskCount: number }> = [];
-  const agentMap: Record<string, { running: number; pending: number; failed: number; total: number }> = {};
-  tasks.value.forEach((task) => {
-    const entry = agentMap[task.agent] || { running: 0, pending: 0, failed: 0, total: 0 };
-    if (task.status === "RUNNING") entry.running += 1;
-    else if (task.status === "FAILED" || task.status === "CANCELED") entry.failed += 1;
-    else entry.pending += 1;
-    entry.total += 1;
-    agentMap[task.agent] = entry;
+const runtimeCounts = computed(() => {
+  const counts = {
+    queued: 0,
+    running: 0,
+    done: 0,
+    failed: 0,
+    canceled: 0,
+  };
+  workItems.value.forEach((wi) => {
+    if (wi.status === "QUEUED") counts.queued += 1;
+    else if (wi.status === "CLAIMED" || wi.status === "RUNNING") counts.running += 1;
+    else if (wi.status === "DONE") counts.done += 1;
+    else if (wi.status === "FAILED") counts.failed += 1;
+    else if (wi.status === "CANCELED") counts.canceled += 1;
   });
-  Object.entries(agentMap).forEach(([name, stats]) => {
-    let status = "Idle";
-    if (stats.running > 0) status = "Running";
-    else if (stats.failed > 0) status = "Blocked";
-    rows.push({ name, status, taskCount: stats.total });
-  });
-  return rows;
+  return counts;
 });
-
-const changeSnapshot = computed(() => {
-  const open = changes.value.filter((change) => change.status === "OPEN").length;
-  const accepted = changes.value.filter((change) => change.status === "ACCEPTED").length;
-  const rejected = changes.value.filter((change) => change.status === "REJECTED").length;
-  return { open, accepted, rejected };
-});
-
-watch(
-  agentSnapshot,
-  (snapshot) => {
-    updateProjectContext({
-      activeAgents: snapshot.active,
-      updatedAt: new Date().toISOString()
-    });
-  },
-  { deep: true }
-);
 
 watch(
   projectId,
@@ -265,7 +334,7 @@ watch(
     resetState();
     if (projectId.value) {
       primeContext();
-      loadAll();
+      void loadAll();
     } else {
       error.value = "No project selected.";
     }
@@ -273,18 +342,24 @@ watch(
   { immediate: true }
 );
 
-watch(hasActiveRun, (active) => {
-  if (!active && !loading.value) {
+watch(hasRun, (present) => {
+  if (!present && !loading.value && projectId.value) {
     router.replace(`/projects/${projectId.value}`);
   }
 });
 
+onBeforeUnmount(() => {
+  stopPolling();
+});
+
 function resetState() {
-  summary.value = null;
-  metrics.value = null;
-  tasks.value = [];
-  auditLogs.value = [];
-  changes.value = [];
+  stopPolling();
+  project.value = null;
+  health.value = null;
+  lifecycleScore.value = null;
+  runs.value = [];
+  workItems.value = [];
+  runEvents.value = [];
   error.value = "";
 }
 
@@ -296,69 +371,28 @@ function primeContext() {
     runStatus: "IDLE",
     latestRunId: "",
     activeAgents: 0,
-    updatedAt: new Date().toISOString()
+    hasActiveRun: false,
+    architectureRefreshNeeded: false,
+    planRefreshNeeded: false,
+    testRefreshNeeded: false,
+    updatedAt: new Date().toISOString(),
   });
 }
 
 function syncContext() {
-  if (!summary.value) return;
   updateProjectContext({
-    projectId: summary.value.project_id || projectId.value,
-    projectName: summary.value.name || "Project",
-    stage: summary.value.current_stage || "UNKNOWN",
-    runStatus: summary.value.latest_run?.status || "IDLE",
-    latestRunId: summary.value.latest_run?.run_id || "",
+    projectId: projectId.value,
+    projectName: project.value?.name || "Project",
+    stage: currentStage.value,
+    runStatus: latestRun.value?.status || "IDLE",
+    latestRunId: latestRun.value?.id || "",
     activeAgents: agentSnapshot.value.active,
-    hasActiveRun: Boolean(summary.value.latest_run?.run_id),
-    architectureRefreshNeeded: summary.value.architecture_refresh_needed ?? false,
-    planRefreshNeeded: summary.value.plan_refresh_needed ?? false,
-    testRefreshNeeded: summary.value.test_refresh_needed ?? false,
-    updatedAt: new Date().toISOString()
+    hasActiveRun: Boolean(latestRun.value?.id),
+    architectureRefreshNeeded: false,
+    planRefreshNeeded: false,
+    testRefreshNeeded: false,
+    updatedAt: new Date().toISOString(),
   });
-}
-
-async function loadSummary() {
-  if (!projectId.value.trim()) {
-    error.value = "Project ID is required.";
-    return;
-  }
-  const response = await fetch(`${API_BASE}/projects/${projectId.value}/summary`);
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  summary.value = await response.json();
-}
-
-async function loadMetrics() {
-  const response = await fetch(`${API_BASE}/projects/${projectId.value}/metrics`);
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  metrics.value = await response.json();
-}
-
-async function loadTasks(runId: string) {
-  const response = await fetch(`${API_BASE}/runs/${runId}/tasks`);
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  tasks.value = await response.json();
-}
-
-async function loadAuditLogs() {
-  const response = await fetch(`${API_BASE}/projects/${projectId.value}/audit-logs`);
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  auditLogs.value = await response.json();
-}
-
-async function loadChanges() {
-  const response = await fetch(`${API_BASE}/projects/${projectId.value}/changes`);
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  changes.value = await response.json();
 }
 
 async function loadAll() {
@@ -369,138 +403,159 @@ async function loadAll() {
   error.value = "";
   loading.value = true;
   try {
-    await loadSummary();
-    await Promise.all([loadMetrics(), loadChanges(), loadAuditLogs()]);
-    if (summary.value?.latest_run?.run_id) {
-      await loadTasks(summary.value.latest_run.run_id);
-    } else {
-      tasks.value = [];
-    }
+    const [projectMeta, projectHealth, score, runList] = await Promise.all([
+      fetchProjectMeta(projectId.value),
+      fetchHealth(projectId.value),
+      fetchLifecycleScore(projectId.value),
+      listRuns(projectId.value),
+    ]);
+    project.value = projectMeta;
+    health.value = projectHealth;
+    lifecycleScore.value = score;
+    runs.value = runList;
+    await loadRunRuntime();
     syncContext();
+    syncPolling();
   } catch (err: any) {
-    error.value = err?.message || "Failed to load project data.";
+    error.value = err?.message || "Failed to load Mission Control data.";
   } finally {
     loading.value = false;
   }
 }
 
-async function createChangeRequest(payload: {
-  summary: string;
-  source: string;
-  affected_area: string;
-  severity: string;
-  suggested_stage: string;
-}) {
-  if (!projectId.value.trim() || !payload.summary.trim()) {
-    error.value = "Project ID and summary are required.";
+async function loadRunRuntime() {
+  if (!latestRun.value?.id) {
+    workItems.value = [];
+    runEvents.value = [];
     return;
   }
+  const [items, events] = await Promise.all([
+    listWorkItems(projectId.value, latestRun.value.id),
+    listRunEvents(latestRun.value.id),
+  ]);
+  workItems.value = items;
+  runEvents.value = events;
+}
+
+async function refreshRuntime() {
+  if (!projectId.value.trim() || pollInFlight) return;
+  pollInFlight = true;
+  try {
+    runs.value = await listRuns(projectId.value);
+    await loadRunRuntime();
+    if (!["QUEUED", "RUNNING"].includes(latestRun.value?.status || "")) {
+      const [projectHealth, score] = await Promise.all([
+        fetchHealth(projectId.value),
+        fetchLifecycleScore(projectId.value),
+      ]);
+      health.value = projectHealth;
+      lifecycleScore.value = score;
+    }
+    syncContext();
+    syncPolling();
+  } catch (err: any) {
+    error.value = err?.message || "Failed to refresh runtime data.";
+    stopPolling();
+  } finally {
+    pollInFlight = false;
+  }
+}
+
+function syncPolling() {
+  const shouldPoll = ["QUEUED", "RUNNING"].includes(latestRun.value?.status || "");
+  if (shouldPoll && pollHandle === null) {
+    pollHandle = setInterval(() => {
+      void refreshRuntime();
+    }, 3000);
+  } else if (!shouldPoll && pollHandle !== null) {
+    stopPolling();
+  }
+}
+
+function stopPolling() {
+  if (pollHandle !== null) {
+    clearInterval(pollHandle);
+    pollHandle = null;
+  }
+}
+
+async function cancelLatestRun() {
+  if (!latestRun.value?.id || !cancelEnabled.value) return;
   error.value = "";
   try {
-    const response = await fetch(`${API_BASE}/projects/${projectId.value}/changes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
-    await loadChanges();
-  } catch (err: any) {
-    error.value = err?.message || "Failed to create change request.";
-  }
-}
-
-async function acceptChange(changeId: string) {
-  try {
-    const response = await fetch(`${API_BASE}/changes/${changeId}/accept`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
+    await updateRunStatus(latestRun.value.id, "CANCELED");
     await loadAll();
   } catch (err: any) {
-    error.value = err?.message || "Failed to accept change.";
-  }
-}
-
-async function rejectChange(changeId: string) {
-  try {
-    const response = await fetch(`${API_BASE}/changes/${changeId}/reject`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
-    await loadChanges();
-  } catch (err: any) {
-    error.value = err?.message || "Failed to reject change.";
-  }
-}
-
-async function executeTasks() {
-  if (!summary.value?.latest_run?.run_id) {
-    return;
-  }
-  if (!planReady.value) {
-    error.value = "Plan is stale or missing. Regenerate before executing tasks.";
-    return;
-  }
-  try {
-    const runId = summary.value.latest_run.run_id;
-    const response = await fetch(`${API_BASE}/runs/${runId}/execute?max_parallel_tasks=2`, {
-      method: "POST"
-    });
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
-    await loadAll();
-  } catch (err: any) {
-    error.value = err?.message || "Failed to execute tasks.";
+    error.value = err?.message || "Failed to cancel run.";
   }
 }
 
 function goToOverview() {
-  router.push("/");
+  router.push(`/projects/${projectId.value}`);
 }
 
-async function regeneratePlan() {
-  if (!projectId.value.trim()) return;
-  regenerating.value = true;
-  error.value = "";
-  try {
-    const runResp = await fetch(`${API_BASE}/projects/${projectId.value}/runs`, { method: "POST" });
-    if (!runResp.ok) throw new Error(await runResp.text());
-    const runId = (await runResp.json()).run_id;
-
-    const startResp = await fetch(`${API_BASE}/runs/${runId}/start`, { method: "POST" });
-    if (!startResp.ok) throw new Error(await startResp.text());
-
-    await pollRunCompletion(runId);
-    await loadAll();
-    ElMessage.success("Plan regeneration completed.");
-  } catch (err: any) {
-    error.value = err?.message || "Failed to regenerate plan.";
-  } finally {
-    regenerating.value = false;
-  }
+function formatTimestamp(value?: string | null) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return parsed.toLocaleString();
 }
 
-async function pollRunCompletion(runId: string, attempts = 10, delayMs = 500) {
-  for (let i = 0; i < attempts; i += 1) {
-    const resp = await fetch(`${API_BASE}/runs/${runId}`);
-    if (resp.ok) {
-      const data = await resp.json();
-      if (["COMPLETED", "FAILED", "CANCELED"].includes(data.status)) {
-        return;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
+function runStatusTagType(status?: string | null) {
+  if (status === "RUNNING") return "warning";
+  if (status === "COMPLETED") return "success";
+  if (status === "FAILED" || status === "CANCELED") return "danger";
+  if (status === "QUEUED") return "info";
+  return "default";
+}
+
+function workItemStatusTagType(status?: string | null) {
+  if (status === "RUNNING" || status === "CLAIMED") return "warning";
+  if (status === "DONE") return "success";
+  if (status === "FAILED" || status === "CANCELED") return "danger";
+  if (status === "QUEUED") return "info";
+  return "default";
+}
+
+function panelStatusFor(status?: string | null) {
+  if (status === "RUNNING" || status === "CLAIMED") return "Running";
+  if (status === "DONE") return "Completed";
+  if (status === "FAILED" || status === "CANCELED") return "Blocked";
+  return "Waiting";
+}
+
+function normalizeTimelineStatus(status?: string | null) {
+  if (status === "QUEUED") return "PENDING";
+  if (status === "CLAIMED" || status === "RUNNING") return "RUNNING";
+  if (status === "DONE") return "DONE";
+  if (status === "FAILED") return "FAILED";
+  if (status === "CANCELED") return "CANCELED";
+  return status || "PENDING";
+}
+
+function mapEventMessage(eventType: string, title?: string) {
+  const itemTitle = title || "Work item";
+  if (eventType === "RUN_CREATED") return "Run created";
+  if (eventType === "RUN_RUNNING") return "Run started";
+  if (eventType === "RUN_COMPLETED") return "Run completed";
+  if (eventType === "RUN_FAILED") return "Run failed";
+  if (eventType === "RUN_CANCELED") return "Run canceled";
+  if (eventType === "WORK_DAG_CREATED") return "Work DAG created";
+  if (eventType === "WORK_ITEM_CREATED") return `Task ${itemTitle} created`;
+  if (eventType === "WORK_ITEM_CLAIMED") return `Task ${itemTitle} claimed`;
+  if (eventType === "WORK_ITEM_STARTED") return `Task ${itemTitle} started`;
+  if (eventType === "WORK_ITEM_DONE") return `Task ${itemTitle} completed`;
+  if (eventType === "WORK_ITEM_FAILED") return `Task ${itemTitle} failed`;
+  if (eventType === "WORK_ITEM_LEASE_EXPIRED") return `Task ${itemTitle} lease expired`;
+  if (eventType === "WORK_ITEM_RETRIED") return `Task ${itemTitle} retried`;
+  if (eventType === "LIFECYCLE_SCORED") return "Lifecycle score updated";
+  return humanizeToken(eventType);
+}
+
+function humanizeToken(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 </script>

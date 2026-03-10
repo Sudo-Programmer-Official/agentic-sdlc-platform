@@ -32,8 +32,9 @@ const props = defineProps<{
 
 function statusTagType(status: string) {
   if (status === "Running") return "warning";
+  if (status === "Completed") return "success";
   if (status === "Blocked") return "danger";
-  if (status === "Idle") return "info";
+  if (status === "Idle" || status === "Waiting") return "info";
   return "default";
 }
 </script>

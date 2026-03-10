@@ -6,12 +6,15 @@ from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+DEFAULT_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/agentic_sdlc"
+
+
 class Settings(BaseSettings):
     app_name: str = "Agentic SDLC API"
     env: str = "local"
     api_prefix: str = "/api/v1"
     log_level: str = "INFO"
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/agentic_sdlc"
+    database_url: str = DEFAULT_DATABASE_URL
     db_echo: bool = False
     llm_provider: str = "openai"
     llm_model: str = "gpt-4.1"
@@ -33,7 +36,6 @@ class Settings(BaseSettings):
     test_command: str = "pytest -q"
     test_timeout_seconds: int = 180
     test_output_max_bytes: int = 200_000
-    openai_api_key: str | None = None
     tenancy_enforcement: bool = False
     run_migrations_on_startup: bool = False
     alembic_config_path: str | None = None
@@ -46,7 +48,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
     ]
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "apps/api/.env"), extra="ignore")
 
 
 @lru_cache

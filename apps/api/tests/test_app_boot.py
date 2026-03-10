@@ -36,3 +36,11 @@ def test_www_prompt2pr_origin_is_allowed_for_store_routes(monkeypatch):
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "https://www.prompt2pr.com"
+
+
+def test_non_local_env_requires_explicit_database_url(monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL must be set"):
+        create_app()

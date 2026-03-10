@@ -17,7 +17,7 @@ from app.api.v1.snapshot import router as snapshot_router
 from app.api.v1.health import router as health_router, public_router as public_health_router
 from app.api.v1.lifecycle_score import router as lifecycle_router, public_router as public_lifecycle_router
 from app.api.v1.lifecycle_history import router as lifecycle_history_router, public_router as public_lifecycle_history_router
-from app.core.config import get_settings
+from app.core.config import DEFAULT_DATABASE_URL, get_settings
 from app.startup import run_startup_migrations
 
 
@@ -27,13 +27,15 @@ def create_app() -> FastAPI:
     # Safety guard: external mode required outside local environments
     if settings.env.lower() != "local" and settings.runtime_mode.lower() != "external":
         raise RuntimeError("runtime_mode must be 'external' when env is not local.")
+    if settings.env.lower() != "local" and settings.database_url == DEFAULT_DATABASE_URL:
+        raise RuntimeError("DATABASE_URL must be set when env is not local.")
 
     app = FastAPI(title=settings.app_name)
     log = logging.getLogger("app")
 
     # CORS (frontend at prompt2pr.com calls api.prompt2pr.com; localhost during dev)
-    prompt2pr_origin_regex = r"https://(www\\.)?prompt2pr\\.com"
-    local_origin_regex = r"https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?"
+    prompt2pr_origin_regex = r"https://(www\.)?prompt2pr\.com"
+    local_origin_regex = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,

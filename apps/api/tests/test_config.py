@@ -1,0 +1,19 @@
+from app.core.config import Settings
+
+
+def test_settings_read_apps_api_env_file(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    env_dir = tmp_path / "apps" / "api"
+    env_dir.mkdir(parents=True)
+    (env_dir / ".env").write_text(
+        "OPENAI_API_KEY=test-key\nDATABASE_URL=postgresql+asyncpg://user:pass@db:5432/app\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings()
+
+    assert settings.openai_api_key == "test-key"
+    assert settings.database_url == "postgresql+asyncpg://user:pass@db:5432/app"

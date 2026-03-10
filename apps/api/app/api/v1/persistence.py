@@ -852,6 +852,7 @@ async def create_task(
 
     async with session.begin():
         task = Task(
+            tenant_id=ctx.tenant_id,
             project_id=project_id,
             document_id=payload.document_id,
             title=payload.title,

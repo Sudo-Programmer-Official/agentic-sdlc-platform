@@ -5,7 +5,7 @@
         <h1 class="text-3xl font-semibold text-slate-900">Project Overview</h1>
         <p class="text-slate-600">Review project state and enter Mission Control when ready.</p>
       </div>
-      <el-button type="primary" :disabled="!projectId" @click="goToRun">
+      <el-button type="primary" :disabled="!projectId || projectStatus !== 'RUN'" @click="goToRun">
         Enter Mission Control
       </el-button>
     </div>
@@ -161,8 +161,14 @@
         <el-button type="primary" plain :disabled="!projectId" @click="showImpactDialog = true">
           Preview Impact
         </el-button>
+        <el-button type="primary" plain :disabled="!projectId" @click="openCreateDocumentDialog">
+          Create Document
+        </el-button>
         <el-button type="success" plain :disabled="!projectId || !documents.length" @click="showRegenDialog = true">
           Regenerate Tasks
+        </el-button>
+        <el-button type="primary" plain :disabled="!projectId" @click="openCreateTaskDialog">
+          Create Task
         </el-button>
         <el-button type="info" plain :disabled="!projectId" @click="openTasksDialog">
           View Tasks
@@ -340,7 +346,46 @@
       </div>
     </el-dialog>
 
+    <el-dialog v-model="showCreateDocumentDialog" title="Create Document" width="640px">
+      <div class="space-y-3">
+        <el-select
+          v-model="newDocument.type"
+          placeholder="Document type"
+          filterable
+          allow-create
+          default-first-option
+          style="width: 100%"
+        >
+          <el-option label="PRD" value="prd" />
+          <el-option label="Design" value="design" />
+          <el-option label="Spec" value="spec" />
+          <el-option label="Notes" value="notes" />
+          <el-option label="Test Plan" value="test-plan" />
+        </el-select>
+        <el-input v-model="newDocument.title" placeholder="Document title" />
+        <el-input
+          v-model="newDocument.body"
+          type="textarea"
+          :rows="8"
+          placeholder="Paste or write the document content"
+        />
+        <el-input v-model="newDocument.created_by" placeholder="Created by (optional)" />
+        <el-button type="primary" :loading="createDocumentLoading" @click="submitCreateDocument">
+          Create Document
+        </el-button>
+        <div v-if="createDocumentError" class="text-sm text-rose-600">{{ createDocumentError }}</div>
+      </div>
+    </el-dialog>
+
     <el-dialog v-model="showTasksDialog" title="Tasks" width="640px">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <div class="text-xs text-slate-500">
+          Create a task manually, or create a document and use Regenerate Tasks.
+        </div>
+        <el-button type="primary" size="small" plain @click="openCreateTaskDialog">
+          Create Task
+        </el-button>
+      </div>
       <el-table :data="tasks" size="small">
         <el-table-column prop="id" label="ID" width="240" />
         <el-table-column prop="title" label="Title" />
@@ -348,6 +393,55 @@
         <el-table-column prop="generated_from_document_version" label="Doc Ver" width="90" />
       </el-table>
       <div v-if="tasksError" class="mt-2 text-sm text-rose-600">{{ tasksError }}</div>
+    </el-dialog>
+
+    <el-dialog v-model="showCreateTaskDialog" title="Create Task" width="560px">
+      <div class="space-y-3">
+        <el-input v-model="newTask.title" placeholder="Task title" />
+        <el-input v-model="newTask.description" type="textarea" :rows="3" placeholder="Description (optional)" />
+        <div class="grid gap-3 md:grid-cols-2">
+          <el-select v-model="newTask.stage" placeholder="Stage">
+            <el-option label="PLAN" value="PLAN" />
+            <el-option label="RUN" value="RUN" />
+            <el-option label="EVALUATE" value="EVALUATE" />
+          </el-select>
+          <el-select v-model="newTask.status" placeholder="Status">
+            <el-option label="PENDING" value="PENDING" />
+            <el-option label="RUNNING" value="RUNNING" />
+            <el-option label="DONE" value="DONE" />
+            <el-option label="FAILED" value="FAILED" />
+            <el-option label="CANCELED" value="CANCELED" />
+          </el-select>
+        </div>
+        <div class="grid gap-3 md:grid-cols-2">
+          <el-select v-model="newTask.category" placeholder="Category">
+            <el-option label="Functional" value="func" />
+            <el-option label="Quality" value="quality" />
+            <el-option label="Ops" value="ops" />
+          </el-select>
+          <el-input v-model="newTask.assignee" placeholder="Assignee (optional)" />
+        </div>
+        <el-select
+          v-model="newTask.document_id"
+          placeholder="Link document (optional)"
+          clearable
+          filterable
+          :loading="documentsLoading"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="doc in documents"
+            :key="doc.id"
+            :label="doc.title || doc.id"
+            :value="doc.id"
+          />
+        </el-select>
+        <el-input v-model="newTask.created_by" placeholder="Created by (optional)" />
+        <el-button type="primary" :loading="createTaskLoading" @click="submitCreateTask">
+          Create Task
+        </el-button>
+        <div v-if="createTaskError" class="text-sm text-rose-600">{{ createTaskError }}</div>
+      </div>
     </el-dialog>
 
     <el-dialog v-model="showExplainDialog" title="Explain Task" width="640px">
@@ -379,21 +473,25 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 
 import StageBadge from "../components/StageBadge.vue";
-import { projectContext } from "../state/projectContext";
+import { projectContext, updateProjectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
-import { previewImpact, regenerateTasks, listTasks, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, listRuns, createRun, updateRunStatus } from "../api/lifecycle";
+import { previewImpact, regenerateTasks, listTasks, createTask, createDocument, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, updateProjectStage, listRuns, createRun, updateRunStatus } from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
-const error = computed(() => (!projectContext.projectId ? "No project selected." : ""));
+const error = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || projectContext.projectId);
 const projectName = computed(() => projectContext.projectName || "Project");
 const stage = computed(() => projectContext.stage || "UNKNOWN");
-const runSummary = computed(() => (projectContext.latestRunId ? "Has runs" : "No runs yet"));
-const latestRunText = computed(() => projectContext.latestRunId || "None");
+const runSummary = computed(() => {
+  if (!runs.value.length) return "No runs yet";
+  return `${runs.value.length} run${runs.value.length === 1 ? "" : "s"}`;
+});
+const latestRunText = computed(() => runs.value[0]?.id || projectContext.latestRunId || "None");
 const architectureRefreshNeeded = computed(() => projectContext.architectureRefreshNeeded);
 const planRefreshNeeded = computed(() => projectContext.planRefreshNeeded);
 const testRefreshNeeded = computed(() => projectContext.testRefreshNeeded);
@@ -418,8 +516,10 @@ const activityDialog = ref(false);
 const activity = ref<any[]>([]);
 const activityError = ref("");
 const showImpactDialog = ref(false);
+const showCreateDocumentDialog = ref(false);
 const showRegenDialog = ref(false);
 const showTasksDialog = ref(false);
+const showCreateTaskDialog = ref(false);
 const showExplainDialog = ref(false);
 const impactDocId = ref("");
 const proposedBody = ref("");
@@ -431,8 +531,28 @@ const regenForce = ref(false);
 const regenMessage = ref("");
 const regenError = ref("");
 const regenLoading = ref(false);
+const createDocumentLoading = ref(false);
+const createDocumentError = ref("");
+const newDocument = ref({
+  type: "prd",
+  title: "",
+  body: "",
+  created_by: "ui-user",
+});
 const tasks = ref<any[]>([]);
 const tasksError = ref("");
+const createTaskLoading = ref(false);
+const createTaskError = ref("");
+const newTask = ref({
+  title: "",
+  description: "",
+  category: "func",
+  stage: "PLAN",
+  status: "PENDING",
+  assignee: "",
+  document_id: "",
+  created_by: "ui-user",
+});
 const explainTaskId = ref("");
 const explainResult = ref<any | null>(null);
 const explainError = ref("");
@@ -469,6 +589,7 @@ function goToRun() {
     error.value = "Enter Mission Control is available only in RUN stage.";
     return;
   }
+  error.value = "";
   router.push(`/projects/${projectId.value}/run`);
 }
 
@@ -506,14 +627,113 @@ async function doRegenerate() {
   }
 }
 
+function resetCreateDocumentForm() {
+  newDocument.value = {
+    type: "prd",
+    title: "",
+    body: "",
+    created_by: "ui-user",
+  };
+  createDocumentError.value = "";
+}
+
+function openCreateDocumentDialog() {
+  resetCreateDocumentForm();
+  showCreateDocumentDialog.value = true;
+}
+
+async function submitCreateDocument() {
+  if (!projectId.value) return;
+  if (!newDocument.value.type.trim() || !newDocument.value.title.trim() || !newDocument.value.body.trim()) {
+    createDocumentError.value = "Document type, title, and body are required.";
+    return;
+  }
+  createDocumentLoading.value = true;
+  createDocumentError.value = "";
+  try {
+    const created = await createDocument(projectId.value, {
+      type: newDocument.value.type.trim(),
+      title: newDocument.value.title.trim(),
+      body: newDocument.value.body.trim(),
+      created_by: newDocument.value.created_by.trim() || null,
+      source: "manual",
+    });
+    showCreateDocumentDialog.value = false;
+    await loadDocuments();
+    regenDocId.value = created.id;
+    impactDocId.value = created.id;
+    ElMessage.success("Document created. You can now regenerate tasks.");
+  } catch (err: any) {
+    createDocumentError.value = err?.message || "Failed to create document";
+  } finally {
+    createDocumentLoading.value = false;
+  }
+}
+
 async function openTasksDialog() {
   showTasksDialog.value = true;
+  await loadTasks();
+}
+
+async function loadTasks() {
   tasksError.value = "";
   if (!projectId.value) return;
   try {
     tasks.value = await listTasks(projectId.value);
   } catch (err: any) {
     tasksError.value = err?.message || "Failed to load tasks";
+  }
+}
+
+function resetCreateTaskForm() {
+  newTask.value = {
+    title: "",
+    description: "",
+    category: "func",
+    stage: projectStatus.value || projectContext.stage || "PLAN",
+    status: "PENDING",
+    assignee: "",
+    document_id: "",
+    created_by: "ui-user",
+  };
+  createTaskError.value = "";
+}
+
+function openCreateTaskDialog() {
+  resetCreateTaskForm();
+  showCreateTaskDialog.value = true;
+}
+
+async function submitCreateTask() {
+  if (!projectId.value) return;
+  if (!newTask.value.title.trim()) {
+    createTaskError.value = "Task title is required.";
+    return;
+  }
+  createTaskLoading.value = true;
+  createTaskError.value = "";
+  try {
+    await createTask(projectId.value, {
+      title: newTask.value.title.trim(),
+      description: newTask.value.description.trim() || null,
+      category: newTask.value.category,
+      stage: newTask.value.stage,
+      status: newTask.value.status,
+      assignee: newTask.value.assignee.trim() || null,
+      document_id: newTask.value.document_id || null,
+      created_by: newTask.value.created_by.trim() || null,
+      source: "manual",
+    });
+    showCreateTaskDialog.value = false;
+    await loadTasks();
+    if (showTasksDialog.value) {
+      showTasksDialog.value = true;
+    }
+    ElMessage.success("Task created.");
+  } catch (err: any) {
+    createTaskError.value = err?.message || "Failed to create task";
+  } finally {
+    createTaskLoading.value = false;
   }
 }
 
@@ -536,6 +756,12 @@ async function loadProjectMeta() {
     const meta = await fetchProjectMeta(projectId.value);
     projectStatus.value = meta.status || null;
     allowedTransitions.value = meta.allowed_transitions || [];
+    updateProjectContext({
+      projectId: meta.id || projectId.value,
+      projectName: meta.name || projectContext.projectName,
+      stage: meta.status || projectContext.stage,
+      updatedAt: new Date().toISOString(),
+    });
   } catch {
     // non-blocking
   }
@@ -547,6 +773,12 @@ async function loadRuns() {
   runError.value = "";
   try {
     runs.value = await listRuns(projectId.value);
+    updateProjectContext({
+      latestRunId: runs.value[0]?.id || "",
+      runStatus: runs.value[0]?.status || "IDLE",
+      hasActiveRun: Boolean(runs.value.length),
+      updatedAt: new Date().toISOString(),
+    });
     await loadWorkItems();
     await loadRunEvents();
   } catch (err: any) {
@@ -622,6 +854,10 @@ async function advanceStage(target: string) {
     const updated = await updateProjectStage(projectId.value, target);
     projectStatus.value = updated.status;
     allowedTransitions.value = updated.allowed_transitions || [];
+    updateProjectContext({
+      stage: updated.status,
+      updatedAt: new Date().toISOString(),
+    });
     stageMessage.value = `Stage advanced to ${updated.status}.`;
     // refresh dependent data
     await Promise.all([loadLifecycleScore(), loadLifecycleHistory(), loadHealth()]);
@@ -696,6 +932,7 @@ function shortSha(val?: string | null) {
 
 onMounted(async () => {
   if (!projectId.value) return;
+  error.value = "";
   try {
     const data = await fetchProjectSummary(projectId.value);
     planMeta.value = {
@@ -706,6 +943,18 @@ onMounted(async () => {
       plan_created_at: data.plan_created_at,
       requirements_version: data.requirements_version,
     };
+    updateProjectContext({
+      projectId: data.project_id,
+      projectName: data.name,
+      stage: data.current_stage,
+      latestRunId: data.latest_run?.run_id || "",
+      runStatus: data.latest_run?.status || "IDLE",
+      architectureRefreshNeeded: data.architecture_refresh_needed ?? false,
+      planRefreshNeeded: data.plan_refresh_needed ?? false,
+      testRefreshNeeded: data.test_refresh_needed ?? false,
+      updatedAt: new Date().toISOString(),
+      hasActiveRun: Boolean(data.latest_run?.run_id),
+    });
     const history = await fetchPlanHistory(projectId.value);
     planHistory.value = history.entries || [];
   } catch {

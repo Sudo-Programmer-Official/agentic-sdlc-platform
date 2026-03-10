@@ -4,6 +4,26 @@ const DEFAULT_API_BASE = import.meta.env.DEV
 
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
+export type CreateTaskPayload = {
+  title: string;
+  description?: string | null;
+  category?: string;
+  stage?: string;
+  status?: string;
+  assignee?: string | null;
+  source?: string;
+  document_id?: string | null;
+  created_by?: string | null;
+};
+
+export type CreateDocumentPayload = {
+  type: string;
+  title: string;
+  body: string;
+  source?: string;
+  created_by?: string | null;
+};
+
 export async function previewImpact(projectId: string, documentId: string, proposedBody: string) {
   const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents/${documentId}/impact-preview`, {
     method: "POST",
@@ -26,6 +46,16 @@ export async function regenerateTasks(projectId: string, documentId: string, for
 
 export async function listTasks(projectId: string) {
   const resp = await fetch(`${API_BASE}/store/projects/${projectId}/tasks`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export async function createTask(projectId: string, payload: CreateTaskPayload) {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
@@ -60,6 +90,16 @@ export async function updateProjectStage(projectId: string, toStage: string) {
 
 export async function listDocuments(projectId: string) {
   const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents`);
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export async function createDocument(projectId: string, payload: CreateDocumentPayload) {
+  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }

@@ -170,7 +170,7 @@ async function pauseRun() {
 
 async function hydrateRecentProjectsFromApi() {
   try {
-    const resp = await fetch(`${API_BASE}/store/projects`);
+    const resp = await fetch(`${API_BASE}/projects`);
     if (!resp.ok) return;
     const data: { id: string; name: string }[] = await resp.json();
     const merged = [...data, ...recentProjects.value]

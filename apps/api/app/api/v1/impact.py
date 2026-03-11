@@ -17,6 +17,7 @@ from app.core.config import get_settings
 from app.api.v1.lifecycle_score import lifecycle_score
 
 router = APIRouter(prefix="/store", tags=["impact"])
+public_router = APIRouter(tags=["impact"])
 
 
 async def _get_doc(session: AsyncSession, project_id: uuid.UUID, document_id: uuid.UUID) -> Document:
@@ -45,6 +46,10 @@ def _tier_and_flag(similarity: float, threshold: float) -> tuple[str, bool]:
 
 
 @router.post(
+    "/projects/{project_id}/documents/{document_id}/impact-preview",
+    response_model=ImpactPreviewResponse,
+)
+@public_router.post(
     "/projects/{project_id}/documents/{document_id}/impact-preview",
     response_model=ImpactPreviewResponse,
 )
@@ -125,23 +130,23 @@ async def impact_preview(
         regenerate_count=len(impacted_tasks),
         warnings=warnings if warnings else None,
     )
-    async with session.begin():
-        await log_activity(
-            session,
-            project_id=project_id,
-            entity_type="document",
-            entity_id=document_id,
-            action_type="impact.preview",
-            event_type="impact",
-            metadata={
-                "similarity": similarity,
-                "risk_tier": risk_tier,
-                "regeneration_required": regen_flag,
-                "impacted_tasks": impacted_tasks,
-                "health_index": health_index,
-            },
-            previous_state={"content_hash": current_hash},
-            new_state={"proposed_hash": proposed_hash},
-        )
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type="document",
+        entity_id=document_id,
+        action_type="impact.preview",
+        event_type="impact",
+        metadata={
+            "similarity": similarity,
+            "risk_tier": risk_tier,
+            "regeneration_required": regen_flag,
+            "impacted_tasks": impacted_tasks,
+            "health_index": health_index,
+        },
+        previous_state={"content_hash": current_hash},
+        new_state={"proposed_hash": proposed_hash},
+    )
+    await session.commit()
 
     return response

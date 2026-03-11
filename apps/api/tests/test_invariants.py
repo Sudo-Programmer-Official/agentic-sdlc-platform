@@ -94,3 +94,4 @@ async def test_regeneration_invariants(db_session):
         assert activity_resp.status_code == 200
         logs = activity_resp.json()
         assert any(log["action_type"] == "tasks.generated" for log in logs)
+

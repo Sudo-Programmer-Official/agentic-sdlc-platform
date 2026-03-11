@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class ProjectCreate(BaseModel):
@@ -28,7 +28,7 @@ class ProjectOut(BaseModel):
 class DocumentCreate(BaseModel):
     type: str
     title: str
-    body: str
+    body: str = Field(validation_alias=AliasChoices("body", "content"))
     source: str = "manual"
     created_by: Optional[str] = None
 

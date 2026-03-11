@@ -44,7 +44,6 @@ const DEFAULT_API_BASE = import.meta.env.DEV
   ? "http://localhost:8000/api/v1"
   : "https://api.prompt2pr.com/api/v1";
 
-// Use the DB-backed persistence routes under /store.
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
 const router = useRouter();
@@ -62,7 +61,7 @@ async function createProject() {
   error.value = "";
   loading.value = true;
   try {
-    const response = await fetch(`${API_BASE}/store/projects`, {
+    const response = await fetch(`${API_BASE}/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

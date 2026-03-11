@@ -13,9 +13,11 @@ from app.db.session import get_session
 from app.schemas.activity import ActivityOut
 
 router = APIRouter(prefix="/store", tags=["activity"])
+public_router = APIRouter(tags=["activity"])
 
 
 @router.get("/projects/{project_id}/activity", response_model=List[ActivityOut])
+@public_router.get("/projects/{project_id}/activity", response_model=List[ActivityOut])
 async def list_activity(
     project_id: uuid.UUID,
     ctx=Depends(get_tenant_context),

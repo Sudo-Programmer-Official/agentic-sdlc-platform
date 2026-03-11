@@ -17,6 +17,7 @@ from app.services.llm_generator import LLMTaskGenerator
 from app.services.activity_log import log_activity
 
 router = APIRouter(prefix="/store", tags=["generation"])
+public_router = APIRouter(tags=["generation"])
 
 
 async def _assert_project_doc(session: AsyncSession, project_id: uuid.UUID, document_id: uuid.UUID) -> Document:
@@ -30,6 +31,11 @@ async def _assert_project_doc(session: AsyncSession, project_id: uuid.UUID, docu
 
 
 @router.post(
+    "/projects/{project_id}/documents/{document_id}/generate-tasks",
+    response_model=TaskGenResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@public_router.post(
     "/projects/{project_id}/documents/{document_id}/generate-tasks",
     response_model=TaskGenResponse,
     status_code=status.HTTP_201_CREATED,
@@ -71,117 +77,116 @@ async def generate_tasks(
     )
     prev_doc = (await session.execute(prev_doc_stmt)).scalar_one_or_none()
 
-    async with session.begin():
-        # Idempotency guard: active tasks already for this doc version
-        existing_active = await session.execute(
+    # Idempotency guard: active tasks already for this doc version
+    existing_active = await session.execute(
+        select(Task).where(
+            Task.document_id == doc.id,
+            Task.generated_from_document_version == doc.version,
+            Task.status != "DEPRECATED",
+            Task.deleted_at.is_(None),
+        )
+    )
+    existing_tasks = list(existing_active.scalars().all())
+    if existing_tasks and not force:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Active tasks already exist for this document version; use force=true to regenerate.",
+        )
+    if existing_tasks and force:
+        for t in existing_tasks:
+            t.status = "DEPRECATED"
+            await log_activity(
+                session,
+                project_id=project_id,
+                entity_type="task",
+                entity_id=t.id,
+                action_type="task.deprecated",
+                event_type="force-regenerate",
+                previous_state={"status": t.status},
+            )
+
+    # Deprecate tasks from previous doc version and link supersedes
+    old_tasks: List[Task] = []
+    if prev_doc:
+        old_tasks_result = await session.execute(
             select(Task).where(
-                Task.document_id == doc.id,
-                Task.generated_from_document_version == doc.version,
+                Task.document_id == prev_doc.id,
                 Task.status != "DEPRECATED",
                 Task.deleted_at.is_(None),
             )
         )
-        existing_tasks = list(existing_active.scalars().all())
-        if existing_tasks and not force:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Active tasks already exist for this document version; use force=true to regenerate.",
-            )
-        if existing_tasks and force:
-            for t in existing_tasks:
-                t.status = "DEPRECATED"
-                await log_activity(
-                    session,
-                    project_id=project_id,
-                    entity_type="task",
-                    entity_id=t.id,
-                    action_type="task.deprecated",
-                    event_type="force-regenerate",
-                    previous_state={"status": t.status},
-                )
+        old_tasks = list(old_tasks_result.scalars().all())
 
-        # Deprecate tasks from previous doc version and link supersedes
-        old_tasks: List[Task] = []
-        if prev_doc:
-            old_tasks_result = await session.execute(
-                select(Task).where(
-                    Task.document_id == prev_doc.id,
-                    Task.status != "DEPRECATED",
-                    Task.deleted_at.is_(None),
-                )
-            )
-            old_tasks = list(old_tasks_result.scalars().all())
-
-        created_tasks: List[Task] = []
-        for gen_task in generated:
-            task = Task(
-                project_id=project_id,
-                document_id=doc.id,
-                generated_from_document_version=doc.version,
-                title=gen_task.title,
-                description=gen_task.description,
-                category=gen_task.category,
-                status="PENDING",
-                source="ai",
-            )
-            session.add(task)
-            await session.flush()
-
-            session.add(
-                Trace(
-                    project_id=project_id,
-                    from_type="document",
-                    from_id=doc.id,
-                    to_type="task",
-                    to_id=task.id,
-                    relation_type="derives",
-                    relation_strength=gen_task.confidence,
-                    ai_model_name=prov.get("ai_model_name"),
-                    ai_prompt_hash=prov.get("ai_prompt_hash"),
-                    ai_run_id=prov.get("ai_run_id"),
-                    confidence_score=gen_task.confidence,
-                    response_snapshot=prov.get("response_snapshot"),
-                    temperature=prov.get("temperature"),
-                    tokens_prompt=prov.get("tokens_prompt"),
-                    tokens_completion=prov.get("tokens_completion"),
-                )
-            )
-
-            created_tasks.append(task)
-
-        if old_tasks:
-            for old in old_tasks:
-                old.status = "DEPRECATED"
-                # supersedes link from old to each new task (fan-out)
-                for new_task in created_tasks:
-                    session.add(
-                        Trace(
-                            project_id=project_id,
-                            from_type="task",
-                            from_id=old.id,
-                            to_type="task",
-                            to_id=new_task.id,
-                            relation_type="supersedes",
-                            relation_strength=1.0,
-                        )
-                    )
-
-        await log_activity(
-            session,
+    created_tasks: List[Task] = []
+    for gen_task in generated:
+        task = Task(
             project_id=project_id,
-            entity_type="document",
-            entity_id=doc.id,
-            action_type="tasks.generated",
-            event_type="regenerate" if prev_doc else "generate",
-            metadata={
-                "model": prov.get("ai_model_name"),
-                "new_tasks": len(created_tasks),
-                "deprecated_tasks": len(old_tasks),
-                "document_version": doc.version,
-                "forced": force,
-            },
-            previous_state={"old_tasks": [str(t.id) for t in old_tasks]} if old_tasks else None,
-            new_state={"new_tasks": [str(t.id) for t in created_tasks]},
+            document_id=doc.id,
+            generated_from_document_version=doc.version,
+            title=gen_task.title,
+            description=gen_task.description,
+            category=gen_task.category,
+            status="PENDING",
+            source="ai",
         )
+        session.add(task)
+        await session.flush()
+
+        session.add(
+            Trace(
+                project_id=project_id,
+                from_type="document",
+                from_id=doc.id,
+                to_type="task",
+                to_id=task.id,
+                relation_type="derives",
+                relation_strength=gen_task.confidence,
+                ai_model_name=prov.get("ai_model_name"),
+                ai_prompt_hash=prov.get("ai_prompt_hash"),
+                ai_run_id=prov.get("ai_run_id"),
+                confidence_score=gen_task.confidence,
+                response_snapshot=prov.get("response_snapshot"),
+                temperature=prov.get("temperature"),
+                tokens_prompt=prov.get("tokens_prompt"),
+                tokens_completion=prov.get("tokens_completion"),
+            )
+        )
+
+        created_tasks.append(task)
+
+    if old_tasks:
+        for old in old_tasks:
+            old.status = "DEPRECATED"
+            for new_task in created_tasks:
+                session.add(
+                    Trace(
+                        project_id=project_id,
+                        from_type="task",
+                        from_id=old.id,
+                        to_type="task",
+                        to_id=new_task.id,
+                        relation_type="supersedes",
+                        relation_strength=1.0,
+                    )
+                )
+
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type="document",
+        entity_id=doc.id,
+        action_type="tasks.generated",
+        event_type="regenerate" if prev_doc else "generate",
+        metadata={
+            "model": prov.get("ai_model_name"),
+            "new_tasks": len(created_tasks),
+            "deprecated_tasks": len(old_tasks),
+            "document_version": doc.version,
+            "forced": force,
+        },
+        previous_state={"old_tasks": [str(t.id) for t in old_tasks]} if old_tasks else None,
+        new_state={"new_tasks": [str(t.id) for t in created_tasks]},
+    )
+    await session.commit()
 
     return TaskGenResponse(tasks=[GeneratedTask(**t.model_dump()) for t in generated])

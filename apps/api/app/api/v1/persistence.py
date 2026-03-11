@@ -238,26 +238,26 @@ async def create_run(
             detail="A run is already in progress for this project; finish or cancel it before starting another.",
         )
     executor_name = (payload.executor if payload else "dummy").lower()
-    async with session.begin():
-        run = Run(project_id=project_id, tenant_id=tenant_id, status="QUEUED")
-        run.executor = executor_name
-        session.add(run)
-        await session.flush()
-        await log_activity(
-            session,
-            project_id=project_id,
-            entity_type="run",
-            entity_id=run.id,
-            action_type="run.created",
-            metadata={"status": run.status},
-        )
-        await record_event(
-            session,
-            project_id=project_id,
-            run_id=run.id,
-            event_type="RUN_CREATED",
-            actor_type="USER",
-        )
+    run = Run(project_id=project_id, tenant_id=tenant_id, status="QUEUED")
+    run.executor = executor_name
+    session.add(run)
+    await session.flush()
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type="run",
+        entity_id=run.id,
+        action_type="run.created",
+        metadata={"status": run.status},
+    )
+    await record_event(
+        session,
+        project_id=project_id,
+        run_id=run.id,
+        event_type="RUN_CREATED",
+        actor_type="USER",
+    )
+    await session.commit()
     await session.refresh(run)
     # Kick off orchestrator asynchronously
     orchestrator = RunOrchestrator(SessionLocal, executor_name=executor_name)
@@ -283,6 +283,7 @@ async def list_runs(
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
+@public_router.get("/runs/{run_id}", response_model=RunOut)
 async def get_run(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)) -> RunOut:
     run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
     if not run:
@@ -315,6 +316,7 @@ class ClaimRequest(BaseModel):
 
 
 @router.patch("/runs/{run_id}/status", response_model=RunOut)
+@public_router.patch("/runs/{run_id}/status", response_model=RunOut)
 async def update_run_status(
     run_id: uuid.UUID,
     payload: RunStatusUpdate,
@@ -339,28 +341,29 @@ async def update_run_status(
     ok = await update_run_status(session, run_id, ["QUEUED", "RUNNING"], "CANCELED")
     if not ok:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run already finished or locked.")
-    async with session.begin():
-        await log_activity(
-            session,
-            project_id=run.project_id,
-            entity_type="run",
-            entity_id=run.id,
-            action_type="run.status",
-            metadata={"status": "CANCELED"},
-        )
-        await record_event(
-            session,
-            project_id=run.project_id,
-            run_id=run.id,
-            event_type="RUN_CANCELED",
-            actor_type="USER",
-            payload={"previous": prev, "new": "CANCELED"},
-        )
+    await log_activity(
+        session,
+        project_id=run.project_id,
+        entity_type="run",
+        entity_id=run.id,
+        action_type="run.status",
+        metadata={"status": "CANCELED"},
+    )
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_CANCELED",
+        actor_type="USER",
+        payload={"previous": prev, "new": "CANCELED"},
+    )
+    await session.commit()
     await session.refresh(run)
     return _run_out(run)
 
 
 @router.get("/runs/{run_id}/events", response_model=List[RunEventOut])
+@public_router.get("/runs/{run_id}/events", response_model=List[RunEventOut])
 async def list_run_events(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)) -> List[RunEventOut]:
     run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
     if not run:
@@ -376,6 +379,7 @@ async def list_run_events(run_id: uuid.UUID, ctx=Depends(get_tenant_context), se
 
 # WorkItems
 @router.get("/projects/{project_id}/runs/{run_id}/work-items", response_model=List[WorkItemOut])
+@public_router.get("/projects/{project_id}/runs/{run_id}/work-items", response_model=List[WorkItemOut])
 async def list_work_items(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
@@ -405,6 +409,7 @@ async def get_work_item(work_item_id: uuid.UUID, ctx=Depends(get_tenant_context)
 
 
 @router.get("/runs/{run_id}/work-dag")
+@public_router.get("/runs/{run_id}/work-dag")
 async def get_work_dag(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)) -> dict:
     run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
@@ -717,8 +722,8 @@ async def update_stage(
             )
 
     project.status = target
-    async with session.begin():
-        session.add(project)
+    session.add(project)
+    await session.commit()
     await session.refresh(project)
     return _project_out(project)
 
@@ -756,28 +761,28 @@ async def create_document(
 
     content_hash = sha256(payload.body.encode("utf-8")).hexdigest()
 
-    async with session.begin():
-        document = Document(
-            project_id=project_id,
-            tenant_id=ctx.tenant_id,
-            type=payload.type,
-            title=payload.title,
-            body=payload.body,
-            version=current_version + 1,
-            content_hash=content_hash,
-            source=payload.source,
-            created_by=payload.created_by,
-        )
-        session.add(document)
-        await session.flush()
-        await log_activity(
-            session,
-            project_id=project_id,
-            entity_type="document",
-            entity_id=document.id,
-            action_type="document.created",
-            metadata={"type": payload.type, "version": document.version},
-        )
+    document = Document(
+        project_id=project_id,
+        tenant_id=ctx.tenant_id,
+        type=payload.type,
+        title=payload.title,
+        body=payload.body,
+        version=current_version + 1,
+        content_hash=content_hash,
+        source=payload.source,
+        created_by=payload.created_by,
+    )
+    session.add(document)
+    await session.flush()
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type="document",
+        entity_id=document.id,
+        action_type="document.created",
+        metadata={"type": payload.type, "version": document.version},
+    )
+    await session.commit()
     await session.refresh(document)
     return DocumentOut.model_validate(document)
 
@@ -844,30 +849,30 @@ async def create_task(
         if document.project_id != project_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document not in project")
 
-    async with session.begin():
-        task = Task(
-            tenant_id=ctx.tenant_id,
-            project_id=project_id,
-            document_id=payload.document_id,
-            title=payload.title,
-            description=payload.description,
-            category=payload.category,
-            stage=payload.stage,
-            status=payload.status,
-            assignee=payload.assignee,
-            source=payload.source,
-            created_by=payload.created_by,
-        )
-        session.add(task)
-        await session.flush()
-        await log_activity(
-            session,
-            project_id=project_id,
-            entity_type="task",
-            entity_id=task.id,
-            action_type="task.created",
-            metadata={"title": payload.title, "status": payload.status},
-        )
+    task = Task(
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+        document_id=payload.document_id,
+        title=payload.title,
+        description=payload.description,
+        category=payload.category,
+        stage=payload.stage,
+        status=payload.status,
+        assignee=payload.assignee,
+        source=payload.source,
+        created_by=payload.created_by,
+    )
+    session.add(task)
+    await session.flush()
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type="task",
+        entity_id=task.id,
+        action_type="task.created",
+        metadata={"title": payload.title, "status": payload.status},
+    )
+    await session.commit()
     await session.refresh(task)
     return TaskOut.model_validate(task)
 

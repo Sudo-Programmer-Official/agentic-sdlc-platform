@@ -9,10 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.routes import router as v1_router
 from app.api.v1.persistence import router as store_router, public_router as public_store_router
-from app.api.v1.trace_artifact import router as trace_router
-from app.api.v1.generation import router as gen_router
-from app.api.v1.impact import router as impact_router
-from app.api.v1.activity import router as activity_router
+from app.api.v1.trace_artifact import router as trace_router, public_router as public_trace_router
+from app.api.v1.generation import router as gen_router, public_router as public_gen_router
+from app.api.v1.impact import router as impact_router, public_router as public_impact_router
+from app.api.v1.activity import router as activity_router, public_router as public_activity_router
 from app.api.v1.snapshot import router as snapshot_router
 from app.api.v1.health import router as health_router, public_router as public_health_router
 from app.api.v1.lifecycle_score import router as lifecycle_router, public_router as public_lifecycle_router
@@ -72,9 +72,13 @@ def create_app() -> FastAPI:
     app.include_router(store_router, prefix=settings.api_prefix)
     app.include_router(public_store_router, prefix=settings.api_prefix)
     app.include_router(trace_router, prefix=settings.api_prefix)
+    app.include_router(public_trace_router, prefix=settings.api_prefix)
     app.include_router(gen_router, prefix=settings.api_prefix)
+    app.include_router(public_gen_router, prefix=settings.api_prefix)
     app.include_router(impact_router, prefix=settings.api_prefix)
+    app.include_router(public_impact_router, prefix=settings.api_prefix)
     app.include_router(activity_router, prefix=settings.api_prefix)
+    app.include_router(public_activity_router, prefix=settings.api_prefix)
     app.include_router(snapshot_router, prefix=settings.api_prefix)
     # Legacy /store/... and public /projects/... routes
     app.include_router(health_router, prefix=settings.api_prefix)

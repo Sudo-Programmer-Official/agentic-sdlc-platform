@@ -25,7 +25,7 @@ export type CreateDocumentPayload = {
 };
 
 export async function previewImpact(projectId: string, documentId: string, proposedBody: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents/${documentId}/impact-preview`, {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/documents/${documentId}/impact-preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ proposed_body: proposedBody })
@@ -35,7 +35,7 @@ export async function previewImpact(projectId: string, documentId: string, propo
 }
 
 export async function regenerateTasks(projectId: string, documentId: string, force = false) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents/${documentId}/generate-tasks?force=${force}`, {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/documents/${documentId}/generate-tasks?force=${force}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -45,13 +45,13 @@ export async function regenerateTasks(projectId: string, documentId: string, for
 }
 
 export async function listTasks(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/tasks`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/tasks`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function createTask(projectId: string, payload: CreateTaskPayload) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/tasks`, {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -61,25 +61,25 @@ export async function createTask(projectId: string, payload: CreateTaskPayload) 
 }
 
 export async function explainTask(projectId: string, taskId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/tasks/${taskId}/explain`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/tasks/${taskId}/explain`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function listActivity(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/activity`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/activity`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function fetchProjectMeta(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function updateProjectStage(projectId: string, toStage: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/stage`, {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/stage`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ to_stage: toStage })
@@ -89,13 +89,13 @@ export async function updateProjectStage(projectId: string, toStage: string) {
 }
 
 export async function listDocuments(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/documents`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function createDocument(projectId: string, payload: CreateDocumentPayload) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/documents`, {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/documents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -106,13 +106,13 @@ export async function createDocument(projectId: string, payload: CreateDocumentP
 
 // Runs
 export async function listRuns(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/runs`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function createRun(projectId: string, executor = "dummy") {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/runs`, {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ executor }),
@@ -122,7 +122,7 @@ export async function createRun(projectId: string, executor = "dummy") {
 }
 
 export async function updateRunStatus(runId: string, status: string) {
-  const resp = await fetch(`${API_BASE}/store/runs/${runId}/status`, {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/status`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status })
@@ -132,38 +132,38 @@ export async function updateRunStatus(runId: string, status: string) {
 }
 
 export async function fetchHealth(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/health`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/health`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function fetchLifecycleScore(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/lifecycle-score`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/lifecycle-score`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function fetchLifecycleScoreHistory(projectId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/lifecycle-score-history`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/lifecycle-score-history`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 // Work items / DAG / events
 export async function listWorkItems(projectId: string, runId: string) {
-  const resp = await fetch(`${API_BASE}/store/projects/${projectId}/runs/${runId}/work-items`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/runs/${runId}/work-items`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function getWorkDag(runId: string) {
-  const resp = await fetch(`${API_BASE}/store/runs/${runId}/work-dag`);
+  const resp = await fetch(`${API_BASE}/runs/${runId}/work-dag`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }
 
 export async function listRunEvents(runId: string) {
-  const resp = await fetch(`${API_BASE}/store/runs/${runId}/events`);
+  const resp = await fetch(`${API_BASE}/runs/${runId}/events`);
   if (!resp.ok) throw new Error(await resp.text());
   return resp.json();
 }

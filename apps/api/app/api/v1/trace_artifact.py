@@ -20,6 +20,7 @@ from app.schemas.explain import ExplainTaskResponse
 from app.schemas.persistence import DocumentOut, TaskOut
 
 router = APIRouter(prefix="/store", tags=["store-graph"])
+public_router = APIRouter(tags=["graph"])
 
 
 async def _assert_project(session: AsyncSession, project_id: uuid.UUID) -> Project:
@@ -394,6 +395,10 @@ async def backtrace_analysis(
     "/projects/{project_id}/documents/{document_id}/history",
     response_model=List[DocumentOut],
 )
+@public_router.get(
+    "/projects/{project_id}/documents/{document_id}/history",
+    response_model=List[DocumentOut],
+)
 async def document_history(
     project_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -422,6 +427,10 @@ async def document_history(
 # ---------------------------
 
 @router.get(
+    "/projects/{project_id}/tasks/{task_id}/explain",
+    response_model=ExplainTaskResponse,
+)
+@public_router.get(
     "/projects/{project_id}/tasks/{task_id}/explain",
     response_model=ExplainTaskResponse,
 )

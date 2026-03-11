@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.db.models import Run, WorkItem
 from app.services.event_log import record_event
+from app.services.runtime_lineage import link_run_to_work_item
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 
@@ -43,6 +44,7 @@ async def tick(session):
             session,
             project_id=wi.project_id,
             run_id=wi.run_id,
+            work_item_id=wi.id,
             event_type="WORK_ITEM_LEASE_EXPIRED",
             actor_type="SYSTEM",
             payload={"work_item_id": str(wi.id)},
@@ -137,10 +139,13 @@ async def tick(session):
                     },
                 )
                 session.add(fix)
+                await session.flush()
+                await link_run_to_work_item(session, fix)
                 await record_event(
                     session,
                     project_id=fix.project_id,
                     run_id=fix.run_id,
+                    work_item_id=fix.id,
                     event_type="WORK_ITEM_CREATED",
                     actor_type="SYSTEM",
                     payload={"work_item_id": str(fix.id), "type": fix.type},

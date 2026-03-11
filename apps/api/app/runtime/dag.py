@@ -6,6 +6,7 @@ from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import WorkItem, WorkItemEdge
+from app.services.runtime_lineage import link_run_to_work_item
 
 
 async def generate_template_dag(
@@ -58,6 +59,8 @@ async def generate_template_dag(
         session.add(wi)
         created.append(wi)
     await session.flush()
+    for wi in created:
+        await link_run_to_work_item(session, wi)
 
     # edges
     key_to_id = {wi.key: wi.id for wi in created}

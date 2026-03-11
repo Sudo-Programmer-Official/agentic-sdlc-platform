@@ -20,7 +20,6 @@ from app.db.models import (
     WorkItem,
     WorkItemEdge,
     Agent,
-    WorkItemArtifact,
 )
 from app.db.session import get_session
 from app.schemas.persistence import (
@@ -41,6 +40,7 @@ from app.schemas.persistence import (
 )
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
+from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_run_status, update_work_item_status
 from app.runtime.orchestrator import RunOrchestrator
 from app.db.session import SessionLocal
@@ -299,6 +299,7 @@ class RunEventOut(BaseModel):
     project_id: uuid.UUID
     run_id: uuid.UUID
     task_id: uuid.UUID | None
+    work_item_id: uuid.UUID | None
     event_type: str
     ts: datetime
     actor_type: str | None = None
@@ -524,6 +525,7 @@ async def claim_work_items(
                 session,
                 project_id=fresh.project_id,
                 run_id=fresh.run_id,
+                work_item_id=fresh.id,
                 event_type="WORK_ITEM_CLAIMED",
                 actor_type="AGENT",
                 actor_id=str(agent_id),
@@ -563,21 +565,12 @@ async def complete_work_item(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Unable to complete work item (state changed).")
     wi = await session.get(WorkItem, wi.id)
     async with session.begin():
-        # store artifacts
-        for art in payload.artifacts:
-            session.add(
-                WorkItemArtifact(
-                    tenant_id=wi.tenant_id,
-                    work_item_id=wi.id,
-                    type=art.get("type", "artifact"),
-                    uri=art.get("uri"),
-                    payload=art.get("payload", {}),
-                )
-            )
+        await persist_work_item_artifacts(session, wi, payload.artifacts)
         await record_event(
             session,
             project_id=wi.project_id,
             run_id=wi.run_id,
+            work_item_id=wi.id,
             event_type="WORK_ITEM_DONE",
             actor_type="AGENT",
             payload={"work_item_id": str(wi.id), "status": "DONE"},
@@ -633,6 +626,7 @@ async def fail_work_item(
             session,
             project_id=wi.project_id,
             run_id=wi.run_id,
+            work_item_id=wi.id,
             event_type=event_type,
             actor_type="AGENT",
             payload={"work_item_id": str(wi.id), "error": payload.error, "retry": retrying},

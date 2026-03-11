@@ -13,6 +13,7 @@ from app.runtime.context import RunContext
 from app.runtime.executor import TaskExecutor
 from app.runtime.registry import get_executor
 from app.services.event_log import record_event
+from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_work_item_status
 from app.runtime.dag import generate_template_dag
 from app.core.config import get_settings
@@ -111,6 +112,7 @@ class RunOrchestrator:
                             session,
                             project_id=wi.project_id,
                             run_id=wi.run_id,
+                            work_item_id=wi.id,
                             event_type="WORK_ITEM_LEASE_EXPIRED",
                             actor_type="SYSTEM",
                             payload={"work_item_id": str(wi.id)},
@@ -227,6 +229,7 @@ class RunOrchestrator:
                 session,
                 project_id=run.project_id,
                 run_id=run.id,
+                work_item_id=wi.id,
                 event_type="WORK_ITEM_STARTED",
                 actor_type="SYSTEM",
                 payload={"work_item_id": str(wi.id), "type": wi.type, "executor": wi.executor},
@@ -239,10 +242,12 @@ class RunOrchestrator:
             wi.status = result.get("status", "DONE")
             wi.result = result.get("payload", {})
             wi.finished_at = datetime.now(timezone.utc)
+            await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
             await record_event(
                 session,
                 project_id=run.project_id,
                 run_id=run.id,
+                work_item_id=wi.id,
                 event_type="WORK_ITEM_DONE" if wi.status == "DONE" else "WORK_ITEM_FAILED",
                 actor_type="SYSTEM",
                 payload={
@@ -263,6 +268,7 @@ class RunOrchestrator:
                 session,
                 project_id=run.project_id,
                 run_id=run.id,
+                work_item_id=wi.id,
                 event_type="WORK_ITEM_FAILED",
                 actor_type="SYSTEM",
                 payload={"error": str(exc)},

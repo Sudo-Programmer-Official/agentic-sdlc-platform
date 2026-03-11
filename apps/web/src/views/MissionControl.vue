@@ -277,7 +277,7 @@ const displayWorkItemMap = computed(
 
 const timelineLogs = computed(() =>
   runEvents.value.map((event) => {
-    const taskId = event.task_id || event.payload?.work_item_id || null;
+    const taskId = event.work_item_id || event.task_id || event.payload?.work_item_id || null;
     const workItem = taskId ? displayWorkItemMap.value.get(taskId) : null;
     return {
       timestamp: event.ts,

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Project, Task, Document, Artifact, Trace, Approval
+from app.db.models import Project, Task, Document, Artifact, Trace, Approval, Run, WorkItem
 from app.db.session import get_session
 from app.core.config import get_settings
 from app.api.v1.health import project_health
@@ -49,6 +49,7 @@ async def create_trace(
                 detail="Cycles detected in graph; trace creation blocked until resolved (or disable health_cycles_block).",
             )
     trace = Trace(
+        project_id=project_id,
         from_type=payload.from_type,
         from_id=payload.from_id,
         to_type=payload.to_type,
@@ -69,9 +70,13 @@ async def list_traces(project_id: uuid.UUID, session: AsyncSession = Depends(get
         select(Trace).where(
             (Trace.from_id == project_id)  # project-level traces uncommon
             | (Trace.to_id == project_id)
+            | (Trace.from_id.in_(select(Run.id).where(Run.project_id == project_id)))
+            | (Trace.from_id.in_(select(WorkItem.id).where(WorkItem.project_id == project_id)))
             | (Trace.from_id.in_(select(Document.id).where(Document.project_id == project_id)))
             | (Trace.from_id.in_(select(Task.id).where(Task.project_id == project_id)))
             | (Trace.from_id.in_(select(Artifact.id).where(Artifact.project_id == project_id)))
+            | (Trace.to_id.in_(select(Run.id).where(Run.project_id == project_id)))
+            | (Trace.to_id.in_(select(WorkItem.id).where(WorkItem.project_id == project_id)))
             | (Trace.to_id.in_(select(Document.id).where(Document.project_id == project_id)))
             | (Trace.to_id.in_(select(Task.id).where(Task.project_id == project_id)))
             | (Trace.to_id.in_(select(Artifact.id).where(Artifact.project_id == project_id)))
@@ -100,15 +105,48 @@ async def create_artifact(
         if task.project_id != project_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Task not in project")
 
+    run = None
+    if payload.run_id:
+        run = await session.get(Run, payload.run_id)
+        if not run:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+        if run.project_id != project_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Run not in project")
+
+    work_item = None
+    if payload.work_item_id:
+        work_item = await session.get(WorkItem, payload.work_item_id)
+        if not work_item:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work item not found")
+        if work_item.project_id != project_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Work item not in project")
+        if run and work_item.run_id != run.id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Work item does not belong to run")
+
     artifact = Artifact(
         project_id=project_id,
         task_id=payload.task_id,
+        run_id=payload.run_id or (work_item.run_id if work_item else None),
+        work_item_id=payload.work_item_id,
         type=payload.type,
         uri=payload.uri,
         version=payload.version,
         extra_metadata=payload.metadata,
     )
     session.add(artifact)
+    await session.flush()
+    if work_item:
+        session.add(
+            Trace(
+                project_id=project_id,
+                from_type="work_item",
+                from_id=work_item.id,
+                to_type="artifact",
+                to_id=artifact.id,
+                relation_type="produces",
+                relation_strength=1.0,
+            )
+        )
     await session.commit()
     await session.refresh(artifact)
     return ArtifactOut.model_validate(artifact)
@@ -163,6 +201,8 @@ ENTITY_TABLES = {
     "project": Project,
     "document": Document,
     "task": Task,
+    "run": Run,
+    "work_item": WorkItem,
     "artifact": Artifact,
 }
 
@@ -175,6 +215,17 @@ async def load_entity(session: AsyncSession, entity_type: str, entity_id: uuid.U
     if not obj or getattr(obj, "deleted_at", None):
         return None
     return obj
+
+
+def _entity_label(entity) -> str:
+    return (
+        getattr(entity, "name", None)
+        or getattr(entity, "title", None)
+        or getattr(entity, "key", None)
+        or getattr(entity, "type", None)
+        or getattr(entity, "status", None)
+        or str(getattr(entity, "id"))
+    )
 
 
 async def fetch_traces_batch(
@@ -228,7 +279,7 @@ async def bfs(
             visited.add((current_type, current_id))
             if not entity:
                 continue
-            label = getattr(entity, "name", None) or getattr(entity, "title", None) or str(current_id)
+            label = _entity_label(entity)
             nodes[(current_type, current_id)] = GraphNode(
                 id=current_id, type=current_type, label=label, meta=None
             )

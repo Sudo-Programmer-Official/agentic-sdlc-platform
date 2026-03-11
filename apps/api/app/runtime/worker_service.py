@@ -8,10 +8,11 @@ from sqlalchemy import select, func, and_, exists
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.db.models import Agent, WorkItem, WorkItemArtifact
+from app.db.models import Agent, WorkItem
 from app.runtime.context import RunContext
 from app.runtime.registry import get_executor
 from app.services.event_log import record_event
+from app.services.runtime_lineage import link_run_to_work_item, persist_work_item_artifacts
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 
@@ -45,10 +46,13 @@ async def enqueue_fix_item(session, failed_wi: WorkItem) -> None:
         },
     )
     session.add(fix)
+    await session.flush()
+    await link_run_to_work_item(session, fix)
     await record_event(
         session,
         project_id=fix.project_id,
         run_id=fix.run_id,
+        work_item_id=fix.id,
         event_type="WORK_ITEM_CREATED",
         actor_type="SYSTEM",
         payload={"work_item_id": str(fix.id), "type": fix.type},
@@ -85,10 +89,13 @@ async def enqueue_test_run(session, source_wi: WorkItem) -> None:
         payload={},
     )
     session.add(test)
+    await session.flush()
+    await link_run_to_work_item(session, test)
     await record_event(
         session,
         project_id=test.project_id,
         run_id=test.run_id,
+        work_item_id=test.id,
         event_type="WORK_ITEM_CREATED",
         actor_type="SYSTEM",
         payload={"work_item_id": str(test.id), "type": test.type},
@@ -105,10 +112,12 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
         wi.finished_at = datetime.now(timezone.utc)
         wi.last_error = None
         session.add(wi)
+        await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
         await record_event(
             session,
             project_id=wi.project_id,
             run_id=wi.run_id,
+            work_item_id=wi.id,
             event_type="WORK_ITEM_DONE" if wi.status == "DONE" else "WORK_ITEM_FAILED",
             actor_type="AGENT",
             actor_id=str(agent.id),
@@ -123,6 +132,7 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
             session,
             project_id=wi.project_id,
             run_id=wi.run_id,
+            work_item_id=wi.id,
             event_type="WORK_ITEM_FAILED",
             actor_type="AGENT",
             actor_id=str(agent.id),
@@ -182,6 +192,7 @@ async def tick_worker(agent_id: uuid.UUID):
             session,
             project_id=wi.project_id,
             run_id=wi.run_id,
+            work_item_id=wi.id,
             event_type="WORK_ITEM_CLAIMED",
             actor_type="AGENT",
             actor_id=str(agent_id),

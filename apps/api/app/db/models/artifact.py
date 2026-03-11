@@ -11,7 +11,11 @@ from app.db.mixins import TimestampMixin, SoftDeleteMixin
 
 class Artifact(TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "artifacts"
-    __table_args__ = (Index("idx_artifacts_project", "project_id"),)
+    __table_args__ = (
+        Index("idx_artifacts_project", "project_id"),
+        Index("idx_artifacts_run", "run_id"),
+        Index("idx_artifacts_work_item", "work_item_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, default=uuid.UUID(int=0))
@@ -20,6 +24,12 @@ class Artifact(TimestampMixin, SoftDeleteMixin, Base):
     )
     task_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
+    )
+    work_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("work_items.id", ondelete="SET NULL"), nullable=True
     )
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     uri: Mapped[str] = mapped_column(Text, nullable=False)

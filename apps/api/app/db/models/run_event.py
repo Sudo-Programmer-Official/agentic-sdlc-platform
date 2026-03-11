@@ -16,6 +16,7 @@ class RunEvent(Base):
         Index("idx_run_events_run_ts", "run_id", "ts"),
         Index("idx_run_events_project_ts", "project_id", "ts"),
         Index("idx_run_events_task_ts", "task_id", "ts"),
+        Index("idx_run_events_work_item_ts", "work_item_id", "ts"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -28,6 +29,9 @@ class RunEvent(Base):
     )
     task_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    work_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("work_items.id", ondelete="SET NULL"), nullable=True, index=True
     )
     event_type: Mapped[str] = mapped_column(String(48), nullable=False)
     ts: Mapped[datetime] = mapped_column(default=func.now(), nullable=False)

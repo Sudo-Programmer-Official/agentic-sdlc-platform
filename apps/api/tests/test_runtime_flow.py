@@ -5,9 +5,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
-from app.db.models import Agent, Project, Run, RunEvent, WorkItem
+from app.db.models import Agent, Artifact, Project, Run, RunEvent, Trace, WorkItem
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
+from app.runtime import orchestrator as orchestrator_module
 from app.runtime.orchestrator import RunOrchestrator
 from app.runtime import worker_service
 from app.runtime.worker_service import tick_worker
@@ -94,6 +95,19 @@ async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db
         assert "RUN_COMPLETED" in event_types
         assert any(event.payload and event.payload.get("work_item_id") for event in events if event.event_type.startswith("WORK_ITEM_"))
         assert all(event.task_id is None for event in events if event.event_type.startswith("WORK_ITEM_"))
+        assert all(event.work_item_id is not None for event in events if event.event_type.startswith("WORK_ITEM_"))
+
+        traces = (
+            await session.execute(
+                select(Trace).where(
+                    Trace.project_id == project.id,
+                    Trace.from_type == "run",
+                    Trace.to_type == "work_item",
+                    Trace.relation_type == "executes",
+                )
+            )
+        ).scalars().all()
+        assert len(traces) == len(work_items)
 
 
 @pytest.mark.anyio
@@ -159,3 +173,68 @@ async def test_external_worker_claims_and_executes_dummy_work_item(monkeypatch, 
         event_types = [event.event_type for event in events if event.payload and event.payload.get("work_item_id") == str(work_item_id)]
         assert "WORK_ITEM_CLAIMED" in event_types
         assert "WORK_ITEM_DONE" in event_types
+        assert all(event.work_item_id is not None for event in events if event.payload and event.payload.get("work_item_id"))
+
+
+class ArtifactExecutor:
+    name = "dummy"
+
+    async def execute(self, work_item, context):
+        return {
+            "status": "DONE",
+            "message": "artifact generated",
+            "payload": {
+                "artifacts": [
+                    {
+                        "type": "git_diff",
+                        "content": "diff --git a/file b/file",
+                    }
+                ]
+            },
+        }
+
+
+@pytest.mark.anyio
+async def test_embedded_runtime_persists_canonical_artifacts_and_produces_traces(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Artifact runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+        project_id = project.id
+
+    monkeypatch.setattr(orchestrator_module, "get_executor", lambda _: ArtifactExecutor())
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        artifacts = (
+            await session.execute(
+                select(Artifact).where(Artifact.project_id == project_id).order_by(Artifact.created_at, Artifact.id)
+            )
+        ).scalars().all()
+        assert artifacts
+        assert all(artifact.run_id == run_id for artifact in artifacts)
+        assert all(artifact.work_item_id is not None for artifact in artifacts)
+        assert all(artifact.uri.startswith("inline://work-items/") for artifact in artifacts)
+
+        produce_edges = (
+            await session.execute(
+                select(Trace).where(
+                    Trace.project_id == project_id,
+                    Trace.from_type == "work_item",
+                    Trace.to_type == "artifact",
+                    Trace.relation_type == "produces",
+                )
+            )
+        ).scalars().all()
+        assert len(produce_edges) == len(artifacts)

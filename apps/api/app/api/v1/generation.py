@@ -13,6 +13,8 @@ from app.schemas.generation import TaskGenInput, TaskGenResponse, GeneratedTask
 from app.schemas.trace import TraceOut
 from app.schemas.persistence import TaskOut
 from app.schemas.provenance import Provenance
+from app.api.v1.health import project_health
+from app.api.v1.lifecycle_score import lifecycle_score
 from app.services.llm_generator import LLMTaskGenerator
 from app.services.activity_log import log_activity
 
@@ -120,6 +122,7 @@ async def generate_tasks(
     created_tasks: List[Task] = []
     for gen_task in generated:
         task = Task(
+            tenant_id=doc.tenant_id,
             project_id=project_id,
             document_id=doc.id,
             generated_from_document_version=doc.version,
@@ -134,6 +137,7 @@ async def generate_tasks(
 
         session.add(
             Trace(
+                tenant_id=doc.tenant_id,
                 project_id=project_id,
                 from_type="document",
                 from_id=doc.id,
@@ -160,6 +164,7 @@ async def generate_tasks(
             for new_task in created_tasks:
                 session.add(
                     Trace(
+                        tenant_id=doc.tenant_id,
                         project_id=project_id,
                         from_type="task",
                         from_id=old.id,

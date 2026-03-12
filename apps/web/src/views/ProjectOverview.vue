@@ -180,24 +180,36 @@
           Activity Log
         </el-button>
         <div class="col-span-full grid grid-cols-3 gap-2">
-          <el-button
-            :disabled="!allowedTransitions.includes('PLAN') || stageUpdating"
-            @click="advanceStage('PLAN')"
-          >
-            Move to PLAN
-          </el-button>
-          <el-button
-            :disabled="!allowedTransitions.includes('RUN') || stageUpdating"
-            @click="advanceStage('RUN')"
-          >
-            Move to RUN
-          </el-button>
-          <el-button
-            :disabled="!allowedTransitions.includes('EVALUATE') || stageUpdating"
-            @click="advanceStage('EVALUATE')"
-          >
-            Move to EVALUATE
-          </el-button>
+          <el-tooltip :content="stageBlockReason('PLAN')" placement="top" :disabled="!stageBlockReason('PLAN')">
+            <span>
+              <el-button
+                :disabled="isStageBlocked('PLAN') || stageUpdating"
+                @click="advanceStage('PLAN')"
+              >
+                Move to PLAN
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-tooltip :content="stageBlockReason('RUN')" placement="top" :disabled="!stageBlockReason('RUN')">
+            <span>
+              <el-button
+                :disabled="isStageBlocked('RUN') || stageUpdating"
+                @click="advanceStage('RUN')"
+              >
+                Move to RUN
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-tooltip :content="stageBlockReason('EVALUATE')" placement="top" :disabled="!stageBlockReason('EVALUATE')">
+            <span>
+              <el-button
+                :disabled="isStageBlocked('EVALUATE') || stageUpdating"
+                @click="advanceStage('EVALUATE')"
+              >
+                Move to EVALUATE
+              </el-button>
+            </span>
+          </el-tooltip>
         </div>
       </div>
       <div v-if="stageMessage" class="mt-2 text-xs text-emerald-600">{{ stageMessage }}</div>
@@ -478,7 +490,7 @@ import { ElMessage } from "element-plus";
 import StageBadge from "../components/StageBadge.vue";
 import { projectContext, updateProjectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
-import { previewImpact, regenerateTasks, listTasks, createTask, createDocument, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, updateProjectStage, listRuns, createRun, updateRunStatus } from "../api/lifecycle";
+import { previewImpact, regenerateTasks, listTasks, createTask, createDocument, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, updateProjectStage, listRuns, createRun, updateRunStatus, listWorkItems, listRunEvents } from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -572,6 +584,8 @@ const workItems = ref<any[]>([]);
 const workItemsLoading = ref(false);
 const workItemError = ref("");
 const runEvents = ref<any[]>([]);
+const hasCompletedRun = computed(() => runs.value.some((run) => run.status === "COMPLETED"));
+const hasRunningRun = computed(() => runs.value.some((run) => ["RUNNING", "QUEUED"].includes(run.status)));
 const riskClass = computed(() => {
   const risk = lifecycleScore.value?.risk_level || "UNKNOWN";
   if (risk === "HIGH") return "text-rose-600";
@@ -591,6 +605,28 @@ function goToRun() {
   }
   error.value = "";
   router.push(`/projects/${projectId.value}/run`);
+}
+
+function stageBlockReason(target: string) {
+  if (!allowedTransitions.value.includes(target)) return "";
+  if (target === "PLAN" && !documents.value.length) {
+    return "Add at least one document before moving to PLAN.";
+  }
+  if (target === "RUN" && !tasks.value.length) {
+    return "Create or generate tasks before moving to RUN.";
+  }
+  if (target === "EVALUATE" && !hasCompletedRun.value) {
+    return "Complete at least one run before moving to EVALUATE.";
+  }
+  if (target === "EVALUATE" && hasRunningRun.value) {
+    return "Wait for the active run to finish before moving to EVALUATE.";
+  }
+  return "";
+}
+
+function isStageBlocked(target: string) {
+  if (!allowedTransitions.value.includes(target)) return true;
+  return Boolean(stageBlockReason(target));
 }
 
 async function doPreviewImpact() {
@@ -620,6 +656,7 @@ async function doRegenerate() {
   try {
     const res = await regenerateTasks(projectId.value, regenDocId.value, regenForce.value);
     regenMessage.value = `Generated ${res.tasks?.length || 0} tasks.`;
+    await loadTasks();
   } catch (err: any) {
     regenError.value = err?.message || "Regeneration failed";
   } finally {
@@ -964,6 +1001,7 @@ onMounted(async () => {
   await loadLifecycleScore();
   await loadLifecycleHistory();
   await loadDocuments();
+  await loadTasks();
   await loadProjectMeta();
   await loadRuns();
   await loadWorkItems();

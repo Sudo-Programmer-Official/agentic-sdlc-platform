@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ActivityLog
@@ -27,9 +28,9 @@ async def log_activity(
         entity_id=entity_id,
         action_type=action_type,
         event_type=event_type,
-        previous_state=previous_state,
-        new_state=new_state,
-        extra_metadata=metadata,
+        previous_state=jsonable_encoder(previous_state) if previous_state is not None else None,
+        new_state=jsonable_encoder(new_state) if new_state is not None else None,
+        extra_metadata=jsonable_encoder(metadata) if metadata is not None else None,
         actor=actor,
     )
     session.add(entry)

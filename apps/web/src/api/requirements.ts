@@ -6,7 +6,25 @@ const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
 async function handle<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
-    const msg = await resp.text();
+    let payload: any = null;
+    try {
+      payload = await resp.json();
+    } catch {
+      payload = null;
+    }
+
+    const detail = payload?.detail;
+    if (typeof detail === "string" && detail) {
+      throw new Error(detail);
+    }
+    if (Array.isArray(detail) && detail.length) {
+      throw new Error(detail.map((item) => item?.msg || JSON.stringify(item)).join(", "));
+    }
+    if (payload?.error) {
+      throw new Error(payload.error_id ? `${payload.error} (${payload.error_id})` : payload.error);
+    }
+
+    const msg = await resp.text().catch(() => "");
     throw new Error(msg || `Request failed (${resp.status})`);
   }
   return resp.json() as Promise<T>;

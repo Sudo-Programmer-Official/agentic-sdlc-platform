@@ -8,7 +8,7 @@
       <div class="flex items-center gap-2">
         <el-tag :type="statusTag" effect="light">{{ graph?.status || "DRAFT" }}</el-tag>
         <span v-if="graph?.version" class="text-xs text-slate-500">v{{ graph.version }}</span>
-        <el-button type="primary" :loading="approving" :disabled="!graph" @click="approveGraph">
+        <el-button type="primary" :loading="approving" :disabled="!graph" @click="submitApproveGraph">
           Approve Graph
         </el-button>
       </div>
@@ -30,7 +30,7 @@
           <div class="text-sm uppercase tracking-wide text-slate-400">PRD Ingestion</div>
           <div class="text-xs text-slate-500">Paste PRD markdown to extract starter FR/QR.</div>
         </div>
-        <el-button :loading="ingesting" @click="ingestPrd">Submit PRD</el-button>
+        <el-button :loading="ingesting" @click="submitPrd">Submit PRD</el-button>
       </div>
       <el-input
         v-model="prdText"
@@ -146,7 +146,13 @@ import { useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 
 import { projectContext, updateProjectContext } from "../state/projectContext";
-import { approveGraph, fetchGraph, fetchProjectSummary, ingestPrd, updateGraph } from "../api/requirements";
+import {
+  approveGraph as approveRequirementsGraph,
+  fetchGraph,
+  fetchProjectSummary,
+  ingestPrd as ingestProjectPrd,
+  updateGraph,
+} from "../api/requirements";
 
 const route = useRoute();
 const projectId = computed(() => route.params.projectId as string);
@@ -188,24 +194,36 @@ const qualityOptions = [
   "cost"
 ];
 
+function applyGraph(data: any) {
+  const safeGraph = data && typeof data === "object" ? data : null;
+  const nodes = Array.isArray(safeGraph?.nodes) ? safeGraph.nodes : [];
+  const graphEdges = Array.isArray(safeGraph?.edges) ? safeGraph.edges : [];
+
+  graph.value = safeGraph;
+  frNodes.value = nodes.filter((n: any) => n?.type === "FR");
+  qrNodes.value = nodes.filter((n: any) => n?.type === "QR");
+  edges.value = graphEdges;
+}
+
 async function loadGraph() {
   if (!projectId.value) return;
   loading.value = true;
   error.value = "";
   try {
     const data = await fetchGraph(projectId.value);
-    graph.value = data;
-    frNodes.value = data.nodes.filter((n: any) => n.type === "FR");
-    qrNodes.value = data.nodes.filter((n: any) => n.type === "QR");
-    edges.value = data.edges;
+    applyGraph(data);
   } catch (err: any) {
+    graph.value = null;
+    frNodes.value = [];
+    qrNodes.value = [];
+    edges.value = [];
     error.value = err?.message || "Failed to load requirements graph.";
   } finally {
     loading.value = false;
   }
 }
 
-async function ingestPrd() {
+async function submitPrd() {
   if (!projectId.value || !prdText.value.trim()) {
     error.value = "PRD text required.";
     return;
@@ -213,10 +231,8 @@ async function ingestPrd() {
   ingesting.value = true;
   error.value = "";
   try {
-    graph.value = await ingestPrd(projectId.value, prdText.value, "typed", "markdown");
-    frNodes.value = graph.value.nodes.filter((n: any) => n.type === "FR");
-    qrNodes.value = graph.value.nodes.filter((n: any) => n.type === "QR");
-    edges.value = graph.value.edges;
+    const data = await ingestProjectPrd(projectId.value, prdText.value, "typed", "markdown");
+    applyGraph(data);
     ElMessage.success("PRD ingested and graph created.");
     await loadSummary();
   } catch (err: any) {
@@ -232,7 +248,8 @@ async function saveGraph() {
   error.value = "";
   try {
     const payload = { nodes: [...frNodes.value, ...qrNodes.value], edges: edges.value };
-    graph.value = await updateGraph(projectId.value, payload);
+    const data = await updateGraph(projectId.value, payload);
+    applyGraph(data);
     ElMessage.success("Requirements graph saved.");
     await loadSummary();
   } catch (err: any) {
@@ -242,12 +259,12 @@ async function saveGraph() {
   }
 }
 
-async function approveGraph() {
+async function submitApproveGraph() {
   if (!projectId.value) return;
   approving.value = true;
   error.value = "";
   try {
-    const data = await approveGraph(projectId.value, "ui-user");
+    const data = await approveRequirementsGraph(projectId.value, "ui-user");
     graph.value = { ...graph.value, status: data.status, version: data.version };
     ElMessage.success(`Graph approved (sha ${data.sha256.slice(0, 8)}…)`);
     await loadSummary();

@@ -60,12 +60,70 @@ jobs:
     needs: deploy-web
 
     permissions:
+      actions: read
       id-token: write
       contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Generate build metadata
+        id: build_meta
+        uses: actions/github-script@v7
+        env:
+          BUILD_VERSION: build-${{ github.run_number }}.${{ github.run_attempt }}
+        with:
+          script: |
+            const fs = require('fs');
+            const buildAt = new Date().toISOString();
+            const buildVersion = process.env.BUILD_VERSION;
+            const current = {
+              version: buildVersion,
+              sha: context.sha,
+              short_sha: context.sha.slice(0, 7),
+              branch: process.env.GITHUB_REF_NAME,
+              built_at: buildAt,
+              run_number: context.runNumber,
+              run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT || '1'),
+              run_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              title: context.payload.head_commit?.message?.split('\n')[0] || context.sha.slice(0, 7),
+            };
+
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'deploy.yml',
+              branch: process.env.GITHUB_REF_NAME,
+              per_page: 20,
+              status: 'completed',
+            });
+
+            const history = data.workflow_runs
+              .filter((run) => run.conclusion === 'success')
+              .map((run) => ({
+                version: `build-${run.run_number}.${run.run_attempt}`,
+                sha: run.head_sha,
+                short_sha: run.head_sha.slice(0, 7),
+                branch: run.head_branch,
+                built_at: run.updated_at,
+                run_number: run.run_number,
+                run_attempt: run.run_attempt,
+                run_url: run.html_url,
+                title: run.display_title,
+              }));
+
+            const merged = [current, ...history.filter((entry) => entry.version !== current.version)].slice(0, 10);
+            fs.mkdirSync('apps/api/app/metadata', { recursive: true });
+            fs.writeFileSync(
+              'apps/api/app/metadata/build_history.json',
+              JSON.stringify({ current, history: merged }, null, 2),
+            );
+
+            core.setOutput('build_version', buildVersion);
+            core.setOutput('build_at', buildAt);
+            core.setOutput('build_run_url', current.run_url);
+            core.setOutput('build_title', current.title);
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -82,6 +140,14 @@ jobs:
           TAG=${{ github.sha }}
           docker build \
             --platform linux/amd64 \
+            --build-arg BUILD_VERSION=${{ steps.build_meta.outputs.build_version }} \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            --build-arg BUILD_BRANCH=${{ github.ref_name }} \
+            --build-arg BUILD_AT=${{ steps.build_meta.outputs.build_at }} \
+            --build-arg BUILD_RUN_NUMBER=${{ github.run_number }} \
+            --build-arg BUILD_RUN_ATTEMPT=${{ github.run_attempt }} \
+            --build-arg BUILD_RUN_URL=${{ steps.build_meta.outputs.build_run_url }} \
+            --build-arg BUILD_TITLE=${{ steps.build_meta.outputs.build_title }} \
             -t $IMAGE:$TAG \
             -t $IMAGE:latest \
             -f apps/api/Dockerfile .

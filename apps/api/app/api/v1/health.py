@@ -3,8 +3,6 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-import os
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, exists, func, text, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +13,7 @@ from app.db.models import Project, Document, Task, Trace
 from app.db.models import Run, WorkItem
 from app.db.session import get_session
 from app.core.config import get_settings
+from app.services.build_info import get_current_build_info
 from app.startup import resolve_alembic_config_path
 
 # Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
@@ -172,6 +171,7 @@ def _alembic_head() -> str | None:
 @public_router.get("/health/detail")
 async def health_detail(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     settings = get_settings()
+    build = get_current_build_info()
     # DB connectivity
     try:
         await session.execute(text("SELECT 1"))
@@ -180,7 +180,7 @@ async def health_detail(session: AsyncSession = Depends(get_session)) -> dict[st
         db_ok = False
     return {
         "status": "ok" if db_ok else "degraded",
-        "version": os.getenv("BUILD_VERSION", "build-2026-02-26-1"),
+        "version": build.get("version"),
         "environment": settings.env,
         "database_connected": db_ok,
         "alembic_head": _alembic_head(),

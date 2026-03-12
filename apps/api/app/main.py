@@ -18,6 +18,7 @@ from app.api.v1.health import router as health_router, public_router as public_h
 from app.api.v1.lifecycle_score import router as lifecycle_router, public_router as public_lifecycle_router
 from app.api.v1.lifecycle_history import router as lifecycle_history_router, public_router as public_lifecycle_history_router
 from app.core.config import DEFAULT_DATABASE_URL, get_settings
+from app.services.build_info import get_build_history, get_current_build_info
 from app.startup import run_startup_migrations
 
 
@@ -51,8 +52,12 @@ def create_app() -> FastAPI:
 
     @app.get("/version", include_in_schema=False)
     def version() -> dict:
-        # Update this string per deploy to confirm the running image
-        return {"version": "build-2026-02-26-1"}
+        return get_current_build_info()
+
+    @app.get("/version/history", include_in_schema=False)
+    def version_history() -> dict:
+        current = get_current_build_info()
+        return {"current": current, "history": get_build_history()}
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request, exc):
@@ -66,6 +71,14 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def on_startup() -> None:
+        build = get_current_build_info()
+        log.info(
+            "Starting API build=%s sha=%s env=%s prefix=%s",
+            build.get("version"),
+            build.get("short_sha"),
+            settings.env,
+            settings.api_prefix,
+        )
         await run_startup_migrations()
 
     # Register the DB-backed public surface before the legacy v1 router so

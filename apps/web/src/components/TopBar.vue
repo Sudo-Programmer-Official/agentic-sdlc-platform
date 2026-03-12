@@ -5,13 +5,53 @@
       <div class="text-2xl font-semibold text-slate-900">
         {{ titleText }}
       </div>
-    <div class="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
-      <span>Project ID: {{ projectContext.projectId || "—" }}</span>
-      <span v-if="projectContext.updatedAt">Updated {{ projectContext.updatedAt }}</span>
-      <span v-if="versionText">Build {{ versionText }}</span>
-      <span v-if="envText">Env: {{ envText }}</span>
+      <div class="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+        <span>Project ID: {{ projectContext.projectId || "—" }}</span>
+        <span v-if="projectContext.updatedAt">Updated {{ projectContext.updatedAt }}</span>
+        <el-popover
+          v-if="versionText"
+          placement="bottom-start"
+          trigger="click"
+          :width="380"
+        >
+          <template #reference>
+            <button
+              type="button"
+              class="rounded border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:text-slate-700"
+            >
+              Build {{ versionText }}
+            </button>
+          </template>
+          <div class="space-y-3">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Build History</div>
+            <div
+              v-for="entry in versionHistory"
+              :key="entry.version || entry.sha || entry.built_at"
+              class="rounded-lg border border-slate-100 px-3 py-2"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="font-medium text-slate-900">{{ entry.version || entry.short_sha || "Unknown build" }}</div>
+                  <div class="mt-1 text-[11px] text-slate-500">{{ formatBuildEntry(entry) }}</div>
+                </div>
+                <a
+                  v-if="entry.run_url"
+                  :href="entry.run_url"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="text-[11px] font-medium text-sky-600 hover:text-sky-700"
+                >
+                  Run
+                </a>
+              </div>
+              <div v-if="entry.title" class="mt-2 text-xs text-slate-600">{{ entry.title }}</div>
+            </div>
+            <div v-if="!versionHistory.length" class="text-xs text-slate-500">No build history available.</div>
+          </div>
+        </el-popover>
+        <span v-if="envText">Env: {{ envText }}</span>
+      </div>
     </div>
-  </div>
     <div class="flex flex-wrap items-center gap-3">
       <el-select
         v-model="selectedProject"
@@ -77,8 +117,20 @@ const pausing = ref(false);
 const router = useRouter();
 const versionText = ref<string | null>(null);
 const envText = ref<string | null>(null);
+const versionHistory = ref<BuildEntry[]>([]);
 
 type RecentProject = { id: string; name: string };
+type BuildEntry = {
+  version?: string | null;
+  sha?: string | null;
+  short_sha?: string | null;
+  branch?: string | null;
+  built_at?: string | null;
+  run_number?: number | null;
+  run_attempt?: number | null;
+  run_url?: string | null;
+  title?: string | null;
+};
 const recentProjects = ref<RecentProject[]>(loadRecentProjects());
 const selectedProject = ref(projectContext.projectId);
 const route = useRouter();
@@ -214,10 +266,20 @@ function saveRecentProjects(projects: RecentProject[]) {
 async function fetchVersionInfo() {
   const apiHost = API_BASE.replace(/\/api\/v1$/, "");
   try {
-    const ver = await fetch(`${apiHost}/version`).then((r) => r.json());
-    versionText.value = ver?.version || null;
+    const history = await fetch(`${apiHost}/version/history`).then((r) => r.json());
+    versionText.value = history?.current?.version || history?.history?.[0]?.version || null;
+    versionHistory.value = Array.isArray(history?.history) ? history.history : [];
   } catch {
     versionText.value = null;
+    versionHistory.value = [];
+    try {
+      const ver = await fetch(`${apiHost}/version`).then((r) => r.json());
+      versionText.value = ver?.version || null;
+      versionHistory.value = ver?.version ? [ver] : [];
+    } catch {
+      versionText.value = null;
+      versionHistory.value = [];
+    }
   }
   try {
     const detail = await fetch(`${API_BASE}/health/detail`).then((r) => r.json());
@@ -226,5 +288,16 @@ async function fetchVersionInfo() {
   } catch {
     envText.value = null;
   }
+}
+
+function formatBuildEntry(entry: BuildEntry) {
+  const parts: string[] = [];
+  if (entry.branch) parts.push(entry.branch);
+  if (entry.short_sha) parts.push(entry.short_sha);
+  if (entry.built_at) {
+    const parsed = new Date(entry.built_at);
+    parts.push(Number.isNaN(parsed.getTime()) ? entry.built_at : parsed.toLocaleString());
+  }
+  return parts.join(" · ");
 }
 </script>

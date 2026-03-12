@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status, Request
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.schemas import (
     AdvanceStageRequest,
@@ -62,7 +65,9 @@ from app.services.errors import (
     RequirementGraphNotApprovedError,
     RequirementGraphStaleError,
 )
-from core.models import TaskStatus
+from core.models import Project as LegacyProject, Stage, TaskStatus
+from app.db.models.project import Project as DBProject
+from app.db.session import get_session
 from app.services.requirements_service import graph_to_dict, build_edges, build_nodes
 
 router = APIRouter()
@@ -71,6 +76,43 @@ approvals_router = APIRouter(prefix="/approvals", tags=["approvals"])
 agents_router = APIRouter(prefix="/agents", tags=["agents"])
 runs_router = APIRouter(prefix="/runs", tags=["runs"])
 changes_router = APIRouter(prefix="/changes", tags=["changes"])
+
+
+def _map_db_status_to_legacy_stage(status_value: str | None) -> Stage:
+    mapping = {
+        "INTAKE": Stage.INTAKE,
+        "PLAN": Stage.PLAN_READY,
+        "RUN": Stage.IMPLEMENTING,
+        "EVALUATE": Stage.READY_FOR_REVIEW,
+    }
+    return mapping.get((status_value or "").upper(), Stage.INTAKE)
+
+
+async def _ensure_legacy_project(project_id: str, session: AsyncSession) -> None:
+    try:
+        project_service.get_project(project_id)
+        return
+    except ProjectNotFoundError:
+        pass
+
+    try:
+        db_project_id = uuid.UUID(project_id)
+    except ValueError as exc:
+        raise ProjectNotFoundError(f"Project {project_id} not found") from exc
+
+    db_project = await session.get(DBProject, db_project_id)
+    if db_project is None or db_project.deleted_at is not None:
+        raise ProjectNotFoundError(f"Project {project_id} not found")
+
+    legacy_project = LegacyProject(
+        id=project_id,
+        name=db_project.name,
+        description=db_project.description,
+        current_stage=_map_db_status_to_legacy_stage(db_project.status),
+        created_at=db_project.created_at,
+    )
+    project_service._project_store.add(legacy_project)
+    project_service._state_store.set_stage(project_id, legacy_project.current_stage)
 
 
 def _project_response(project) -> ProjectResponse:
@@ -367,8 +409,13 @@ def get_project_summary(project_id: str) -> ProjectSummaryResponse:
 
 
 @projects_router.post("/{project_id}/prd", response_model=RequirementGraphModel)
-def ingest_prd(project_id: str, payload: PRDIngestRequest) -> RequirementGraphModel:
+async def ingest_prd(
+    project_id: str,
+    payload: PRDIngestRequest,
+    session: AsyncSession = Depends(get_session),
+) -> RequirementGraphModel:
     try:
+        await _ensure_legacy_project(project_id, session)
         graph = requirements_service.ingest_prd(
             project_id=project_id,
             text=payload.text,
@@ -381,8 +428,12 @@ def ingest_prd(project_id: str, payload: PRDIngestRequest) -> RequirementGraphMo
 
 
 @projects_router.get("/{project_id}/requirements-graph", response_model=RequirementGraphModel)
-def get_requirements_graph(project_id: str) -> RequirementGraphModel:
+async def get_requirements_graph(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> RequirementGraphModel:
     try:
+        await _ensure_legacy_project(project_id, session)
         graph = requirements_service.get_graph(project_id)
         return RequirementGraphModel(**graph_to_dict(graph))
     except ProjectNotFoundError as exc:
@@ -392,8 +443,13 @@ def get_requirements_graph(project_id: str) -> RequirementGraphModel:
 
 
 @projects_router.post("/{project_id}/plan/regenerate", response_model=PlanRegenerateResponse)
-def regenerate_plan(project_id: str, payload: PlanRegenerateRequest) -> PlanRegenerateResponse:
+async def regenerate_plan(
+    project_id: str,
+    payload: PlanRegenerateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> PlanRegenerateResponse:
     try:
+        await _ensure_legacy_project(project_id, session)
         result = planner_service.regenerate_plan(
             project_id,
             triggered_by=payload.triggered_by,
@@ -407,8 +463,12 @@ def regenerate_plan(project_id: str, payload: PlanRegenerateRequest) -> PlanRege
 
 
 @projects_router.get("/{project_id}/plan/history", response_model=PlanHistoryResponse)
-def get_plan_history(project_id: str) -> PlanHistoryResponse:
+async def get_plan_history(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> PlanHistoryResponse:
     try:
+        await _ensure_legacy_project(project_id, session)
         project_service.get_project(project_id)
         entries = planner_service.list_history(project_id)
         return PlanHistoryResponse(project_id=project_id, entries=entries)
@@ -417,10 +477,13 @@ def get_plan_history(project_id: str) -> PlanHistoryResponse:
 
 
 @projects_router.put("/{project_id}/requirements-graph", response_model=RequirementGraphModel)
-def update_requirements_graph(
-    project_id: str, payload: RequirementGraphUpdateRequest
+async def update_requirements_graph(
+    project_id: str,
+    payload: RequirementGraphUpdateRequest,
+    session: AsyncSession = Depends(get_session),
 ) -> RequirementGraphModel:
     try:
+        await _ensure_legacy_project(project_id, session)
         nodes = build_nodes([node.model_dump() for node in payload.nodes])
         edges = build_edges([edge.model_dump() for edge in payload.edges])
         graph = requirements_service.update_graph(project_id, nodes, edges)
@@ -435,10 +498,13 @@ def update_requirements_graph(
     "/{project_id}/requirements-graph/approve",
     response_model=RequirementGraphApproveResponse,
 )
-def approve_requirements_graph(
-    project_id: str, payload: RequirementGraphApproveRequest
+async def approve_requirements_graph(
+    project_id: str,
+    payload: RequirementGraphApproveRequest,
+    session: AsyncSession = Depends(get_session),
 ) -> RequirementGraphApproveResponse:
     try:
+        await _ensure_legacy_project(project_id, session)
         snapshot = requirements_service.approve_graph(
             project_id=project_id, approved_by=payload.approved_by
         )

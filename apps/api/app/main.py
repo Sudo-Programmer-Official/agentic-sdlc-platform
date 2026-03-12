@@ -73,11 +73,12 @@ def create_app() -> FastAPI:
     async def on_startup() -> None:
         build = get_current_build_info()
         log.info(
-            "Starting API build=%s sha=%s env=%s prefix=%s",
+            "Starting API build=%s sha=%s env=%s prefix=%s runtime_mode=%s",
             build.get("version"),
             build.get("short_sha"),
             settings.env,
             settings.api_prefix,
+            settings.runtime_mode,
         )
         await run_startup_migrations()
 

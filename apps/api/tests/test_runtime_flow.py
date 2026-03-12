@@ -176,6 +176,46 @@ async def test_external_worker_claims_and_executes_dummy_work_item(monkeypatch, 
         assert all(event.work_item_id is not None for event in events if event.payload and event.payload.get("work_item_id"))
 
 
+@pytest.mark.anyio
+async def test_external_mode_falls_back_to_embedded_when_no_workers_exist(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Fallback runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_RUNTIME_FALLBACK" in event_types
+        fallback = next(event for event in events if event.event_type == "RUN_RUNTIME_FALLBACK")
+        assert fallback.payload == {
+            "requested_mode": "external",
+            "effective_mode": "embedded",
+            "reason": "no_active_workers",
+        }
+
+
 class ArtifactExecutor:
     name = "dummy"
 

@@ -151,6 +151,8 @@ async def tick_worker(agent_id: uuid.UUID):
         # claim one item
         now = datetime.now(timezone.utc)
         lease_expires = now + timedelta(seconds=60)
+        agent.last_heartbeat_at = now
+        session.add(agent)
         agent_caps = set(agent.capabilities or [])
         agent_executors = set(agent.executors or [])
         # Prevent multiple RUN_TESTS per run at once
@@ -182,7 +184,7 @@ async def tick_worker(agent_id: uuid.UUID):
             wi = candidate
             break
         if not wi:
-            await session.rollback()
+            await session.commit()
             return
         wi.status = "RUNNING"
         wi.assigned_agent_id = agent_id
@@ -223,6 +225,7 @@ async def main():
             capabilities=["code", "test", "review", "plan"],
             max_concurrency=1,
             status="ACTIVE",
+            last_heartbeat_at=datetime.now(timezone.utc),
         )
         session.add(agent)
         await session.commit()

@@ -13,6 +13,7 @@
 ## Modes
 - embedded: orchestrator executes work items in-process (dev only)
 - external: orchestrator does NOT execute; workers execute via claim/complete; scheduler handles requeue/finalize/lifecycle
+- external fallback: if no live worker heartbeats are present, the orchestrator falls back to embedded execution so runs do not remain queued forever on API-only deployments
 
 ## Start commands
 - API: `uvicorn app.main:app --host 0.0.0.0 --port 8000`
@@ -32,4 +33,3 @@
 1) set RUNTIME_MODE=external
 2) start scheduler + workers
 3) create run -> DAG created, workers claim/execute, run finalizes, lifecycle recomputes
-

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import uuid
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable
 
 from sqlalchemy import select, func, and_, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Run, WorkItem, WorkItemEdge
+from app.db.models import Agent, Run, WorkItem, WorkItemEdge
 from app.runtime.context import RunContext
 from app.runtime.executor import TaskExecutor
 from app.runtime.registry import get_executor
@@ -74,6 +74,7 @@ class RunOrchestrator:
         run_failed = False
 
         async with self.session_factory() as session:
+            use_external_runtime = await self._should_use_external_runtime(session, run_id, actor_type, actor_id)
             context = RunContext(project_id=run.project_id, run_id=run.id)
             while True:
                 await session.commit()
@@ -164,7 +165,7 @@ class RunOrchestrator:
                     )
                 ).scalars().all()
 
-                if self.settings.runtime_mode == "external":
+                if use_external_runtime:
                     # external mode: do not execute items here, just wait for workers
                     await asyncio.sleep(0.2)
                     continue
@@ -209,6 +210,51 @@ class RunOrchestrator:
                 except Exception:
                     pass
             await session.commit()
+
+    async def _should_use_external_runtime(
+        self,
+        session: AsyncSession,
+        run_id: uuid.UUID,
+        actor_type: str,
+        actor_id: str | None,
+    ) -> bool:
+        if self.settings.runtime_mode != "external":
+            return False
+
+        heartbeat_cutoff = datetime.now(timezone.utc) - timedelta(seconds=30)
+        worker_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Agent)
+                .where(
+                    Agent.kind == "worker",
+                    Agent.status == "ACTIVE",
+                    Agent.last_heartbeat_at.isnot(None),
+                    Agent.last_heartbeat_at >= heartbeat_cutoff,
+                )
+            )
+        ).scalar_one()
+        if worker_count:
+            return True
+
+        run = await session.get(Run, run_id)
+        if run is not None:
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                event_type="RUN_RUNTIME_FALLBACK",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                payload={
+                    "requested_mode": "external",
+                    "effective_mode": "embedded",
+                    "reason": "no_active_workers",
+                },
+                tenant_id=run.tenant_id,
+            )
+            await session.flush()
+        return False
 
     async def _load_run_for_update(self, session: AsyncSession, run_id: uuid.UUID) -> Run | None:
         result = await session.execute(select(Run).where(Run.id == run_id).with_for_update())

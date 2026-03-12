@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     health_regen_threshold: float = 60.0  # below this require force for regen
     health_cycles_block: bool = False  # set true to block trace creation when cycles exist
-    runtime_mode: str = "external"  # embedded | external (prod default external)
+    runtime_mode: str = "external"  # embedded | external; external falls back if no live workers exist
     max_workitem_concurrency: int = 3
     codex_model: str = "gpt-4.1"
     codex_temperature: float = 0.1

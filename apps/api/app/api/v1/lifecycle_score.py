@@ -302,9 +302,7 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
                 should_log = False
 
     if should_log:
-        # Use a savepoint to avoid "transaction already begun" when caller is mid-transaction.
-        await session.execute("SAVEPOINT lifecycle_score_sp")
-        try:
+        async with session.begin_nested():
             await log_activity(
                 session,
                 project_id=project_id,
@@ -314,9 +312,5 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
                 event_type="score",
                 metadata=result,
             )
-            await session.execute("RELEASE SAVEPOINT lifecycle_score_sp")
-        except Exception:
-            await session.execute("ROLLBACK TO SAVEPOINT lifecycle_score_sp")
-            raise
 
     return result

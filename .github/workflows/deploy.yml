@@ -70,60 +70,95 @@ jobs:
 
       - name: Generate build metadata
         id: build_meta
-        uses: actions/github-script@v7
         env:
           BUILD_VERSION: build-${{ github.run_number }}.${{ github.run_attempt }}
-        with:
-          script: |
-            const fs = require('fs');
-            const buildAt = new Date().toISOString();
-            const buildVersion = process.env.BUILD_VERSION;
-            const current = {
-              version: buildVersion,
-              sha: context.sha,
-              short_sha: context.sha.slice(0, 7),
-              branch: process.env.GITHUB_REF_NAME,
-              built_at: buildAt,
-              run_number: context.runNumber,
-              run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT || '1'),
-              run_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              title: context.payload.head_commit?.message?.split('\n')[0] || context.sha.slice(0, 7),
-            };
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
 
-            const { data } = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'deploy.yml',
-              branch: process.env.GITHUB_REF_NAME,
-              per_page: 20,
-              status: 'completed',
-            });
+          build_at = subprocess.check_output(
+              ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True
+          ).strip()
+          build_title = subprocess.check_output(
+              ["git", "log", "-1", "--pretty=%s"], text=True
+          ).strip()
 
-            const history = data.workflow_runs
-              .filter((run) => run.conclusion === 'success')
-              .map((run) => ({
-                version: `build-${run.run_number}.${run.run_attempt}`,
-                sha: run.head_sha,
-                short_sha: run.head_sha.slice(0, 7),
-                branch: run.head_branch,
-                built_at: run.updated_at,
-                run_number: run.run_number,
-                run_attempt: run.run_attempt,
-                run_url: run.html_url,
-                title: run.display_title,
-              }));
+          current = {
+              "version": os.environ["BUILD_VERSION"],
+              "sha": os.environ["GITHUB_SHA"],
+              "short_sha": os.environ["GITHUB_SHA"][:7],
+              "branch": os.environ["GITHUB_REF_NAME"],
+              "built_at": build_at,
+              "run_number": int(os.environ["GITHUB_RUN_NUMBER"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "title": build_title or os.environ["GITHUB_SHA"][:7],
+          }
 
-            const merged = [current, ...history.filter((entry) => entry.version !== current.version)].slice(0, 10);
-            fs.mkdirSync('apps/api/app/metadata', { recursive: true });
-            fs.writeFileSync(
-              'apps/api/app/metadata/build_history.json',
-              JSON.stringify({ current, history: merged }, null, 2),
-            );
+          history = []
+          try:
+              api_url = (
+                  f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}"
+                  f"/actions/workflows/deploy.yml/runs?branch="
+                  f"{urllib.parse.quote(os.environ['GITHUB_REF_NAME'])}&per_page=20&status=completed"
+              )
+              request = urllib.request.Request(
+                  api_url,
+                  headers={
+                      "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request) as response:
+                  payload = json.load(response)
+              for run in payload.get("workflow_runs", []):
+                  if run.get("conclusion") != "success":
+                      continue
+                  head_sha = run.get("head_sha") or ""
+                  history.append(
+                      {
+                          "version": f"build-{run['run_number']}.{run['run_attempt']}",
+                          "sha": head_sha,
+                          "short_sha": head_sha[:7] if head_sha else None,
+                          "branch": run.get("head_branch"),
+                          "built_at": run.get("updated_at"),
+                          "run_number": run.get("run_number"),
+                          "run_attempt": run.get("run_attempt"),
+                          "run_url": run.get("html_url"),
+                          "title": run.get("display_title"),
+                      }
+                  )
+          except Exception as exc:
+              print(f"Warning: unable to fetch workflow history: {exc}")
 
-            core.setOutput('build_version', buildVersion);
-            core.setOutput('build_at', buildAt);
-            core.setOutput('build_run_url', current.run_url);
-            core.setOutput('build_title', current.title);
+          merged = [current]
+          for entry in history:
+              if entry["version"] == current["version"]:
+                  continue
+              merged.append(entry)
+              if len(merged) >= 10:
+                  break
+
+          metadata_dir = Path("apps/api/app/metadata")
+          metadata_dir.mkdir(parents=True, exist_ok=True)
+          (metadata_dir / "build_history.json").write_text(
+              json.dumps({"current": current, "history": merged}, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"build_version={current['version']}\n")
+              fh.write(f"build_at={current['built_at']}\n")
+              fh.write(f"build_run_url={current['run_url']}\n")
+              fh.write(f"build_title={current['title']}\n")
+          PY
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

@@ -23,6 +23,7 @@ env:
 jobs:
   deploy-web:
     runs-on: ubuntu-latest
+    needs: deploy-api
 
     steps:
       - name: Checkout
@@ -42,12 +43,12 @@ jobs:
           IMAGE=${ECR_ACCOUNT}/${ECR_WEB_REPO}
           TAG=${{ github.sha }}
           docker build \
-            --build-arg VITE_API_BASE=${VITE_API_BASE} \
-            -t $IMAGE:$TAG \
-            -t $IMAGE:latest \
+            --build-arg VITE_API_BASE="${VITE_API_BASE}" \
+            -t "$IMAGE:$TAG" \
+            -t "$IMAGE:latest" \
             -f apps/web/Dockerfile apps/web
-          docker push $IMAGE:$TAG
-          docker push $IMAGE:latest
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
 
       - name: Update ECS Service
         run: |
@@ -58,7 +59,6 @@ jobs:
 
   deploy-api:
     runs-on: ubuntu-latest
-    needs: deploy-web
 
     steps:
       - name: Checkout

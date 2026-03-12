@@ -68,25 +68,26 @@ def create_app() -> FastAPI:
     async def on_startup() -> None:
         await run_startup_migrations()
 
+    # Register the DB-backed public surface before the legacy v1 router so
+    # overlapping /projects/... and /runs/... paths resolve to the current system.
+    app.include_router(public_store_router, prefix=settings.api_prefix)
+    app.include_router(public_trace_router, prefix=settings.api_prefix)
+    app.include_router(public_gen_router, prefix=settings.api_prefix)
+    app.include_router(public_impact_router, prefix=settings.api_prefix)
+    app.include_router(public_activity_router, prefix=settings.api_prefix)
+    app.include_router(public_health_router, prefix=settings.api_prefix)
+    app.include_router(public_lifecycle_router, prefix=settings.api_prefix)
+    app.include_router(public_lifecycle_history_router, prefix=settings.api_prefix)
     app.include_router(v1_router, prefix=settings.api_prefix)
     app.include_router(store_router, prefix=settings.api_prefix)
-    app.include_router(public_store_router, prefix=settings.api_prefix)
     app.include_router(trace_router, prefix=settings.api_prefix)
-    app.include_router(public_trace_router, prefix=settings.api_prefix)
     app.include_router(gen_router, prefix=settings.api_prefix)
-    app.include_router(public_gen_router, prefix=settings.api_prefix)
     app.include_router(impact_router, prefix=settings.api_prefix)
-    app.include_router(public_impact_router, prefix=settings.api_prefix)
     app.include_router(activity_router, prefix=settings.api_prefix)
-    app.include_router(public_activity_router, prefix=settings.api_prefix)
     app.include_router(snapshot_router, prefix=settings.api_prefix)
-    # Legacy /store/... and public /projects/... routes
     app.include_router(health_router, prefix=settings.api_prefix)
-    app.include_router(public_health_router, prefix=settings.api_prefix)
     app.include_router(lifecycle_router, prefix=settings.api_prefix)
-    app.include_router(public_lifecycle_router, prefix=settings.api_prefix)
     app.include_router(lifecycle_history_router, prefix=settings.api_prefix)
-    app.include_router(public_lifecycle_history_router, prefix=settings.api_prefix)
     return app
 
 

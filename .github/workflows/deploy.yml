@@ -135,24 +135,33 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and Push API image
+        env:
+          BUILD_VERSION: ${{ steps.build_meta.outputs.build_version }}
+          BUILD_SHA: ${{ github.sha }}
+          BUILD_BRANCH: ${{ github.ref_name }}
+          BUILD_AT: ${{ steps.build_meta.outputs.build_at }}
+          BUILD_RUN_NUMBER: ${{ github.run_number }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BUILD_RUN_URL: ${{ steps.build_meta.outputs.build_run_url }}
+          BUILD_TITLE: ${{ steps.build_meta.outputs.build_title }}
         run: |
           IMAGE=${ECR_ACCOUNT}/${ECR_API_REPO}
           TAG=${{ github.sha }}
           docker build \
             --platform linux/amd64 \
-            --build-arg BUILD_VERSION=${{ steps.build_meta.outputs.build_version }} \
-            --build-arg BUILD_SHA=${{ github.sha }} \
-            --build-arg BUILD_BRANCH=${{ github.ref_name }} \
-            --build-arg BUILD_AT=${{ steps.build_meta.outputs.build_at }} \
-            --build-arg BUILD_RUN_NUMBER=${{ github.run_number }} \
-            --build-arg BUILD_RUN_ATTEMPT=${{ github.run_attempt }} \
-            --build-arg BUILD_RUN_URL=${{ steps.build_meta.outputs.build_run_url }} \
-            --build-arg BUILD_TITLE=${{ steps.build_meta.outputs.build_title }} \
-            -t $IMAGE:$TAG \
-            -t $IMAGE:latest \
+            --build-arg BUILD_VERSION="$BUILD_VERSION" \
+            --build-arg BUILD_SHA="$BUILD_SHA" \
+            --build-arg BUILD_BRANCH="$BUILD_BRANCH" \
+            --build-arg BUILD_AT="$BUILD_AT" \
+            --build-arg BUILD_RUN_NUMBER="$BUILD_RUN_NUMBER" \
+            --build-arg BUILD_RUN_ATTEMPT="$BUILD_RUN_ATTEMPT" \
+            --build-arg BUILD_RUN_URL="$BUILD_RUN_URL" \
+            --build-arg BUILD_TITLE="$BUILD_TITLE" \
+            -t "$IMAGE:$TAG" \
+            -t "$IMAGE:latest" \
             -f apps/api/Dockerfile .
-          docker push $IMAGE:$TAG
-          docker push $IMAGE:latest
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
 
       - name: Update ECS API Service
         run: |

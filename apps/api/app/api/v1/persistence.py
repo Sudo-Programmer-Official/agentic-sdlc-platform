@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, func, and_, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
@@ -296,6 +296,8 @@ class RunStatusUpdate(BaseModel):
 
 
 class RunEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: uuid.UUID
     project_id: uuid.UUID
     run_id: uuid.UUID

@@ -5,11 +5,10 @@ from datetime import datetime
 from datetime import timedelta
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, func, and_, exists
 from sqlalchemy.ext.asyncio import AsyncSession
-import asyncio
 
 from app.db.models import (
     Project,
@@ -22,6 +21,7 @@ from app.db.models import (
     Agent,
     Artifact,
     ProjectRepository,
+    ProjectPreviewProfile,
 )
 from app.db.session import get_session
 from app.schemas.persistence import (
@@ -45,6 +45,16 @@ from app.schemas.persistence import (
     WorkItemFail,
 )
 from app.schemas.run_comparison import RunComparisonResponse
+from app.schemas.run_memory import RunMemoryResponse
+from app.schemas.run_narrative import RunNarrativeResponse
+from app.schemas.run_strategy import RunStrategyGroupResponse, RunStrategyPlanRequest
+from app.schemas.run_timeline import RunTimelineResponse
+from app.schemas.preview import (
+    ProjectPreviewProfileOut,
+    ProjectPreviewProfileUpsert,
+    RunPreviewLaunchRequest,
+    RunPreviewOut,
+)
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
@@ -55,7 +65,19 @@ from app.db.session import SessionLocal
 from app.services.run_replay import fork_run
 from app.services.repo_connector import connect_repo, get_project_repository
 from app.services.pr_service import create_pr_from_artifact
+from app.services.preview_service import (
+    get_project_preview_profile,
+    get_run_preview,
+    launch_run_preview,
+    stop_run_preview,
+    upsert_project_preview_profile,
+)
 from app.services.run_comparison import compare_runs
+from app.services.run_memory import find_similar_runs
+from app.services.run_narrative import build_run_narrative
+from app.services.run_launch import launch_run_for_project
+from app.services.strategy_selection import create_strategy_group, get_strategy_group
+from app.services.run_timeline import build_run_timeline
 from app.services.workspace_supervisor import ensure_run_workspace
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
@@ -115,6 +137,10 @@ def _wi_out(wi: WorkItem) -> WorkItemOut:
 
 def _project_repo_out(repo: ProjectRepository) -> ProjectRepositoryOut:
     return ProjectRepositoryOut.model_validate(repo)
+
+
+def _project_preview_profile_out(profile: ProjectPreviewProfile) -> ProjectPreviewProfileOut:
+    return ProjectPreviewProfileOut.model_validate(profile)
 
 
 def _project_scoped(session: AsyncSession, ctx, project_id: uuid.UUID):
@@ -251,55 +277,22 @@ async def create_run(
     tenant_id: uuid.UUID = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    project_repo = await get_project_repository(session, project_id=project_id, tenant_id=tenant_id)
-    existing_running = await session.scalar(
-        select(func.count()).select_from(
-            select(Run.id)
-            .where(Run.project_id == project_id, Run.tenant_id == tenant_id, Run.status == "RUNNING")
-            .subquery()
-        )
-    ) or 0
-    if existing_running > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A run is already in progress for this project; finish or cancel it before starting another.",
-        )
     executor_name = (payload.executor if payload else "dummy").lower()
-    run = Run(project_id=project_id, tenant_id=tenant_id, status="QUEUED")
-    run.executor = executor_name
-    session.add(run)
-    await session.flush()
-    await ensure_run_workspace(
-        session,
-        run,
-        require_repo=executor_name in {"codex", "test"},
-        repo_url=project_repo.repo_url if project_repo else None,
-        repo_branch=project_repo.default_branch if project_repo else None,
-    )
-    await log_activity(
-        session,
-        project_id=project_id,
-        entity_type="run",
-        entity_id=run.id,
-        action_type="run.created",
-        metadata={"status": run.status},
-    )
-    await record_event(
-        session,
-        project_id=project_id,
-        run_id=run.id,
-        event_type="RUN_CREATED",
-        actor_type="USER",
-    )
-    await session.commit()
-    await session.refresh(run)
-    # Kick off orchestrator asynchronously
-    orchestrator = RunOrchestrator(SessionLocal, executor_name=executor_name)
-    asyncio.create_task(orchestrator.start(run.id, actor_type="USER", executor_name=executor_name))
-    return _run_out(run)
+    try:
+        run = await launch_run_for_project(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            executor_name=executor_name,
+            actor_type="USER",
+            schedule=True,
+        )
+        return _run_out(run)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Project not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
 
 
 @router.get("/projects/{project_id}/runs", response_model=List[RunOut])
@@ -317,6 +310,70 @@ async def list_runs(
     )
     runs = result.scalars().all()
     return [_run_out(r) for r in runs]
+
+
+@router.get("/projects/{project_id}/runs/memory", response_model=RunMemoryResponse)
+@public_router.get("/projects/{project_id}/runs/memory", response_model=RunMemoryResponse)
+async def get_run_memory(
+    project_id: uuid.UUID,
+    goal: str | None = None,
+    error: str | None = None,
+    file: List[str] | None = Query(default=None),
+    limit: int = 5,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunMemoryResponse:
+    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        return await find_similar_runs(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            goal_text=goal,
+            error_text=error,
+            files=file or [],
+            limit=max(1, min(limit, 10)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/strategies", response_model=RunStrategyGroupResponse, status_code=status.HTTP_201_CREATED)
+@public_router.post("/runs/{run_id}/strategies", response_model=RunStrategyGroupResponse, status_code=status.HTTP_201_CREATED)
+async def create_run_strategies(
+    run_id: uuid.UUID,
+    payload: RunStrategyPlanRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunStrategyGroupResponse:
+    try:
+        return await create_strategy_group(
+            session,
+            tenant_id=ctx.tenant_id,
+            source_run_id=run_id,
+            request=payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/strategies", response_model=RunStrategyGroupResponse)
+@public_router.get("/runs/{run_id}/strategies", response_model=RunStrategyGroupResponse)
+async def get_run_strategies(
+    run_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunStrategyGroupResponse:
+    try:
+        return await get_strategy_group(
+            session,
+            tenant_id=ctx.tenant_id,
+            run_id=run_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/runs/compare", response_model=RunComparisonResponse)
@@ -340,6 +397,38 @@ async def get_run(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: A
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return _run_out(run)
+
+
+@router.get("/runs/{run_id}/timeline", response_model=RunTimelineResponse)
+@public_router.get("/runs/{run_id}/timeline", response_model=RunTimelineResponse)
+async def get_run_timeline(
+    run_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunTimelineResponse:
+    try:
+        return await build_run_timeline(session, tenant_id=ctx.tenant_id, run_id=run_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Run not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+@router.get("/runs/{run_id}/narrative", response_model=RunNarrativeResponse)
+@public_router.get("/runs/{run_id}/narrative", response_model=RunNarrativeResponse)
+async def get_run_narrative(
+    run_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunNarrativeResponse:
+    try:
+        return await build_run_narrative(session, tenant_id=ctx.tenant_id, run_id=run_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Run not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
 @router.post("/projects/{project_id}/connect-repo", response_model=ProjectRepositoryOut)
@@ -394,6 +483,55 @@ async def get_project_repo(
     if repo is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project repository not connected")
     return _project_repo_out(repo)
+
+
+@router.post("/projects/{project_id}/preview-profile", response_model=ProjectPreviewProfileOut)
+@public_router.post("/projects/{project_id}/preview-profile", response_model=ProjectPreviewProfileOut)
+async def save_project_preview_profile(
+    project_id: uuid.UUID,
+    payload: ProjectPreviewProfileUpsert,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectPreviewProfileOut:
+    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    profile = await upsert_project_preview_profile(
+        session,
+        project_id=project.id,
+        tenant_id=ctx.tenant_id,
+        payload=payload.model_dump(),
+    )
+    await log_activity(
+        session,
+        project_id=project.id,
+        entity_type="project_preview_profile",
+        entity_id=profile.id,
+        action_type="preview_profile.saved",
+        metadata={
+            "mode": profile.mode,
+            "enabled": profile.enabled,
+            "frontend_root": profile.frontend_root,
+            "backend_root": profile.backend_root,
+            "ttl_hours": profile.ttl_hours,
+        },
+    )
+    await session.commit()
+    await session.refresh(profile)
+    return _project_preview_profile_out(profile)
+
+
+@router.get("/projects/{project_id}/preview-profile", response_model=ProjectPreviewProfileOut)
+@public_router.get("/projects/{project_id}/preview-profile", response_model=ProjectPreviewProfileOut)
+async def fetch_project_preview_profile(
+    project_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectPreviewProfileOut:
+    profile = await get_project_preview_profile(session, tenant_id=ctx.tenant_id, project_id=project_id)
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project preview profile not configured")
+    return _project_preview_profile_out(profile)
 
 
 class RunStatusUpdate(BaseModel):
@@ -534,6 +672,97 @@ async def create_run_pull_request(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/preview", response_model=RunPreviewOut)
+@public_router.post("/runs/{run_id}/preview", response_model=RunPreviewOut)
+async def create_run_preview(
+    run_id: uuid.UUID,
+    payload: RunPreviewLaunchRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunPreviewOut:
+    try:
+        preview = await launch_run_preview(
+            session,
+            tenant_id=ctx.tenant_id,
+            run_id=run_id,
+            reuse_if_healthy=payload.reuse_if_healthy,
+        )
+        await log_activity(
+            session,
+            project_id=preview.project_id,
+            entity_type="run_preview",
+            entity_id=run_id,
+            action_type="preview.launched",
+            metadata={
+                "status": preview.status,
+                "preview_url": preview.preview_url,
+                "mode": preview.mode,
+                "expires_at": preview.expires_at.isoformat() if preview.expires_at else None,
+            },
+        )
+        await session.commit()
+        return preview
+    except ValueError as exc:
+        detail = str(exc)
+        code = status.HTTP_400_BAD_REQUEST
+        if detail == "Run not found":
+            code = status.HTTP_404_NOT_FOUND
+        elif detail in {
+            "Project preview profile is not configured",
+            "Run must be completed before preview launch",
+            "Project preview limit reached",
+            "Global preview limit reached",
+            "Compose-only preview profiles are not supported in the local preview launcher yet",
+        }:
+            code = status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=detail) from exc
+
+
+@router.get("/runs/{run_id}/preview", response_model=RunPreviewOut)
+@public_router.get("/runs/{run_id}/preview", response_model=RunPreviewOut)
+async def fetch_run_preview(
+    run_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunPreviewOut:
+    try:
+        return await get_run_preview(session, tenant_id=ctx.tenant_id, run_id=run_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Run not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+@router.delete("/runs/{run_id}/preview", response_model=RunPreviewOut)
+@public_router.delete("/runs/{run_id}/preview", response_model=RunPreviewOut)
+async def delete_run_preview(
+    run_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunPreviewOut:
+    try:
+        preview = await stop_run_preview(session, tenant_id=ctx.tenant_id, run_id=run_id)
+        await log_activity(
+            session,
+            project_id=preview.project_id,
+            entity_type="run_preview",
+            entity_id=run_id,
+            action_type="preview.stopped",
+            metadata={
+                "status": preview.status,
+                "preview_url": preview.preview_url,
+            },
+        )
+        await session.commit()
+        return preview
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Run not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
 @router.get("/runs/{run_id}/events", response_model=List[RunEventOut])

@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Artifact, Run, Trace
+from app.db.models import Approval, Artifact, Run, Trace
 from app.runtime.tools.repo_tools import RepoTools
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
@@ -70,23 +70,41 @@ async def create_pr_from_artifact(
         work_branch=working_branch,
     )
 
-    if not repo_has_changes(repo_path):
-        if artifact is None:
-            artifact = await session.scalar(
-                select(Artifact)
-                .where(
-                    Artifact.run_id == run.id,
-                    Artifact.tenant_id == run.tenant_id,
-                    Artifact.type == "git_diff",
-                )
-                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    if artifact is None:
+        artifact = await session.scalar(
+            select(Artifact)
+            .where(
+                Artifact.run_id == run.id,
+                Artifact.tenant_id == run.tenant_id,
+                Artifact.type == "git_diff",
             )
-        if artifact is None:
-            raise ValueError("No patch artifact found for this run")
+            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+        )
+    if artifact is None:
+        raise ValueError("No patch artifact found for this run")
+    if artifact.type != "git_diff":
+        raise ValueError("Selected artifact is not a patch artifact")
+
+    latest_approval = await session.scalar(
+        select(Approval)
+        .where(
+            Approval.project_id == run.project_id,
+            Approval.tenant_id == run.tenant_id,
+            Approval.target_type == "artifact",
+            Approval.target_id == artifact.id,
+            Approval.deleted_at.is_(None),
+        )
+        .order_by(Approval.created_at.desc(), Approval.id.desc())
+    )
+    if latest_approval is None or latest_approval.status != "APPROVED":
+        raise ValueError("Patch artifact must be approved before creating a PR")
+
+    if not repo_has_changes(repo_path):
         diff = _resolve_patch_content(run, artifact)
         if not diff:
             raise ValueError("Selected artifact does not contain patch content")
-        RepoTools(repo_path).apply_patch(diff)
+        log_dir = Path(run.workspace_root) / "logs" if run.workspace_root else None
+        RepoTools(repo_path, logs_path=log_dir).apply_patch(diff)
 
     if not repo_has_changes(repo_path):
         raise ValueError("No repository changes available to create a PR")

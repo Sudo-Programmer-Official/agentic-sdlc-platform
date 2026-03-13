@@ -12,6 +12,13 @@ from app.db.models.work_item_edge import WorkItemEdge
 from app.db.models.agent import Agent
 from app.db.models.memory import ProjectMemory, RunMemory, WorkItemArtifact
 from app.db.models.project_repository import ProjectRepository
+from app.db.models.project_preview_profile import ProjectPreviewProfile
+from app.db.models.run_summary import RunSummary
+from app.db.models.repo_file import RepoFile
+from app.db.models.repo_symbol import RepoSymbol
+from app.db.models.repo_edge import RepoEdge
+from app.db.models.repo_test_link import RepoTestLink
+from app.db.models.repo_snapshot import RepoSnapshot
 
 __all__ = [
     "Project",
@@ -30,4 +37,11 @@ __all__ = [
     "RunMemory",
     "WorkItemArtifact",
     "ProjectRepository",
+    "ProjectPreviewProfile",
+    "RunSummary",
+    "RepoFile",
+    "RepoSymbol",
+    "RepoEdge",
+    "RepoTestLink",
+    "RepoSnapshot",
 ]

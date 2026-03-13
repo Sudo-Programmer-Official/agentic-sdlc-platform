@@ -1,36 +1,64 @@
 <template>
-  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+  <div class="premium-card p-6">
     <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <div>
         <div class="text-sm uppercase tracking-wide text-slate-400">Execution Timeline</div>
-        <div class="mt-1 text-xs text-slate-500">Why + Next</div>
+        <div class="mt-1 text-xs text-slate-500">A visual explanation of why the system is doing what it is doing next.</div>
       </div>
-      <el-radio-group v-model="filterMode" size="small">
-        <el-radio-button label="all">All</el-radio-button>
-        <el-radio-button label="run">This Run</el-radio-button>
-        <el-radio-button label="stage">This Stage</el-radio-button>
-      </el-radio-group>
+      <div class="flex flex-wrap items-center gap-2">
+        <span v-if="statusSummary" class="topbar-chip" :style="summaryStyle(statusSummary.type)">
+          <span class="soft-dot" :class="{ 'pulse-dot': statusSummary.label === 'ACTIVE' }" />
+          {{ statusSummary.label }}
+        </span>
+        <el-radio-group v-model="filterMode" size="small">
+          <el-radio-button label="all">All</el-radio-button>
+          <el-radio-button label="run">This Run</el-radio-button>
+          <el-radio-button label="stage">This Stage</el-radio-button>
+        </el-radio-group>
+      </div>
     </div>
-    <div v-if="statusSummary" class="mt-4 flex flex-wrap items-center gap-2">
-      <el-tag :type="statusSummary.type" effect="light">{{ statusSummary.label }}</el-tag>
-      <span class="text-xs text-slate-500">{{ statusSummary.reason }}</span>
+
+    <div v-if="statusSummary" class="mission-subcard mt-4 px-4 py-3 text-sm text-slate-600">
+      {{ statusSummary.reason }}
     </div>
-    <el-timeline class="mt-4">
-      <el-timeline-item
-        v-for="step in steps"
+
+    <div v-if="steps.length" class="mt-6 space-y-4">
+      <div
+        v-for="(step, index) in steps"
         :key="step.timestamp + step.title"
-        :timestamp="step.timestamp"
-        placement="top"
+        class="mission-timeline-step relative overflow-hidden p-4 pl-8"
       >
-        <div class="text-sm font-semibold text-slate-900">{{ step.title }}</div>
-        <div class="mt-1 text-xs text-slate-500">Because: {{ step.because }}</div>
-        <div v-if="step.next" class="mt-1 text-xs text-slate-400">
-          Next: {{ step.next }}
+        <div class="absolute left-4 top-0 h-full w-px bg-[var(--border-soft)]" />
+        <div
+          class="absolute left-[9px] top-5 h-3 w-3 rounded-full"
+          :style="stepTone(step.state)"
+        />
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold text-slate-900">{{ step.title }}</div>
+            <div class="mt-1 text-xs uppercase tracking-wide text-slate-400">{{ step.timestamp }}</div>
+            <div class="mt-3 text-sm text-slate-600">
+              <strong>Why:</strong> {{ step.because }}
+            </div>
+            <div v-if="step.next" class="mt-2 text-sm text-slate-500">
+              <strong>Next:</strong> {{ step.next }}
+            </div>
+          </div>
+          <span class="topbar-chip" :style="stepTone(step.state)">
+            {{ step.state }}
+          </span>
         </div>
-      </el-timeline-item>
-    </el-timeline>
-    <div v-if="steps.length === 0" class="text-sm text-slate-500">
-      No execution history yet.
+        <div
+          v-if="index < steps.length - 1"
+          class="absolute left-[12px] top-[3.2rem] h-[calc(100%-2.4rem)] w-px"
+          style="background: linear-gradient(180deg, var(--border-strong), transparent);"
+        />
+      </div>
+    </div>
+
+    <div v-else class="premium-empty mt-4">
+      <div class="text-sm font-medium text-slate-900">No execution history yet</div>
+      <div class="mt-1 text-xs text-slate-500">Timeline events will populate here when a run starts moving through the pipeline.</div>
     </div>
   </div>
 </template>
@@ -63,116 +91,79 @@ const steps = computed(() => {
   const tasks = props.tasks || [];
   const scopedLogs = filteredLogs.value
     .slice()
-    .sort((a, b) => {
-      const left = new Date(a.timestamp).getTime();
-      const right = new Date(b.timestamp).getTime();
-      return left - right;
-    });
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
   const tasksById = new Map(tasks.map((task) => [task.task_id, task]));
   const parallelGroups = Array.from(new Set(tasks.map((task) => task.parallel_group || "?")));
   const pendingCount = tasks.filter((task) => task.status === "PENDING").length;
-  const runningCount = tasks.filter((task) => task.status === "RUNNING").length;
-  const failedCount = tasks.filter((task) => task.status === "FAILED").length;
-  const doneCount = tasks.filter((task) => task.status === "DONE").length;
 
   const mapped = scopedLogs.map((log) => {
     const message = log.message || "";
     const details = log.details || {};
     let because = "";
     let next = "";
+    let state = "RECORDED";
 
     if (message === "Run created") {
-      because = `Run created for stage ${log.stage} to track execution under governance.`;
-      next = "Start the run to allow agents to execute.";
+      because = `Run created for stage ${log.stage} to execute work under governance.`;
+      next = "Prepare workspace and begin scheduled tasks.";
+      state = "CREATED";
     } else if (message === "Run started") {
-      because = "Run moved to RUNNING so agents and tasks can execute.";
-      next = tasks.length
-        ? "Execute tasks or wait for planner output."
-        : "Wait for agent output or create tasks.";
-    } else if (message === "Run paused") {
-      because = "Execution paused by operator to preserve control.";
-      next = "Resume when ready to continue.";
-    } else if (message === "Run resumed") {
-      because = "Run resumed after pause; execution may continue.";
-      next = pendingCount ? "Continue executing ready tasks." : "Wait for next action.";
+      because = "Execution began and agents can now claim work.";
+      next = tasks.length ? "Watch the next ready work item start." : "Wait for planner output.";
+      state = "RUNNING";
     } else if (message === "Run completed") {
-      because = "All tasks or agent work finished successfully.";
-      next = "Advance SDLC stage with approval if required.";
+      because = "All required tasks finished successfully.";
+      next = "Review artifacts and move the SDLC stage forward.";
+      state = "COMPLETED";
     } else if (message.startsWith("Run failed")) {
-      because = "An error occurred during execution; run halted to prevent drift.";
-      next = "Review failure details, then restart or cancel.";
+      because = "Execution halted to avoid compounding errors.";
+      next = "Inspect recovery path or retry with a forked run.";
+      state = "FAILED";
     } else if (message === "Run canceled") {
-      because = "Run was canceled by operator.";
-      next = "Create a new run when ready.";
+      because = "Execution was manually stopped.";
+      next = "Start a new run when ready.";
+      state = "STOPPED";
     } else if (message === "Created agent tasks from PLAN.json") {
-      const taskCount = details.task_ids?.length ?? tasks.length;
-      const groupCount = parallelGroups.length;
-      because = groupCount
-        ? `Planner decomposed work into ${taskCount} task(s) across ${groupCount} parallel group(s).`
-        : `Planner decomposed work into ${taskCount} task(s) with bounded parallel execution.`;
+      because = `Planner decomposed work into ${tasks.length} task(s) across ${parallelGroups.length || 1} execution lane(s).`;
       next = "Execute the next bounded task batch.";
+      state = "PLANNED";
     } else if (message.startsWith("Task") && message.endsWith("started")) {
       const taskId = details.task_id || message.split(" ")[1];
       const task = tasksById.get(taskId);
-      const group = task?.parallel_group ? `group ${task.parallel_group}` : "a parallel group";
-      because = task
-        ? `Dependencies satisfied; scheduled in ${group}.`
-        : "Dependencies satisfied; executor scheduled task.";
-      next = task?.outputs?.length
-        ? `Produce outputs: ${task.outputs.join(", ")}.`
-        : "Produce task outputs.";
+      because = task ? `Dependencies cleared; ${task.title || task.task_id} entered execution.` : "Dependencies cleared; executor picked up work.";
+      next = "Wait for outputs or a recovery decision.";
+      state = "RUNNING";
     } else if (message.startsWith("Task") && message.endsWith("completed")) {
       const taskId = details.task_id || message.split(" ")[1];
       const task = tasksById.get(taskId);
-      because = task
-        ? `Outputs written; task ${task.task_id} marked DONE.`
-        : "Outputs written; task marked DONE.";
-      next = pendingCount ? "Continue with next ready tasks." : "Finalize run.";
+      because = task ? `${task.title || task.task_id} produced outputs and closed cleanly.` : "Task produced outputs and closed cleanly.";
+      next = pendingCount ? "Continue with remaining queued tasks." : "Finalize the run.";
+      state = "COMPLETED";
     } else if (message.startsWith("Task") && message.endsWith("failed")) {
-      because = "Task failed; execution halted to prevent cascading errors.";
-      next = "Review error, then retry or cancel.";
-    } else if (message.startsWith("Auto recovery queued")) {
-      because = "The runtime classified the failure and inserted a repair node into the DAG.";
-      next = "Wait for the recovery node to execute, then resume downstream work.";
-    } else if (message.startsWith("Recovery queued")) {
-      because = "A completed recovery node scheduled a follow-up retry.";
-      next = "Observe the retried step and confirm the run continues.";
-    } else if (log.tool === "file_write") {
-      because = "Agent produced a documented artifact for review.";
-      next = "Continue task execution.";
-    } else if (message === "Task execution halted (run not RUNNING)") {
-      because = "Run status changed; executor stopped safely.";
-      next = "Resume the run to continue executing tasks.";
+      because = "A work item failed and triggered run protection.";
+      next = "Observe whether recovery inserts a new fix path.";
+      state = "FAILED";
+    } else if (message.startsWith("Auto recovery queued") || message.startsWith("Recovery queued")) {
+      because = "The recovery engine inserted a deterministic repair path into the DAG.";
+      next = "Watch the recovery node execute, then evaluate the retry.";
+      state = "RECOVERY";
     } else if (message === "Requirements changed since last approval") {
-      because = "Document hash mismatch detected; requirements are stale.";
-      next = "Re-approve requirements before continuing.";
-    } else if (message === "Stages marked stale due to change request") {
-      const staleStages = details.stages?.length ? details.stages.join(", ") : "downstream stages";
-      because = `Change request accepted; ${staleStages} marked stale.`;
-      next = "Re-plan and re-approve affected stages.";
-    } else if (message === "Change request accepted") {
-      because = "Human accepted a change; workflow routed back to suggested stage.";
-      next = "Re-plan work from the suggested stage.";
-    } else if (message === "Change request created") {
-      because = "New change request logged for review.";
-      next = "Accept or reject the change.";
-    } else if (message === "Change request rejected") {
-      because = "Change request rejected by operator.";
-      next = "Continue with current plan.";
-    } else if (message === "Captured requirements artifact snapshots") {
-      because = "Requirements approved; hashes captured to enforce staleness checks.";
-      next = "Proceed to design/planning with approved docs.";
+      because = "Input documents changed, so downstream artifacts are potentially stale.";
+      next = "Re-approve or re-plan before continuing.";
+      state = "BLOCKED";
     } else {
-      because = "Recorded system action for auditability.";
+      because = "Recorded system action for replay and auditability.";
       next = runNextFromStatus();
+      state = inferStateFromMessage(message);
     }
 
     return {
       timestamp: log.timestamp,
       title: message,
       because,
-      next
+      next,
+      state,
     };
   });
 
@@ -187,45 +178,45 @@ const steps = computed(() => {
 const statusSummary = computed(() => {
   const waiting = deriveWaitingStep(props.tasks || [], props.runStatus, props.currentStage, props.logs || []);
   if (waiting) {
-    const type = waiting.kind === "BLOCKED" ? "danger" : "warning";
-    return { label: waiting.kind, type, reason: waiting.because };
+    const type = waiting.state === "BLOCKED" ? "danger" : "warning";
+    return { label: waiting.state, type, reason: waiting.because };
   }
   if (props.runStatus === "RUNNING") {
-    return { label: "ACTIVE", type: "success", reason: "Execution is in progress." };
+    return { label: "ACTIVE", type: "success", reason: "Automation is currently progressing through the runtime." };
   }
   if (props.runStatus === "COMPLETED") {
-    return { label: "COMPLETE", type: "success", reason: "Run finished successfully." };
+    return { label: "COMPLETE", type: "success", reason: "Run finished successfully and is ready for review." };
   }
   if (props.runStatus === "FAILED") {
-    return { label: "BLOCKED", type: "danger", reason: "Run failed; review errors." };
+    return { label: "BLOCKED", type: "danger", reason: "Run failed and needs intervention or a fork." };
   }
   return { label: "IDLE", type: "info", reason: "No active execution right now." };
 });
 
 function runNextFromStatus() {
-  if (props.runStatus === "RUNNING") {
-    return "Continue executing ready tasks.";
-  }
-  if (props.runStatus === "PAUSED") {
-    return "Resume to continue execution.";
-  }
-  if (props.runStatus === "COMPLETED") {
-    return "Advance SDLC stage with approval.";
-  }
-  return "Review logs for next action.";
+  if (props.runStatus === "RUNNING") return "Continue executing ready tasks.";
+  if (props.runStatus === "PAUSED") return "Resume to continue execution.";
+  if (props.runStatus === "COMPLETED") return "Review outputs and promote the stage.";
+  return "Review the latest signals for next action.";
+}
+
+function inferStateFromMessage(message: string) {
+  if (/complete|done|approved/i.test(message)) return "COMPLETED";
+  if (/fail|error/i.test(message)) return "FAILED";
+  if (/create|queued|plan/i.test(message)) return "PLANNED";
+  return "RECORDED";
 }
 
 function deriveWaitingStep(tasks: Array<any>, runStatus?: string, currentStage?: string, logs?: Array<any>) {
   const logMessages = (logs || []).map((log) => log.message);
   const staleDetected = logMessages.includes("Requirements changed since last approval");
-  const changeStale = logMessages.includes("Stages marked stale due to change request");
-  if (staleDetected || changeStale) {
+  if (staleDetected) {
     return {
       timestamp: "Now",
       title: "Blocked by stale requirements",
-      because: "Requirements changed since last approval; downstream work is stale.",
+      because: "Requirements changed since last approval; downstream work is no longer trustworthy.",
       next: "Re-approve requirements and re-plan work.",
-      kind: "BLOCKED"
+      state: "BLOCKED",
     };
   }
 
@@ -233,9 +224,9 @@ function deriveWaitingStep(tasks: Array<any>, runStatus?: string, currentStage?:
     return {
       timestamp: "Now",
       title: "Execution paused",
-      because: "Run is paused; no tasks will start.",
+      because: "The run is paused, so no agents or work items will progress.",
       next: "Resume the run to continue.",
-      kind: "WAITING"
+      state: "WAITING",
     };
   }
 
@@ -243,9 +234,9 @@ function deriveWaitingStep(tasks: Array<any>, runStatus?: string, currentStage?:
     return {
       timestamp: "Now",
       title: "Execution blocked by failure",
-      because: "A task failed; execution halted to prevent cascading errors.",
-      next: "Review failure details and retry or cancel.",
-      kind: "BLOCKED"
+      because: "A failed work item stopped the current run to prevent cascading drift.",
+      next: "Review the error, replay the run, or create a fork.",
+      state: "BLOCKED",
     };
   }
 
@@ -255,101 +246,35 @@ function deriveWaitingStep(tasks: Array<any>, runStatus?: string, currentStage?:
       title: "Run canceled",
       because: "Execution was canceled by the operator.",
       next: "Create a new run when ready.",
-      kind: "WAITING"
+      state: "WAITING",
     };
   }
 
-  if (runStatus === "COMPLETED") {
-    return null;
-  }
-
-  if (runStatus === "PENDING" || runStatus === "IDLE" || !runStatus) {
-    const gateStages = new Set(["REQUIREMENTS_DRAFTED", "DESIGN_DRAFTED"]);
-    if (currentStage && gateStages.has(currentStage)) {
-      return {
-        timestamp: "Now",
-        title: "Waiting for approval",
-        because: `Approval is required to advance from ${currentStage}.`,
-        next: "Request approval to proceed.",
-        kind: "WAITING"
-      };
-    }
+  if (runStatus === "QUEUED" && tasks.length === 0) {
     return {
       timestamp: "Now",
-      title: "No active run",
-      because: "No run is currently executing for this stage.",
-      next: "Create and start a run to proceed.",
-      kind: "WAITING"
-    };
-  }
-
-  const pending = tasks.filter((task) => task.status === "PENDING");
-  const running = tasks.filter((task) => task.status === "RUNNING");
-  const failed = tasks.filter((task) => task.status === "FAILED");
-  const tasksById = new Map(tasks.map((task) => [task.task_id, task.status]));
-  const dependencyCount = (task: any) =>
-    Array.isArray(task.depends_on) && task.depends_on.length > 0
-      ? task.depends_on.length
-      : Number(task.depends_on_count || 0);
-  const ready = pending.filter((task) =>
-    dependencyCount(task) === 0 ||
-    (task.depends_on || []).every((dep: string) => tasksById.get(dep) === "DONE")
-  );
-
-  if (failed.length && running.length === 0) {
-    return {
-      timestamp: "Now",
-      title: "Blocked by failed tasks",
-      because: `${failed.length} task(s) failed; execution paused.`,
-      next: "Review errors and retry failed tasks.",
-      kind: "BLOCKED"
-    };
-  }
-
-  if (pending.length === 0 && running.length === 0) {
-    return {
-      timestamp: "Now",
-      title: "Waiting for tasks",
-      because: "No pending tasks are available to execute.",
-      next: "Generate tasks from the planner or add new work.",
-      kind: "WAITING"
-    };
-  }
-
-  if (pending.length > 0 && ready.length === 0 && running.length === 0) {
-    const blockedDeps = new Set<string>();
-    pending.forEach((task) => {
-      (task.depends_on || []).forEach((dep: string) => {
-        if (tasksById.get(dep) !== "DONE") {
-          blockedDeps.add(dep);
-        }
-      });
-    });
-    const blockedCount = pending.filter((task) => dependencyCount(task) > 0).length;
-    const depsList = Array.from(blockedDeps).slice(0, 3).join(", ");
-    return {
-      timestamp: "Now",
-      title: "Waiting for dependencies",
-      because: depsList
-        ? `No tasks started because dependencies are incomplete: ${depsList}.`
-        : blockedCount === pending.length
-          ? "No tasks started because upstream work is still in progress."
-          : "No tasks started because dependencies are incomplete.",
-      next: "Complete dependency tasks or adjust the plan.",
-      kind: "WAITING"
-    };
-  }
-
-  if (ready.length > 0 && running.length === 0) {
-    return {
-      timestamp: "Now",
-      title: "Ready to execute",
-      because: `${ready.length} task(s) are ready but not yet started.`,
-      next: "Run the next bounded batch to continue.",
-      kind: "WAITING"
+      title: "Waiting on planner",
+      because: `Run is queued for stage ${currentStage || "current"} and no work items exist yet.`,
+      next: "Wait for planning output or start with a new intake action.",
+      state: "WAITING",
     };
   }
 
   return null;
+}
+
+function stepTone(state: string) {
+  if (state === "RUNNING") return { background: "var(--warning)", color: "var(--warning)" };
+  if (state === "COMPLETED") return { background: "var(--success)", color: "var(--success)" };
+  if (state === "FAILED" || state === "BLOCKED") return { background: "var(--danger)", color: "var(--danger)" };
+  if (state === "RECOVERY") return { background: "#8b7dff", color: "#8b7dff" };
+  return { background: "var(--accent)", color: "var(--accent)" };
+}
+
+function summaryStyle(type: string) {
+  if (type === "success") return { background: "rgba(34, 197, 94, 0.12)", color: "var(--success)" };
+  if (type === "warning") return { background: "rgba(245, 158, 11, 0.12)", color: "var(--warning)" };
+  if (type === "danger") return { background: "rgba(239, 68, 68, 0.12)", color: "var(--danger)" };
+  return { background: "rgba(91, 156, 255, 0.12)", color: "var(--accent)" };
 }
 </script>

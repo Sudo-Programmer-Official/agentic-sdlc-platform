@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import subprocess
 
 from app.core.config import get_settings
 from app.runtime.tools.redaction import redact
+from app.services.workspace_commands import run_workspace_command
 
 
 class RepoTools:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, logs_path: Path | None = None):
         self.root = root.resolve()
         self.settings = get_settings()
+        self.logs_path = logs_path
 
     def _safe_path(self, rel_path: str) -> Path:
         p = (self.root / rel_path).resolve()
@@ -63,40 +63,49 @@ class RepoTools:
                     raise ValueError("Patch header contains parent path reference")
         try:
             # dry-run check first
-            check_res = subprocess.run(
-                ["git", "-C", str(self.root), "apply", "--check", "-"],
-                input=normalized_diff,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=10,
+            check_res = run_workspace_command(
+                ["git", "apply", "--check", "-"],
+                cwd=self.root,
+                log_dir=self.logs_path,
+                label="git-apply-check",
+                timeout_seconds=10,
+                stdin_text=normalized_diff,
+                output_max_bytes=self.settings.workspace_command_output_max_bytes,
             )
-            if check_res.returncode != 0:
+            if check_res.status == "BLOCKED":
+                raise ValueError(check_res.blocked_reason or "Patch check blocked by workspace policy")
+            if check_res.exit_code != 0:
                 raise ValueError(f"Patch check failed: {check_res.stderr.strip() or check_res.stdout.strip()}")
 
-            res = subprocess.run(
-                ["git", "-C", str(self.root), "apply", "--whitespace=nowarn", "--reject", "-"],
-                input=normalized_diff,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=10,
+            res = run_workspace_command(
+                ["git", "apply", "--whitespace=nowarn", "--reject", "-"],
+                cwd=self.root,
+                log_dir=self.logs_path,
+                label="git-apply",
+                timeout_seconds=10,
+                stdin_text=normalized_diff,
+                output_max_bytes=self.settings.workspace_command_output_max_bytes,
             )
         except Exception as exc:
             raise ValueError(f"Patch apply error: {exc}") from exc
 
-        if res.returncode != 0:
+        if res.status == "BLOCKED":
+            raise ValueError(res.blocked_reason or "Patch apply blocked by workspace policy")
+        if res.exit_code != 0:
             raise ValueError(f"Patch apply failed: {res.stderr.strip() or res.stdout.strip()}")
 
     def git_diff(self) -> str:
         try:
-            res = subprocess.run(
-                ["git", "-C", str(self.root), "diff"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
+            res = run_workspace_command(
+                ["git", "diff"],
+                cwd=self.root,
+                log_dir=self.logs_path,
+                label="git-diff",
+                timeout_seconds=5,
+                output_max_bytes=self.settings.workspace_command_output_max_bytes,
             )
+            if res.status in {"BLOCKED", "TIMEOUT"} or res.exit_code not in {0, None}:
+                return ""
             return res.stdout or ""
         except Exception:
             return ""

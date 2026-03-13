@@ -272,6 +272,37 @@ async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_s
     monkeypatch.setattr(pr_service, "push_branch", _push_local_branch)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        blocked = await client.post(
+            f"/api/v1/runs/{run.id}/create-pr",
+            json={
+                "artifact_id": str(artifact.id),
+                "title": "Fix auth README",
+                "body": "Automated fix",
+                "branch_name": "run/fix-auth",
+            },
+        )
+        assert blocked.status_code == 409
+        assert "approved" in blocked.json()["detail"].lower()
+
+        approval_resp = await client.post(
+            f"/api/v1/projects/{project.id}/approvals",
+            json={
+                "target_type": "artifact",
+                "target_id": str(artifact.id),
+                "status": "APPROVED",
+                "decided_by": "ui-user",
+                "comment": "Reviewed patch artifact",
+            },
+        )
+        assert approval_resp.status_code == 201, approval_resp.text
+
+        approvals_resp = await client.get(
+            f"/api/v1/projects/{project.id}/approvals",
+            params={"target_type": "artifact", "target_id": str(artifact.id)},
+        )
+        assert approvals_resp.status_code == 200
+        assert approvals_resp.json()[0]["status"] == "APPROVED"
+
         response = await client.post(
             f"/api/v1/runs/{run.id}/create-pr",
             json={

@@ -5,7 +5,9 @@ import "element-plus/dist/index.css";
 import App from "./App.vue";
 import router from "./router";
 import "./index.css";
+import { initializeTheme } from "./state/uiTheme";
 
+initializeTheme();
 const app = createApp(App);
 app.use(router);
 app.use(ElementPlus);

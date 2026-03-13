@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import shlex
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -8,9 +8,11 @@ from app.runtime.executor import TaskExecutor, TaskResult
 from app.runtime.context import RunContext
 from app.db.models import WorkItem
 from app.services.workspace_supervisor import workspace_uri
+from app.services.workspace_commands import run_workspace_command_async
 
 
 class TestExecutor(TaskExecutor):
+    __test__ = False
     name = "test"
 
     def __init__(self, repo_root: Path | None = None):
@@ -19,50 +21,59 @@ class TestExecutor(TaskExecutor):
 
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
-        cmd = self.settings.test_command.split()
+        cmd = shlex.split(self.settings.test_command)
+        log_dir = Path(context.logs_path) if context.logs_path else repo_root / ".agentic-sdlc-logs"
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
+            result = await run_workspace_command_async(
+                cmd,
                 cwd=repo_root,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                log_dir=log_dir,
+                label=f"test-{work_item.type.lower()}",
+                timeout_seconds=self.settings.test_timeout_seconds,
+                output_max_bytes=self.settings.test_output_max_bytes,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.settings.test_timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
+            if result.status == "BLOCKED":
+                return {
+                    "status": "FAILED",
+                    "message": "Test command blocked by workspace policy",
+                    "payload": {
+                        "exit_code": None,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "command_status": result.status,
+                    },
+                }
+            if result.timed_out:
                 return {
                     "status": "FAILED",
                     "message": "Test command timed out",
                     "payload": {
                         "exit_code": None,
-                        "stdout": "",
-                        "stderr": "timeout",
+                        "stdout": result.stdout,
+                        "stderr": result.stderr or "timeout",
+                        "command_status": result.status,
                     },
                 }
 
-            out = (stdout or b"")[: self.settings.test_output_max_bytes].decode(errors="ignore")
-            err = (stderr or b"")[: self.settings.test_output_max_bytes].decode(errors="ignore")
-            exit_code = proc.returncode
+            out = result.stdout
+            err = result.stderr
+            exit_code = result.exit_code
             status = "DONE" if exit_code == 0 else "FAILED"
             artifacts: list[dict] = []
-            if context.logs_path:
-                log_dir = Path(context.logs_path)
-                log_dir.mkdir(parents=True, exist_ok=True)
-                log_name = f"{work_item.type.lower()}-{work_item.id}.log"
-                log_path = log_dir / log_name
-                log_body = out or ""
-                if err:
-                    log_body = f"{log_body}\n\n--- STDERR ---\n{err}" if log_body else f"--- STDERR ---\n{err}"
-                log_path.write_text(log_body, encoding="utf-8")
+            if result.log_path:
+                log_path = Path(result.log_path)
+                log_name = log_path.name
+                uri = workspace_uri("logs", log_name) if context.logs_path else str(log_path)
                 artifacts.append(
                     {
                         "type": "test_log",
-                        "uri": workspace_uri("logs", log_name),
+                        "uri": uri,
                         "path": str(log_path),
-                        "payload": {"exit_code": exit_code},
+                        "payload": {
+                            "exit_code": exit_code,
+                            "command_status": result.status,
+                            "command_audit_path": result.audit_path,
+                        },
                     }
                 )
             return {
@@ -72,6 +83,8 @@ class TestExecutor(TaskExecutor):
                     "exit_code": exit_code,
                     "stdout": out,
                     "stderr": err,
+                    "command_status": result.status,
+                    "command_audit_path": result.audit_path,
                     "artifacts": artifacts,
                 },
             }

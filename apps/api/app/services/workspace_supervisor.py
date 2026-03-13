@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,10 @@ from app.core.config import get_settings
 from app.db.models import Run
 from app.runtime.context import RunContext
 from app.services.repo_connector import prepare_workspace_repo
+from app.services.workspace_commands import (
+    get_workspace_allowed_command_prefixes,
+    workspace_command_audit_path,
+)
 
 
 @dataclass(frozen=True)
@@ -57,9 +62,11 @@ def _manifest(
     repo_url: str | None,
     repo_branch: str | None,
 ) -> dict:
+    settings = get_settings()
     return {
         "run_id": str(run.id),
         "project_id": str(run.project_id),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "branch_name": paths.branch_name,
         "workspace_root": str(paths.root),
         "repo_path": str(paths.repo),
@@ -73,6 +80,11 @@ def _manifest(
         "repo_url": repo_url,
         "repo_branch": repo_branch,
         "executor": run.executor,
+        "plan_snapshot_path": str(paths.context / "plan.json"),
+        "simulation_mode": getattr(settings, "workspace_simulation_mode", "ephemeral"),
+        "cleanup_policy": getattr(settings, "workspace_cleanup_policy", "retain"),
+        "allowed_command_prefixes": get_workspace_allowed_command_prefixes(settings),
+        "command_audit_log": str(workspace_command_audit_path(paths.logs)),
     }
 
 
@@ -189,6 +201,7 @@ async def build_run_context(
     repo_url: str | None = None,
     repo_branch: str | None = None,
 ) -> RunContext:
+    settings = get_settings()
     paths = await ensure_run_workspace(
         session,
         run,
@@ -200,6 +213,7 @@ async def build_run_context(
     return RunContext(
         project_id=run.project_id,
         run_id=run.id,
+        plan_snapshot=(run.summary or {}).get("plan_snapshot") if isinstance(run.summary, dict) else None,
         workspace_root=str(paths.root),
         repo_path=str(paths.repo),
         artifacts_path=str(paths.artifacts),
@@ -208,8 +222,24 @@ async def build_run_context(
         context_path=str(paths.context),
         branch_name=paths.branch_name,
         workspace_status=run.workspace_status,
+        simulation_mode=getattr(settings, "workspace_simulation_mode", "ephemeral"),
+        command_audit_path=str(workspace_command_audit_path(paths.logs)),
+        cleanup_policy=getattr(settings, "workspace_cleanup_policy", "retain"),
     )
 
 
 def workspace_uri(kind: str, filename: str) -> str:
     return _workspace_uri(kind, filename)
+
+
+def destroy_run_workspace(run: Run) -> bool:
+    if not run.workspace_root:
+        return False
+    root = Path(run.workspace_root).expanduser().resolve()
+    base_dir = Path(get_settings().workspace_base_dir).expanduser().resolve()
+    if not str(root).startswith(str(base_dir)):
+        raise ValueError("Workspace path escapes configured workspace base directory")
+    if not root.exists():
+        return False
+    shutil.rmtree(root)
+    return True

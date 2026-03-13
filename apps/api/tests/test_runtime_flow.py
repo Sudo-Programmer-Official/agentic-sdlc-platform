@@ -73,6 +73,11 @@ async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db
         assert Path(run.workspace_root).exists()
         assert Path(run.repo_path).exists()
         assert Path(run.workspace_root, "context", "workspace.json").exists()
+        assert Path(run.workspace_root, "context", "plan.json").exists()
+        assert isinstance(run.summary, dict)
+        assert isinstance(run.summary.get("plan_snapshot"), dict)
+        assert run.summary["plan_snapshot"]["steps"]
+        assert run.summary["plan_snapshot"]["steps"][0]["title"] == "PLAN_DAG"
 
         work_items = (
             await session.execute(
@@ -100,6 +105,7 @@ async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db
         event_types = [event.event_type for event in events]
         assert "RUN_RUNNING" in event_types
         assert "WORK_DAG_CREATED" in event_types
+        assert "RUN_PLAN_CAPTURED" in event_types
         assert "RUN_COMPLETED" in event_types
         assert any(event.payload and event.payload.get("work_item_id") for event in events if event.event_type.startswith("WORK_ITEM_"))
         assert all(event.task_id is None for event in events if event.event_type.startswith("WORK_ITEM_"))

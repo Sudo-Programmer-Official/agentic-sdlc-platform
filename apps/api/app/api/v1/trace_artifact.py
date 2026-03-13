@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, UTC
 import uuid
 from typing import List, Optional, Tuple
 
@@ -7,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_tenant_context
 from app.db.models import Project, Task, Document, Artifact, Trace, Approval, Run, WorkItem
 from app.db.session import get_session
 from app.core.config import get_settings
@@ -18,8 +20,13 @@ from app.schemas.graph import GraphResult, GraphNode, GraphEdge
 from app.schemas.graph_context import GraphContextResponse
 from app.schemas.provenance import Provenance
 from app.schemas.explain import ExplainArtifactResponse, ExplainTaskResponse
+from app.schemas.artifact_diff import ArtifactDiffResponse
 from app.schemas.persistence import DocumentOut, RunOut, TaskOut, WorkItemOut
+from app.services.artifact_diff import build_artifact_diff_preview
+from app.services.event_log import record_event
 from app.services.graph_context import build_graph_context
+from app.services.run_summary_builder import upsert_run_summary
+from app.services.activity_log import log_activity
 
 router = APIRouter(prefix="/store", tags=["store-graph"])
 public_router = APIRouter(tags=["graph"])
@@ -164,7 +171,29 @@ async def list_artifacts(project_id: uuid.UUID, session: AsyncSession = Depends(
     return [ArtifactOut.model_validate(a) for a in artifacts]
 
 
+@router.get("/projects/{project_id}/artifacts/{artifact_id}/diff", response_model=ArtifactDiffResponse)
+@public_router.get("/projects/{project_id}/artifacts/{artifact_id}/diff", response_model=ArtifactDiffResponse)
+async def preview_artifact_diff(
+    project_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> ArtifactDiffResponse:
+    try:
+        return await build_artifact_diff_preview(session, project_id=project_id, artifact_id=artifact_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = (
+            status.HTTP_404_NOT_FOUND if detail == "Artifact not found" else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
 @router.post(
+    "/projects/{project_id}/approvals",
+    response_model=ApprovalOut,
+    status_code=status.HTTP_201_CREATED,
+)
+@public_router.post(
     "/projects/{project_id}/approvals",
     response_model=ApprovalOut,
     status_code=status.HTTP_201_CREATED,
@@ -172,27 +201,126 @@ async def list_artifacts(project_id: uuid.UUID, session: AsyncSession = Depends(
 async def create_approval(
     project_id: uuid.UUID,
     payload: ApprovalCreate,
+    ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ApprovalOut:
-    await _assert_project(session, project_id)
+    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    target: Artifact | Task | Document | None = None
+    if payload.target_type == "artifact":
+        target = await session.scalar(
+            select(Artifact).where(
+                Artifact.id == payload.target_id,
+                Artifact.project_id == project_id,
+                Artifact.tenant_id == ctx.tenant_id,
+                Artifact.deleted_at.is_(None),
+            )
+        )
+    elif payload.target_type == "task":
+        target = await session.scalar(
+            select(Task).where(
+                Task.id == payload.target_id,
+                Task.project_id == project_id,
+                Task.tenant_id == ctx.tenant_id,
+                Task.deleted_at.is_(None),
+            )
+        )
+    elif payload.target_type == "document":
+        target = await session.scalar(
+            select(Document).where(
+                Document.id == payload.target_id,
+                Document.project_id == project_id,
+                Document.tenant_id == ctx.tenant_id,
+                Document.deleted_at.is_(None),
+            )
+        )
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported approval target_type")
+
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval target not found")
+
     approval = Approval(
+        tenant_id=ctx.tenant_id,
         project_id=project_id,
         target_type=payload.target_type,
         target_id=payload.target_id,
-        status=payload.status,
+        status=payload.status.strip().upper(),
         decided_by=payload.decided_by,
+        decided_at=datetime.now(UTC).isoformat() if payload.status.strip().upper() != "PENDING" else None,
         comment=payload.comment,
     )
     session.add(approval)
+    await session.flush()
+
+    target_run_id: uuid.UUID | None = None
+    if payload.target_type == "artifact":
+        artifact = target
+        target_run_id = artifact.run_id
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type=payload.target_type,
+        entity_id=payload.target_id,
+        action_type="approval.recorded",
+        metadata={
+            "status": approval.status,
+            "target_type": payload.target_type,
+            "decided_by": payload.decided_by,
+        },
+        actor=ctx.user_id,
+    )
+    if target_run_id:
+        await record_event(
+            session,
+            project_id=project_id,
+            run_id=target_run_id,
+            event_type="RUN_APPROVAL_RECORDED",
+            actor_type="USER",
+            actor_id=ctx.user_id,
+            message=f"{payload.target_type.title()} {approval.status.lower()}",
+            payload={
+                "target_type": payload.target_type,
+                "target_id": str(payload.target_id),
+                "status": approval.status,
+                "comment": payload.comment,
+            },
+            tenant_id=ctx.tenant_id,
+        )
+        await upsert_run_summary(session, target_run_id)
     await session.commit()
     await session.refresh(approval)
     return ApprovalOut.model_validate(approval)
 
 
 @router.get("/projects/{project_id}/approvals", response_model=List[ApprovalOut])
-async def list_approvals(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> List[ApprovalOut]:
-    await _assert_project(session, project_id)
-    result = await session.execute(select(Approval).where(Approval.project_id == project_id))
+@public_router.get("/projects/{project_id}/approvals", response_model=List[ApprovalOut])
+async def list_approvals(
+    project_id: uuid.UUID,
+    target_type: str | None = None,
+    target_id: uuid.UUID | None = None,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[ApprovalOut]:
+    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    stmt = (
+        select(Approval)
+        .where(
+            Approval.project_id == project_id,
+            Approval.tenant_id == ctx.tenant_id,
+            Approval.deleted_at.is_(None),
+        )
+        .order_by(Approval.created_at.desc(), Approval.id.desc())
+    )
+    if target_type:
+        stmt = stmt.where(Approval.target_type == target_type)
+    if target_id:
+        stmt = stmt.where(Approval.target_id == target_id)
+    result = await session.execute(stmt)
     approvals = result.scalars().all()
     return [ApprovalOut.model_validate(a) for a in approvals]
 

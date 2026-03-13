@@ -17,7 +17,9 @@ from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_work_item_status
 from app.runtime.recovery_policy import maybe_apply_recovery
 from app.runtime.dag import generate_template_dag
+from app.runtime.plan_snapshot import persist_run_plan_snapshot
 from app.core.config import get_settings
+from app.services.task_decomposition import persist_run_task_decomposition
 from app.services.workspace_supervisor import build_run_context, ensure_run_workspace
 
 
@@ -65,6 +67,8 @@ class RunOrchestrator:
                 executor=self.executor.name,
                 tenant_id=run.tenant_id,
             )
+            snapshot = await persist_run_plan_snapshot(session, run)
+            decomposition = await persist_run_task_decomposition(session, run)
             await record_event(
                 session,
                 project_id=run.project_id,
@@ -72,6 +76,35 @@ class RunOrchestrator:
                 event_type="WORK_DAG_CREATED",
                 actor_type=actor_type,
                 tenant_id=run.tenant_id,
+            )
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                event_type="RUN_PLAN_CAPTURED",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                tenant_id=run.tenant_id,
+                payload={
+                    "goal": snapshot.get("goal"),
+                    "step_count": len(snapshot.get("steps", [])),
+                    "validation_steps": snapshot.get("validation_steps", []),
+                },
+            )
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                event_type="RUN_TASK_DECOMPOSED",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                tenant_id=run.tenant_id,
+                payload={
+                    "goal": decomposition.get("goal"),
+                    "template_key": decomposition.get("template_key"),
+                    "subtask_count": len(decomposition.get("subtasks", [])),
+                    "risk_level": decomposition.get("risk_level"),
+                },
             )
             await session.commit()
 

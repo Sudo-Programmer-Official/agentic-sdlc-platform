@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     test_output_max_bytes: int = 200_000
     workspace_base_dir: str = "/tmp/agentic-sdlc-workspaces"
     workspace_repo_source: str | None = None
+    workspace_simulation_mode: str = "ephemeral"
+    workspace_cleanup_policy: str = "retain"
+    workspace_allowed_command_prefixes: str = (
+        "git,pytest,python,python3,npm,pnpm,yarn,node,npx,uv,bash,sh,make,go,cargo,eslint,ruff"
+    )
+    workspace_command_output_max_bytes: int = 200_000
+    preview_host: str = "127.0.0.1"
+    preview_default_ttl_hours: int = 24
+    preview_max_per_project: int = 5
+    preview_max_global: int = 20
     git_author_name: str = "Agentic SDLC"
     git_author_email: str = "agentic-sdlc@local"
     tenancy_enforcement: bool = False

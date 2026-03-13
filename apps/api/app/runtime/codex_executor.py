@@ -44,7 +44,7 @@ class CodexExecutor(TaskExecutor):
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
         self.repo_root = repo_root
-        repo = RepoTools(repo_root)
+        repo = RepoTools(repo_root, logs_path=Path(context.logs_path) if context.logs_path else None)
 
         context_bundle = self._build_context(repo, work_item)
         context_bundle.setdefault("meta", {})
@@ -56,7 +56,26 @@ class CodexExecutor(TaskExecutor):
             "patches_path": context.patches_path,
             "branch_name": context.branch_name,
             "workspace_status": context.workspace_status,
+            "simulation_mode": context.simulation_mode,
+            "command_audit_path": context.command_audit_path,
+            "cleanup_policy": context.cleanup_policy,
         }
+        if isinstance(context.plan_snapshot, dict):
+            context_bundle["meta"]["run_plan"] = {
+                "goal": context.plan_snapshot.get("goal"),
+                "rationale": context.plan_snapshot.get("rationale"),
+                "validation_steps": context.plan_snapshot.get("validation_steps", []),
+                "expected_files": context.plan_snapshot.get("expected_files", []),
+                "steps": [
+                    {
+                        "title": step.get("title"),
+                        "phase": step.get("phase"),
+                        "success_criteria": step.get("success_criteria", []),
+                    }
+                    for step in context.plan_snapshot.get("steps", [])[:8]
+                    if isinstance(step, dict)
+                ],
+            }
         graph_context = await self._load_graph_context(work_item)
         if graph_context:
             context_bundle["graph_context"] = graph_context

@@ -44,6 +44,7 @@ from app.schemas.persistence import (
     WorkItemComplete,
     WorkItemFail,
 )
+from app.schemas.run_comparison import RunComparisonResponse
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
@@ -54,6 +55,7 @@ from app.db.session import SessionLocal
 from app.services.run_replay import fork_run
 from app.services.repo_connector import connect_repo, get_project_repository
 from app.services.pr_service import create_pr_from_artifact
+from app.services.run_comparison import compare_runs
 from app.services.workspace_supervisor import ensure_run_workspace
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
@@ -315,6 +317,20 @@ async def list_runs(
     )
     runs = result.scalars().all()
     return [_run_out(r) for r in runs]
+
+
+@router.get("/runs/compare", response_model=RunComparisonResponse)
+@public_router.get("/runs/compare", response_model=RunComparisonResponse)
+async def compare_runs_endpoint(
+    run_a: uuid.UUID,
+    run_b: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunComparisonResponse:
+    try:
+        return await compare_runs(session, tenant_id=ctx.tenant_id, run_a_id=run_a, run_b_id=run_b)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)

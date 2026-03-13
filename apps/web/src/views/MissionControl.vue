@@ -30,6 +30,9 @@
           <el-button plain :disabled="!forkEnabled" @click="openForkDialog">
             Fork Run
           </el-button>
+          <el-button plain :disabled="!compareEnabled" @click="openCompareDialog">
+            Compare Runs
+          </el-button>
           <el-button type="danger" plain :disabled="!cancelEnabled" @click="cancelLatestRun">
             Cancel Run
           </el-button>
@@ -316,6 +319,145 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="compareDialogOpen" title="Compare Runs" width="880px">
+      <div class="space-y-4">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Run A</span>
+            <select
+              v-model="compareRunAId"
+              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              <option v-for="option in compareRunOptions" :key="option.id" :value="option.id">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Run B</span>
+            <select
+              v-model="compareRunBId"
+              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              <option v-for="option in compareRunOptions" :key="option.id" :value="option.id">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+        </div>
+
+        <div v-if="compareResult" class="grid gap-4 md:grid-cols-2">
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold text-slate-900">Run A</div>
+              <el-tag :type="runStatusTagType(compareResult.run_a.status)" effect="light">
+                {{ compareResult.run_a.status }}
+              </el-tag>
+            </div>
+            <div class="mt-3 space-y-1 text-sm text-slate-700">
+              <div><strong>ID:</strong> <span class="font-mono">{{ compareResult.run_a.id }}</span></div>
+              <div><strong>Executor:</strong> {{ compareResult.run_a.executor }}</div>
+              <div><strong>Branch:</strong> {{ compareResult.run_a.branch_name || "—" }}</div>
+              <div><strong>Elapsed:</strong> {{ formatElapsed(compareResult.run_a.elapsed_seconds) }}</div>
+              <div><strong>Recoveries:</strong> {{ compareResult.run_a.recovery_count }}</div>
+              <div><strong>Approval:</strong> {{ compareResult.run_a.approval_status || "—" }}</div>
+              <div>
+                <strong>PR:</strong>
+                <a
+                  v-if="compareResult.run_a.pull_request_url"
+                  :href="compareResult.run_a.pull_request_url"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="underline"
+                >
+                  {{ compareResult.run_a.pull_request_url }}
+                </a>
+                <span v-else>—</span>
+              </div>
+            </div>
+            <div class="mt-3 text-xs uppercase tracking-wide text-slate-400">Files Changed</div>
+            <div class="mt-1 text-sm text-slate-600">
+              {{ compareResult.run_a.files_changed.length ? compareResult.run_a.files_changed.join(", ") : "No diff files recorded." }}
+            </div>
+            <div class="mt-3 text-xs uppercase tracking-wide text-slate-400">Artifacts</div>
+            <ul class="mt-1 space-y-1 text-sm text-slate-600">
+              <li v-for="artifact in compareResult.run_a.artifacts" :key="artifact.id">
+                {{ artifact.type }} · {{ shortenUri(artifact.uri) }}
+              </li>
+            </ul>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold text-slate-900">Run B</div>
+              <el-tag :type="runStatusTagType(compareResult.run_b.status)" effect="light">
+                {{ compareResult.run_b.status }}
+              </el-tag>
+            </div>
+            <div class="mt-3 space-y-1 text-sm text-slate-700">
+              <div><strong>ID:</strong> <span class="font-mono">{{ compareResult.run_b.id }}</span></div>
+              <div><strong>Executor:</strong> {{ compareResult.run_b.executor }}</div>
+              <div><strong>Branch:</strong> {{ compareResult.run_b.branch_name || "—" }}</div>
+              <div><strong>Elapsed:</strong> {{ formatElapsed(compareResult.run_b.elapsed_seconds) }}</div>
+              <div><strong>Recoveries:</strong> {{ compareResult.run_b.recovery_count }}</div>
+              <div><strong>Approval:</strong> {{ compareResult.run_b.approval_status || "—" }}</div>
+              <div>
+                <strong>PR:</strong>
+                <a
+                  v-if="compareResult.run_b.pull_request_url"
+                  :href="compareResult.run_b.pull_request_url"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="underline"
+                >
+                  {{ compareResult.run_b.pull_request_url }}
+                </a>
+                <span v-else>—</span>
+              </div>
+            </div>
+            <div class="mt-3 text-xs uppercase tracking-wide text-slate-400">Files Changed</div>
+            <div class="mt-1 text-sm text-slate-600">
+              {{ compareResult.run_b.files_changed.length ? compareResult.run_b.files_changed.join(", ") : "No diff files recorded." }}
+            </div>
+            <div class="mt-3 text-xs uppercase tracking-wide text-slate-400">Artifacts</div>
+            <ul class="mt-1 space-y-1 text-sm text-slate-600">
+              <li v-for="artifact in compareResult.run_b.artifacts" :key="artifact.id">
+                {{ artifact.type }} · {{ shortenUri(artifact.uri) }}
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div v-if="compareResult" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Comparison Summary</div>
+          <div class="mt-2 space-y-1">
+            <div><strong>Faster run:</strong> {{ comparisonSummaryLabel(compareResult.summary.faster_run_id) }}</div>
+            <div><strong>More recoveries:</strong> {{ comparisonSummaryLabel(compareResult.summary.more_recoveries_run_id) }}</div>
+            <div><strong>PR-ready run:</strong> {{ comparisonSummaryLabel(compareResult.summary.pull_request_run_id) }}</div>
+            <div><strong>Artifact types only in Run A:</strong> {{ compareResult.summary.artifact_types_only_in_a.join(", ") || "—" }}</div>
+            <div><strong>Artifact types only in Run B:</strong> {{ compareResult.summary.artifact_types_only_in_b.join(", ") || "—" }}</div>
+            <div><strong>Files only in Run A:</strong> {{ compareResult.summary.files_only_in_a.join(", ") || "—" }}</div>
+            <div><strong>Files only in Run B:</strong> {{ compareResult.summary.files_only_in_b.join(", ") || "—" }}</div>
+          </div>
+        </div>
+
+        <div v-if="compareError" class="text-sm text-rose-600">{{ compareError }}</div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <el-button :disabled="compareLoading" @click="compareDialogOpen = false">Close</el-button>
+          <el-button
+            type="primary"
+            :loading="compareLoading"
+            :disabled="!compareEnabled || !compareRunAId || !compareRunBId || compareRunAId === compareRunBId"
+            @click="submitRunComparison"
+          >
+            Compare
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="createPrDialogOpen" title="Create Pull Request" width="620px">
       <div class="space-y-4">
         <div class="text-sm text-slate-600">
@@ -389,6 +531,7 @@ import AgentPanel from "../components/AgentPanel.vue";
 import ExecutionTimeline from "../components/ExecutionTimeline.vue";
 import StageBadge from "../components/StageBadge.vue";
 import {
+  compareRuns,
   createRunPullRequest,
   explainArtifact,
   fetchHealth,
@@ -445,11 +588,18 @@ const forkExecutor = ref("dummy");
 const forkBranchName = ref("");
 const forkNotes = ref("");
 const forkStartNow = ref(true);
+const compareDialogOpen = ref(false);
+const compareLoading = ref(false);
+const compareError = ref("");
+const compareResult = ref<any | null>(null);
+const compareRunAId = ref("");
+const compareRunBId = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
 const latestRun = computed(() => runs.value[0] || null);
 const hasRun = computed(() => Boolean(latestRun.value?.id));
 const forkEnabled = computed(() => Boolean(latestRun.value?.id));
+const compareEnabled = computed(() => runs.value.length >= 2);
 const currentStage = computed(() => project.value?.status || "UNKNOWN");
 const lifecycleWarnings = computed<string[]>(() => lifecycleScore.value?.warnings || []);
 const cancelEnabled = computed(() => ["QUEUED", "RUNNING"].includes(latestRun.value?.status || ""));
@@ -458,6 +608,12 @@ const forkExecutorOptions = computed(() => {
   if (latestRun.value?.executor) options.add(String(latestRun.value.executor));
   return Array.from(options);
 });
+const compareRunOptions = computed(() =>
+  runs.value.map((run) => ({
+    id: run.id,
+    label: runOptionLabel(run),
+  }))
+);
 const coveragePercent = computed(() => {
   const ratio = lifecycleScore.value?.coverage?.coverage_ratio;
   return typeof ratio === "number" ? `${Math.round(ratio * 100)}%` : "—";
@@ -603,6 +759,12 @@ function resetState() {
   forkBranchName.value = "";
   forkNotes.value = "";
   forkStartNow.value = true;
+  compareDialogOpen.value = false;
+  compareLoading.value = false;
+  compareError.value = "";
+  compareResult.value = null;
+  compareRunAId.value = "";
+  compareRunBId.value = "";
 }
 
 function primeContext() {
@@ -770,6 +932,46 @@ async function submitForkRun() {
   }
 }
 
+function comparisonDefaults() {
+  const newest = runs.value[0];
+  if (!newest) return { runA: "", runB: "" };
+  const forkSource = newest.summary?.forked_from_run_id;
+  if (forkSource && runs.value.some((run) => run.id === forkSource)) {
+    return { runA: forkSource, runB: newest.id };
+  }
+  const forkedFromNewest = runs.value.find((run) => run.summary?.forked_from_run_id === newest.id);
+  if (forkedFromNewest) {
+    return { runA: newest.id, runB: forkedFromNewest.id };
+  }
+  return { runA: newest.id, runB: runs.value[1]?.id || "" };
+}
+
+function openCompareDialog() {
+  if (!compareEnabled.value) return;
+  const defaults = comparisonDefaults();
+  compareDialogOpen.value = true;
+  compareError.value = "";
+  compareResult.value = null;
+  compareRunAId.value = defaults.runA;
+  compareRunBId.value = defaults.runB;
+  if (compareRunAId.value && compareRunBId.value && compareRunAId.value !== compareRunBId.value) {
+    void submitRunComparison();
+  }
+}
+
+async function submitRunComparison() {
+  if (!compareRunAId.value || !compareRunBId.value) return;
+  compareLoading.value = true;
+  compareError.value = "";
+  try {
+    compareResult.value = await compareRuns(compareRunAId.value, compareRunBId.value);
+  } catch (err: any) {
+    compareError.value = err?.message || "Failed to compare runs.";
+  } finally {
+    compareLoading.value = false;
+  }
+}
+
 function goToOverview() {
   router.push(`/projects/${projectId.value}`);
 }
@@ -888,6 +1090,25 @@ function humanizeToken(value: string) {
     .replace(/[_-]+/g, " ")
     .toLowerCase()
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function runOptionLabel(run: any) {
+  return `${String(run.id).slice(0, 8)} · ${run.status} · ${run.executor}`;
+}
+
+function comparisonSummaryLabel(runId?: string | null) {
+  if (!runId) return "—";
+  if (runId === compareResult.value?.run_a?.id) return "Run A";
+  if (runId === compareResult.value?.run_b?.id) return "Run B";
+  return runId;
+}
+
+function formatElapsed(seconds?: number | null) {
+  if (typeof seconds !== "number") return "—";
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds % 60);
+  return `${minutes}m ${remainder}s`;
 }
 
 function shortenUri(uri?: string | null) {

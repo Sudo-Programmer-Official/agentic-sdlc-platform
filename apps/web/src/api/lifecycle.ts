@@ -204,6 +204,13 @@ export async function createRunPullRequest(
   return parseResponse(resp);
 }
 
+export async function compareRuns(runA: string, runB: string) {
+  const resp = await fetch(
+    `${API_BASE}/runs/compare?run_a=${encodeURIComponent(runA)}&run_b=${encodeURIComponent(runB)}`
+  );
+  return parseResponse(resp);
+}
+
 export async function fetchHealth(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/health`);
   return parseResponse(resp);

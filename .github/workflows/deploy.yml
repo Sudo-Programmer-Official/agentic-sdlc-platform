@@ -54,6 +54,7 @@ jobs:
 
       - name: Register Web Task Definition Revision
         id: web_taskdef
+        continue-on-error: true
         env:
           IMAGE: ${{ env.ECR_ACCOUNT }}/${{ env.ECR_WEB_REPO }}:${{ github.sha }}
         run: |
@@ -102,12 +103,22 @@ jobs:
             --output text)
           echo "task_definition_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
-      - name: Update ECS Web Service
+      - name: Update ECS Web Service With New Task Revision
+        if: ${{ steps.web_taskdef.outputs.task_definition_arn != '' }}
         run: |
           aws ecs update-service \
             --cluster ${ECS_CLUSTER} \
             --service ${ECS_WEB_SERVICE} \
             --task-definition ${{ steps.web_taskdef.outputs.task_definition_arn }} \
+            --force-new-deployment
+
+      - name: Update ECS Web Service With Existing Task Revision
+        if: ${{ steps.web_taskdef.outputs.task_definition_arn == '' }}
+        run: |
+          echo "Falling back to force-new-deployment because task-definition registration was unavailable."
+          aws ecs update-service \
+            --cluster ${ECS_CLUSTER} \
+            --service ${ECS_WEB_SERVICE} \
             --force-new-deployment
 
   deploy-api:

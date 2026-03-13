@@ -41,7 +41,7 @@ from app.schemas.persistence import (
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
-from app.services.state_guard import update_run_status, update_work_item_status
+from app.services.state_guard import update_run_status as guarded_update_run_status, update_work_item_status
 from app.runtime.orchestrator import RunOrchestrator
 from app.db.session import SessionLocal
 from app.api.v1.schemas import (
@@ -319,7 +319,7 @@ class ClaimRequest(BaseModel):
 
 @router.patch("/runs/{run_id}/status", response_model=RunOut)
 @public_router.patch("/runs/{run_id}/status", response_model=RunOut)
-async def update_run_status(
+async def patch_run_status(
     run_id: uuid.UUID,
     payload: RunStatusUpdate,
     ctx=Depends(get_tenant_context),
@@ -340,7 +340,7 @@ async def update_run_status(
     if not run:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run already finished or locked.")
     prev = run.status
-    ok = await update_run_status(session, run_id, ["QUEUED", "RUNNING"], "CANCELED")
+    ok = await guarded_update_run_status(session, run_id, ["QUEUED", "RUNNING"], "CANCELED")
     if not ok:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run already finished or locked.")
     await log_activity(

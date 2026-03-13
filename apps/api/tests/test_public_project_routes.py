@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Project
+from app.db.models import Project, Run
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -67,3 +67,26 @@ async def test_public_project_routes_resolve_to_db_backed_handlers(db_session):
 
     assert summary_resp.status_code == 200
     assert summary_resp.json()["name"] == "Router order"
+
+
+@pytest.mark.anyio
+async def test_public_run_status_patch_cancels_queued_run(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Cancelable run", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch(
+            f"/api/v1/runs/{run.id}/status",
+            json={"status": "CANCELED"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "CANCELED"

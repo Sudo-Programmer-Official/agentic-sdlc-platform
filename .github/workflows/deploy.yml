@@ -17,6 +17,7 @@ env:
   ECR_API_REPO: agentic-sdlc-api
   ECS_CLUSTER: agentic-sdlc-cluster
   ECS_WEB_SERVICE: agentic-web-service
+  ECS_WEB_TASK_FAMILY: agentic-web-task
   ECS_API_SERVICE: agentic-api-service
   VITE_API_BASE: https://api.prompt2pr.com/api/v1
 
@@ -43,6 +44,7 @@ jobs:
           IMAGE=${ECR_ACCOUNT}/${ECR_WEB_REPO}
           TAG=${{ github.sha }}
           docker build \
+            --platform linux/amd64 \
             --build-arg VITE_API_BASE="${VITE_API_BASE}" \
             -t "$IMAGE:$TAG" \
             -t "$IMAGE:latest" \
@@ -50,11 +52,62 @@ jobs:
           docker push "$IMAGE:$TAG"
           docker push "$IMAGE:latest"
 
-      - name: Update ECS Service
+      - name: Register Web Task Definition Revision
+        id: web_taskdef
+        env:
+          IMAGE: ${{ env.ECR_ACCOUNT }}/${{ env.ECR_WEB_REPO }}:${{ github.sha }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${ECS_WEB_TASK_FAMILY} \
+            --query taskDefinition > web-taskdef.json
+
+          python3 <<'PY'
+          import json
+          import os
+
+          with open("web-taskdef.json", "r", encoding="utf-8") as fh:
+              taskdef = json.load(fh)
+
+          for container in taskdef["containerDefinitions"]:
+              if container.get("name") == "web":
+                  container["image"] = os.environ["IMAGE"]
+
+          allowed = {
+              "family",
+              "taskRoleArn",
+              "executionRoleArn",
+              "networkMode",
+              "containerDefinitions",
+              "volumes",
+              "placementConstraints",
+              "requiresCompatibilities",
+              "cpu",
+              "memory",
+              "runtimePlatform",
+              "proxyConfiguration",
+              "inferenceAccelerators",
+              "ephemeralStorage",
+              "pidMode",
+              "ipcMode",
+          }
+          payload = {key: value for key, value in taskdef.items() if key in allowed and value is not None}
+
+          with open("web-taskdef-register.json", "w", encoding="utf-8") as fh:
+              json.dump(payload, fh)
+          PY
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://web-taskdef-register.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task_definition_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Update ECS Web Service
         run: |
           aws ecs update-service \
             --cluster ${ECS_CLUSTER} \
             --service ${ECS_WEB_SERVICE} \
+            --task-definition ${{ steps.web_taskdef.outputs.task_definition_arn }} \
             --force-new-deployment
 
   deploy-api:

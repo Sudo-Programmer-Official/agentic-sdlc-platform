@@ -146,6 +146,17 @@ const hint = computed(() => props.hint);
 
 <style scoped>
 .operator-console {
+  --operator-shell-bg:
+    radial-gradient(circle at top left, rgba(91, 156, 255, 0.12), transparent 26%),
+    linear-gradient(180deg, var(--surface-1), var(--surface-2));
+  --operator-panel-bg:
+    radial-gradient(circle at top left, rgba(91, 156, 255, 0.12), transparent 32%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-1) 88%, transparent), color-mix(in srgb, var(--surface-2) 96%, transparent));
+  --operator-surface: color-mix(in srgb, var(--surface-1) 78%, transparent);
+  --operator-surface-strong: color-mix(in srgb, var(--surface-1) 92%, transparent);
+  --operator-accent-surface: color-mix(in srgb, var(--accent-soft) 100%, var(--surface-1) 36%);
+  --operator-input-bg: color-mix(in srgb, var(--surface-1) 88%, transparent);
+  --operator-composer-bg: color-mix(in srgb, var(--surface-2) 66%, transparent);
   height: 100%;
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -153,26 +164,16 @@ const hint = computed(() => props.hint);
 }
 
 .operator-console.is-drawer {
-  background:
-    radial-gradient(circle at top left, rgba(91, 156, 255, 0.12), transparent 26%),
-    linear-gradient(180deg, rgba(13, 17, 26, 0.98), rgba(17, 22, 33, 0.98));
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--operator-shell-bg);
+  border-left: 1px solid var(--border-soft);
 }
 
 .operator-console.is-panel {
   border: 1px solid var(--border-soft);
   border-radius: 24px;
-  background:
-    radial-gradient(circle at top left, rgba(91, 156, 255, 0.12), transparent 32%),
-    linear-gradient(180deg, rgba(19, 24, 35, 0.92), rgba(14, 18, 27, 0.96));
+  background: var(--operator-panel-bg);
   box-shadow: var(--shadow-elevated);
   min-height: 42rem;
-}
-
-[data-theme="light"] .operator-console.is-panel {
-  background:
-    radial-gradient(circle at top left, rgba(91, 156, 255, 0.12), transparent 32%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(245, 248, 252, 0.98));
 }
 
 .operator-console__header {
@@ -229,7 +230,7 @@ const hint = computed(() => props.hint);
   padding: 0.95rem 1rem;
   border-radius: 18px;
   border: 1px solid var(--border-soft);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--operator-surface);
 }
 
 .operator-console__context-title {
@@ -259,7 +260,7 @@ const hint = computed(() => props.hint);
 .operator-console__quick-chip {
   border-radius: 999px;
   border: 1px solid var(--border-soft);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--operator-surface);
   color: var(--text-strong);
   padding: 0.45rem 0.75rem;
   font-size: 0.78rem;
@@ -283,11 +284,7 @@ const hint = computed(() => props.hint);
 .operator-console__composer {
   padding: 1rem 1.2rem 1.2rem;
   border-top: 1px solid var(--border-soft);
-  background: rgba(8, 10, 16, 0.38);
-}
-
-[data-theme="light"] .operator-console__composer {
-  background: rgba(242, 246, 251, 0.72);
+  background: var(--operator-composer-bg);
 }
 
 .operator-console__composer-row {
@@ -302,7 +299,7 @@ const hint = computed(() => props.hint);
   resize: none;
   border-radius: 16px;
   border: 1px solid var(--border-soft);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--operator-input-bg);
   color: var(--text-strong);
   padding: 0.9rem 1rem;
   font: inherit;

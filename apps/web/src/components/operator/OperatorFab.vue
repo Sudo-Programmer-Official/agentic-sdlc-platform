@@ -33,15 +33,15 @@ defineEmits<{
   border: 1px solid rgba(91, 156, 255, 0.22);
   background:
     radial-gradient(circle at top left, rgba(91, 156, 255, 0.24), transparent 55%),
-    linear-gradient(180deg, rgba(18, 26, 39, 0.96), rgba(13, 17, 26, 0.96));
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-1) 96%, transparent), color-mix(in srgb, var(--surface-2) 96%, transparent));
   color: var(--text-strong);
-  box-shadow: 0 24px 44px rgba(6, 10, 19, 0.36);
+  box-shadow: var(--shadow-elevated);
   transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
 }
 
 .operator-fab:hover {
   transform: translateY(-2px) scale(1.01);
-  box-shadow: 0 28px 50px rgba(6, 10, 19, 0.42);
+  box-shadow: var(--shadow-elevated);
   border-color: rgba(91, 156, 255, 0.4);
 }
 

@@ -65,11 +65,11 @@ defineEmits<{
   padding: 0.95rem 1rem;
   border-radius: 18px;
   border: 1px solid var(--border-soft);
-  background: rgba(255, 255, 255, 0.03);
+  background: color-mix(in srgb, var(--surface-1) 78%, transparent);
 }
 
 .operator-message.is-user {
-  background: rgba(91, 156, 255, 0.08);
+  background: color-mix(in srgb, var(--accent-soft) 100%, var(--surface-1) 30%);
   border-color: rgba(91, 156, 255, 0.18);
 }
 
@@ -85,7 +85,7 @@ defineEmits<{
 .operator-message__status {
   margin-left: 0.25rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
   padding: 0.12rem 0.4rem;
   font-size: 0.68rem;
   text-transform: uppercase;
@@ -134,7 +134,7 @@ defineEmits<{
 .operator-message__chip {
   border-radius: 999px;
   border: 1px solid var(--border-soft);
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--surface-1) 88%, transparent);
   color: var(--text-strong);
   padding: 0.45rem 0.75rem;
   font-size: 0.78rem;

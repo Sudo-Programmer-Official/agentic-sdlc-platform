@@ -53,8 +53,9 @@ class RepoTools:
         Apply a unified diff (git format) to the repository root.
         Raises ValueError on failure.
         """
+        normalized_diff = unified_diff if unified_diff.endswith("\n") else f"{unified_diff}\n"
         # Basic safety: block obvious path traversal in diff headers
-        for line in unified_diff.splitlines():
+        for line in normalized_diff.splitlines():
             if line.startswith(("+++", "---")):
                 # strip leading markers like "+++ b/path"
                 header_path = line[4:].strip()
@@ -64,7 +65,7 @@ class RepoTools:
             # dry-run check first
             check_res = subprocess.run(
                 ["git", "-C", str(self.root), "apply", "--check", "-"],
-                input=unified_diff,
+                input=normalized_diff,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -75,7 +76,7 @@ class RepoTools:
 
             res = subprocess.run(
                 ["git", "-C", str(self.root), "apply", "--whitespace=nowarn", "--reject", "-"],
-                input=unified_diff,
+                input=normalized_diff,
                 text=True,
                 capture_output=True,
                 check=False,

@@ -107,6 +107,48 @@ class RunCreate(BaseModel):
     executor: str = "dummy"
 
 
+class ProjectRepositoryConnect(BaseModel):
+    provider: str = "github"
+    repo_url: str
+    repo_full_name: Optional[str] = None
+    default_branch: str = "main"
+    installation_id: Optional[int] = None
+    created_by: Optional[str] = None
+
+
+class ProjectRepositoryOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    provider: str
+    repo_url: str
+    repo_full_name: Optional[str]
+    default_branch: str
+    installation_id: Optional[int]
+    created_by: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PullRequestCreate(BaseModel):
+    artifact_id: Optional[uuid.UUID] = None
+    title: Optional[str] = None
+    body: Optional[str] = None
+    branch_name: Optional[str] = None
+
+
+class PullRequestOut(BaseModel):
+    run_id: uuid.UUID
+    artifact_id: uuid.UUID
+    pull_request_url: Optional[str]
+    pull_request_number: Optional[int]
+    branch_name: str
+    base_branch: str
+    commit_sha: str
+
+
 class WorkItemOut(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID

@@ -20,6 +20,8 @@ from app.db.models import (
     WorkItem,
     WorkItemEdge,
     Agent,
+    Artifact,
+    ProjectRepository,
 )
 from app.db.session import get_session
 from app.schemas.persistence import (
@@ -31,6 +33,10 @@ from app.schemas.persistence import (
     TaskOut,
     RunOut,
     RunCreate,
+    ProjectRepositoryConnect,
+    ProjectRepositoryOut,
+    PullRequestCreate,
+    PullRequestOut,
     WorkItemOut,
     WorkItemEdgeOut,
     AgentCreate,
@@ -46,6 +52,8 @@ from app.runtime.orchestrator import RunOrchestrator
 from app.runtime.recovery_policy import maybe_apply_recovery
 from app.db.session import SessionLocal
 from app.services.run_replay import fork_run
+from app.services.repo_connector import connect_repo, get_project_repository
+from app.services.pr_service import create_pr_from_artifact
 from app.services.workspace_supervisor import ensure_run_workspace
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
@@ -101,6 +109,10 @@ def _run_out(run: Run) -> RunOut:
 
 def _wi_out(wi: WorkItem) -> WorkItemOut:
     return WorkItemOut.model_validate(wi)
+
+
+def _project_repo_out(repo: ProjectRepository) -> ProjectRepositoryOut:
+    return ProjectRepositoryOut.model_validate(repo)
 
 
 def _project_scoped(session: AsyncSession, ctx, project_id: uuid.UUID):
@@ -240,6 +252,7 @@ async def create_run(
     project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    project_repo = await get_project_repository(session, project_id=project_id, tenant_id=tenant_id)
     existing_running = await session.scalar(
         select(func.count()).select_from(
             select(Run.id)
@@ -257,7 +270,13 @@ async def create_run(
     run.executor = executor_name
     session.add(run)
     await session.flush()
-    await ensure_run_workspace(session, run)
+    await ensure_run_workspace(
+        session,
+        run,
+        require_repo=executor_name in {"codex", "test"},
+        repo_url=project_repo.repo_url if project_repo else None,
+        repo_branch=project_repo.default_branch if project_repo else None,
+    )
     await log_activity(
         session,
         project_id=project_id,
@@ -305,6 +324,60 @@ async def get_run(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: A
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return _run_out(run)
+
+
+@router.post("/projects/{project_id}/connect-repo", response_model=ProjectRepositoryOut)
+@public_router.post("/projects/{project_id}/connect-repo", response_model=ProjectRepositoryOut)
+async def connect_project_repo(
+    project_id: uuid.UUID,
+    payload: ProjectRepositoryConnect,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectRepositoryOut:
+    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        repo = await connect_repo(
+            session,
+            project=project,
+            provider=payload.provider,
+            repo_url=payload.repo_url,
+            repo_full_name=payload.repo_full_name,
+            default_branch=payload.default_branch,
+            installation_id=payload.installation_id,
+            created_by=payload.created_by or ctx.user_id,
+        )
+        await log_activity(
+            session,
+            project_id=project.id,
+            entity_type="project_repository",
+            entity_id=repo.id,
+            action_type="repo.connected",
+            metadata={
+                "provider": repo.provider,
+                "repo_url": repo.repo_url,
+                "default_branch": repo.default_branch,
+            },
+        )
+        await session.commit()
+        await session.refresh(repo)
+        return _project_repo_out(repo)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/repo", response_model=ProjectRepositoryOut)
+@public_router.get("/projects/{project_id}/repo", response_model=ProjectRepositoryOut)
+async def get_project_repo(
+    project_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectRepositoryOut:
+    repo = await get_project_repository(session, project_id=project_id, tenant_id=ctx.tenant_id)
+    if repo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project repository not connected")
+    return _project_repo_out(repo)
 
 
 class RunStatusUpdate(BaseModel):
@@ -407,6 +480,44 @@ async def fork_existing_run(
         start_now=payload.start_now,
     )
     return _run_out(forked)
+
+
+@router.post("/runs/{run_id}/create-pr", response_model=PullRequestOut)
+@public_router.post("/runs/{run_id}/create-pr", response_model=PullRequestOut)
+async def create_run_pull_request(
+    run_id: uuid.UUID,
+    payload: PullRequestCreate,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> PullRequestOut:
+    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    artifact = None
+    if payload.artifact_id:
+        artifact = await session.scalar(
+            select(Artifact).where(
+                Artifact.id == payload.artifact_id,
+                Artifact.project_id == run.project_id,
+                Artifact.tenant_id == ctx.tenant_id,
+            )
+        )
+        if artifact is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+    try:
+        result = await create_pr_from_artifact(
+            session,
+            run=run,
+            artifact=artifact,
+            title=payload.title,
+            body=payload.body,
+            branch_name=payload.branch_name,
+        )
+        return PullRequestOut.model_validate(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/events", response_model=List[RunEventOut])

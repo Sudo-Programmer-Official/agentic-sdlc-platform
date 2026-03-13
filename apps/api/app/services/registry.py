@@ -4,7 +4,7 @@ from core.sdlc import ApprovalGate, InMemoryStateStore
 
 from agent.runtime import BedrockAgentAdapter, PlannerAgent, RequirementsAgent
 from agent.runtime.requirements_intelligence import extract_graph_from_prd
-from app.services.vcs import InMemoryGitHubIntegrationStore, build_github_adapter
+from app.services.vcs import InMemoryGitHubIntegrationStore, build_github_adapter, provider_registry
 from app.services.documentation_guard import DocumentationGuardService
 
 from .approval_service import ApprovalService
@@ -98,6 +98,13 @@ requirements_service = _requirements_service
 # GitHub integration
 _github_store = InMemoryGitHubIntegrationStore()
 github_adapter = build_github_adapter(_github_store)
+provider_registry.register(
+    "github",
+    adapter=github_adapter,
+    installation_id_getter=lambda: (
+        integration.installation_id if (integration := _github_store.get()) else None
+    ),
+)
 documentation_guard = DocumentationGuardService(
     ledger=_action_ledger,
     docs_root=_artifact_service._docs_root if hasattr(_artifact_service, "_docs_root") else None,

@@ -12,6 +12,7 @@ from .registry import (
     github_store,
     documentation_guard,
 )
+from .vcs import get_default_installation_id, get_vcs_adapter, normalize_provider_name, provider_registry
 
 __all__ = [
     "approval_service",
@@ -25,4 +26,8 @@ __all__ = [
     "github_adapter",
     "github_store",
     "documentation_guard",
+    "provider_registry",
+    "get_vcs_adapter",
+    "get_default_installation_id",
+    "normalize_provider_name",
 ]

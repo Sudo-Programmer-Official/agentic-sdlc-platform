@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     test_output_max_bytes: int = 200_000
     workspace_base_dir: str = "/tmp/agentic-sdlc-workspaces"
     workspace_repo_source: str | None = None
+    git_author_name: str = "Agentic SDLC"
+    git_author_email: str = "agentic-sdlc@local"
     tenancy_enforcement: bool = False
     run_migrations_on_startup: bool = False
     alembic_config_path: str | None = None

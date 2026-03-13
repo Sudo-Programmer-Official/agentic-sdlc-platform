@@ -227,7 +227,17 @@
           </el-table-column>
           <el-table-column label="Actions" width="100">
             <template #default="{ row }">
-              <el-button link type="primary" @click="openArtifactExplain(row)">Explain</el-button>
+              <div class="flex flex-col items-start gap-1">
+                <el-button link type="primary" @click="openArtifactExplain(row)">Explain</el-button>
+                <el-button
+                  v-if="row.type === 'git_diff'"
+                  link
+                  type="success"
+                  @click="openCreatePrDialog(row)"
+                >
+                  Create PR
+                </el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -305,6 +315,65 @@
         </div>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="createPrDialogOpen" title="Create Pull Request" width="620px">
+      <div class="space-y-4">
+        <div class="text-sm text-slate-600">
+          Create a GitHub pull request from the selected patch artifact and the latest run workspace.
+        </div>
+        <div class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+          Patch artifact
+          <span class="ml-2 font-mono text-slate-800">{{ selectedPrArtifact?.uri || "—" }}</span>
+        </div>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">PR Title</span>
+          <input
+            v-model="createPrTitle"
+            type="text"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Automated fix from Agentic SDLC"
+          />
+        </label>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">Branch Name</span>
+          <input
+            v-model="createPrBranch"
+            type="text"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="run/fix-branch"
+          />
+        </label>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">PR Body</span>
+          <textarea
+            v-model="createPrBody"
+            rows="4"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Context for reviewers"
+          />
+        </label>
+        <div v-if="createPrResult?.pull_request_url" class="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+          Pull request created:
+          <a
+            :href="createPrResult.pull_request_url"
+            target="_blank"
+            rel="noreferrer"
+            class="ml-1 underline"
+          >
+            {{ createPrResult.pull_request_url }}
+          </a>
+        </div>
+        <div v-if="createPrError" class="text-sm text-rose-600">{{ createPrError }}</div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <el-button :disabled="createPrLoading" @click="createPrDialogOpen = false">Cancel</el-button>
+          <el-button type="primary" :loading="createPrLoading" :disabled="!selectedPrArtifact" @click="submitCreatePr">
+            Create PR
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 
   <div v-else class="rounded-xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
@@ -320,6 +389,7 @@ import AgentPanel from "../components/AgentPanel.vue";
 import ExecutionTimeline from "../components/ExecutionTimeline.vue";
 import StageBadge from "../components/StageBadge.vue";
 import {
+  createRunPullRequest,
   explainArtifact,
   fetchHealth,
   fetchLifecycleScore,
@@ -360,6 +430,14 @@ const artifactDialogOpen = ref(false);
 const artifactExplainLoading = ref(false);
 const artifactExplainError = ref("");
 const artifactExplainResult = ref<any | null>(null);
+const createPrDialogOpen = ref(false);
+const createPrLoading = ref(false);
+const createPrError = ref("");
+const createPrResult = ref<any | null>(null);
+const selectedPrArtifact = ref<any | null>(null);
+const createPrTitle = ref("");
+const createPrBody = ref("");
+const createPrBranch = ref("");
 const forkDialogOpen = ref(false);
 const forkLoading = ref(false);
 const forkError = ref("");
@@ -510,6 +588,14 @@ function resetState() {
   artifactExplainLoading.value = false;
   artifactExplainError.value = "";
   artifactExplainResult.value = null;
+  createPrDialogOpen.value = false;
+  createPrLoading.value = false;
+  createPrError.value = "";
+  createPrResult.value = null;
+  selectedPrArtifact.value = null;
+  createPrTitle.value = "";
+  createPrBody.value = "";
+  createPrBranch.value = "";
   forkDialogOpen.value = false;
   forkLoading.value = false;
   forkError.value = "";
@@ -699,6 +785,35 @@ async function openArtifactExplain(artifact: any) {
     artifactExplainError.value = err?.message || "Failed to explain artifact.";
   } finally {
     artifactExplainLoading.value = false;
+  }
+}
+
+function openCreatePrDialog(artifact: any) {
+  selectedPrArtifact.value = artifact;
+  createPrDialogOpen.value = true;
+  createPrError.value = "";
+  createPrResult.value = null;
+  createPrTitle.value = `Agentic SDLC run ${latestRun.value?.id || ""}`;
+  createPrBody.value = `Automated patch generated from run ${latestRun.value?.id || "unknown"}.`;
+  createPrBranch.value = latestRun.value?.branch_name || "";
+}
+
+async function submitCreatePr() {
+  if (!latestRun.value?.id || !selectedPrArtifact.value?.id) return;
+  createPrLoading.value = true;
+  createPrError.value = "";
+  try {
+    createPrResult.value = await createRunPullRequest(latestRun.value.id, {
+      artifact_id: selectedPrArtifact.value.id,
+      title: createPrTitle.value.trim() || undefined,
+      body: createPrBody.value.trim() || undefined,
+      branch_name: createPrBranch.value.trim() || undefined,
+    });
+    await loadAll();
+  } catch (err: any) {
+    createPrError.value = err?.message || "Failed to create pull request.";
+  } finally {
+    createPrLoading.value = false;
   }
 }
 

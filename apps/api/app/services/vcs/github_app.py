@@ -94,6 +94,39 @@ class GitHubAppAdapter(VCSAdapter):
             data = json.loads(resp.read().decode())
             return data.get("id") or data.get("url")
 
+    def create_pull_request(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+        installation_id: int | None = None,
+    ) -> dict:
+        token = self._token_for_installation(installation_id)
+        url = f"https://api.github.com/repos/{repo}/pulls"
+        payload = json.dumps(
+            {
+                "title": title,
+                "body": body,
+                "head": head,
+                "base": base,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            url,
+            method="POST",
+            data=payload,
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "User-Agent": "agentic-sdlc",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+
     # --- Helpers ----------------------------------------------------------------------
     def _token_for_installation(self, installation_id: int | None) -> str:
         integration = self._store.get()

@@ -53,6 +53,15 @@ export type CreateDocumentPayload = {
   created_by?: string | null;
 };
 
+export type ConnectRepoPayload = {
+  provider?: string;
+  repo_url: string;
+  repo_full_name?: string | null;
+  default_branch?: string;
+  installation_id?: number | null;
+  created_by?: string | null;
+};
+
 export async function previewImpact(projectId: string, documentId: string, proposedBody: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/documents/${documentId}/impact-preview`, {
     method: "POST",
@@ -123,6 +132,20 @@ export async function createDocument(projectId: string, payload: CreateDocumentP
   return parseResponse(resp);
 }
 
+export async function fetchProjectRepo(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/repo`);
+  return parseResponse(resp);
+}
+
+export async function connectProjectRepo(projectId: string, payload: ConnectRepoPayload) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/connect-repo`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(resp);
+}
+
 // Runs
 export async function listRuns(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`);
@@ -157,6 +180,23 @@ export async function forkRun(
   } = {}
 ) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/fork`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(resp);
+}
+
+export async function createRunPullRequest(
+  runId: string,
+  payload: {
+    artifact_id?: string;
+    title?: string;
+    body?: string;
+    branch_name?: string;
+  } = {}
+) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/create-pr`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

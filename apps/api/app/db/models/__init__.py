@@ -11,6 +11,7 @@ from app.db.models.work_item import WorkItem
 from app.db.models.work_item_edge import WorkItemEdge
 from app.db.models.agent import Agent
 from app.db.models.memory import ProjectMemory, RunMemory, WorkItemArtifact
+from app.db.models.project_repository import ProjectRepository
 
 __all__ = [
     "Project",
@@ -28,4 +29,5 @@ __all__ = [
     "ProjectMemory",
     "RunMemory",
     "WorkItemArtifact",
+    "ProjectRepository",
 ]

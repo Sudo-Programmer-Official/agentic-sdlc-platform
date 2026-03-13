@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import Run
 from app.runtime.context import RunContext
+from app.services.repo_connector import prepare_workspace_repo
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,13 @@ def _workspace_uri(kind: str, filename: str) -> str:
     return f"workspace://{kind}/{filename}"
 
 
-def _manifest(paths: WorkspacePaths, run: Run, source: Path | None) -> dict:
+def _manifest(
+    paths: WorkspacePaths,
+    run: Run,
+    source: Path | None,
+    repo_url: str | None,
+    repo_branch: str | None,
+) -> dict:
     return {
         "run_id": str(run.id),
         "project_id": str(run.project_id),
@@ -63,6 +70,8 @@ def _manifest(paths: WorkspacePaths, run: Run, source: Path | None) -> dict:
         "workspace_status": run.workspace_status,
         "repo_seeded": paths.repo_seeded,
         "repo_source": str(source) if source else None,
+        "repo_url": repo_url,
+        "repo_branch": repo_branch,
         "executor": run.executor,
     }
 
@@ -94,6 +103,8 @@ async def ensure_run_workspace(
     *,
     require_repo: bool = False,
     repo_source_path: Path | None = None,
+    repo_url: str | None = None,
+    repo_branch: str | None = None,
 ) -> WorkspacePaths:
     source = repo_source_path.resolve() if repo_source_path and repo_source_path.exists() else _resolve_repo_source()
     root = _workspace_root(run)
@@ -115,6 +126,14 @@ async def ensure_run_workspace(
         repo_seeded = paths.repo.exists() and any(paths.repo.iterdir())
         if require_repo and not repo_seeded and source is not None:
             repo_seeded = _seed_repo(source, paths.repo)
+        if require_repo and not repo_seeded and repo_url:
+            prepare_workspace_repo(
+                repo_dir=paths.repo,
+                repo_url=repo_url,
+                default_branch=repo_branch or "main",
+                work_branch=paths.branch_name,
+            )
+            repo_seeded = True
 
         run.workspace_root = str(paths.root)
         run.repo_path = str(paths.repo)
@@ -136,7 +155,7 @@ async def ensure_run_workspace(
         )
         manifest_path = paths.context / "workspace.json"
         manifest_path.write_text(
-            json.dumps(_manifest(materialized_paths, run, source), indent=2) + "\n",
+            json.dumps(_manifest(materialized_paths, run, source, repo_url, repo_branch), indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -167,8 +186,17 @@ async def build_run_context(
     *,
     require_repo: bool = False,
     repo_source_path: Path | None = None,
+    repo_url: str | None = None,
+    repo_branch: str | None = None,
 ) -> RunContext:
-    paths = await ensure_run_workspace(session, run, require_repo=require_repo, repo_source_path=repo_source_path)
+    paths = await ensure_run_workspace(
+        session,
+        run,
+        require_repo=require_repo,
+        repo_source_path=repo_source_path,
+        repo_url=repo_url,
+        repo_branch=repo_branch,
+    )
     return RunContext(
         project_id=run.project_id,
         run_id=run.id,

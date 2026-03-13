@@ -11,3 +11,14 @@ class VCSAdapter(Protocol):
 
     def post_pr_comment(self, repo: str, pr_number: int, body: str, installation_id: int | None = None) -> str | None:
         ...
+
+    def create_pull_request(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+        installation_id: int | None = None,
+    ) -> dict:
+        ...

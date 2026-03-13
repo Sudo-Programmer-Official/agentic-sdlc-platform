@@ -10,9 +10,9 @@
       </el-button>
     </div>
 
-  <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-    <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div class="text-xs uppercase tracking-wide text-slate-400">Project</div>
+    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Project</div>
       <div class="mt-2 text-lg font-semibold text-slate-900">{{ projectName || "—" }}</div>
       <div class="text-xs text-slate-500 break-all">ID: {{ projectId || "—" }}</div>
       <div class="mt-1 text-xs text-slate-500">
@@ -31,6 +31,20 @@
         <div class="text-xs uppercase tracking-wide text-slate-400">Runs</div>
         <div class="mt-2 text-lg font-semibold text-slate-900">{{ runSummary }}</div>
         <div class="text-xs text-slate-500">Latest: {{ latestRunText }}</div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Repository</div>
+          <el-button size="small" plain :disabled="!projectId" @click="openConnectRepoDialog">
+            {{ projectRepo ? "Reconnect" : "Connect" }}
+          </el-button>
+        </div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">
+          {{ projectRepo?.repo_full_name || projectRepo?.repo_url || "No repository connected" }}
+        </div>
+        <div class="text-xs text-slate-500">Provider: {{ projectRepo?.provider || "—" }}</div>
+        <div class="text-xs text-slate-500">Default branch: {{ projectRepo?.default_branch || "—" }}</div>
+        <div v-if="repoError" class="mt-2 text-xs text-rose-600">{{ repoError }}</div>
       </div>
     </div>
 
@@ -163,6 +177,9 @@
         </el-button>
         <el-button type="primary" plain :disabled="!projectId" @click="openCreateDocumentDialog">
           Create Document
+        </el-button>
+        <el-button type="primary" plain :disabled="!projectId" @click="openConnectRepoDialog">
+          Connect Repo
         </el-button>
         <el-button type="success" plain :disabled="!projectId || !documents.length" @click="showRegenDialog = true">
           Regenerate Tasks
@@ -389,6 +406,22 @@
       </div>
     </el-dialog>
 
+    <el-dialog v-model="showConnectRepoDialog" title="Connect Repository" width="620px">
+      <div class="space-y-3">
+        <el-input v-model="repoForm.repo_url" placeholder="Repository URL or local path" />
+        <div class="grid gap-3 md:grid-cols-2">
+          <el-input v-model="repoForm.repo_full_name" placeholder="owner/repo (optional for GitHub API)" />
+          <el-input v-model="repoForm.default_branch" placeholder="Default branch" />
+        </div>
+        <el-input v-model="repoForm.installation_id" placeholder="GitHub installation ID (optional)" />
+        <el-button type="primary" :loading="repoLoading" @click="submitConnectRepo">
+          Save Repository
+        </el-button>
+        <div v-if="repoMessage" class="text-sm text-emerald-700">{{ repoMessage }}</div>
+        <div v-if="repoError" class="text-sm text-rose-600">{{ repoError }}</div>
+      </div>
+    </el-dialog>
+
     <el-dialog v-model="showTasksDialog" title="Tasks" width="640px">
       <div class="mb-3 flex items-center justify-between gap-3">
         <div class="text-xs text-slate-500">
@@ -490,7 +523,7 @@ import { ElMessage } from "element-plus";
 import StageBadge from "../components/StageBadge.vue";
 import { projectContext, updateProjectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
-import { previewImpact, regenerateTasks, listTasks, createTask, createDocument, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, updateProjectStage, listRuns, createRun, updateRunStatus, listWorkItems, listRunEvents } from "../api/lifecycle";
+import { previewImpact, regenerateTasks, listTasks, createTask, createDocument, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, updateProjectStage, listRuns, createRun, updateRunStatus, listWorkItems, listRunEvents, fetchProjectRepo, connectProjectRepo } from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -533,6 +566,7 @@ const showRegenDialog = ref(false);
 const showTasksDialog = ref(false);
 const showCreateTaskDialog = ref(false);
 const showExplainDialog = ref(false);
+const showConnectRepoDialog = ref(false);
 const impactDocId = ref("");
 const proposedBody = ref("");
 const impactResult = ref<any | null>(null);
@@ -571,6 +605,16 @@ const explainError = ref("");
 const explainLoading = ref(false);
 const documents = ref<any[]>([]);
 const documentsLoading = ref(false);
+const projectRepo = ref<any | null>(null);
+const repoLoading = ref(false);
+const repoError = ref("");
+const repoMessage = ref("");
+const repoForm = ref({
+  repo_url: "",
+  repo_full_name: "",
+  default_branch: "main",
+  installation_id: "",
+});
 const projectStatus = ref<string | null>(null);
 const allowedTransitions = ref<string[]>([]);
 const stageUpdating = ref(false);
@@ -719,6 +763,63 @@ async function loadTasks() {
     tasks.value = await listTasks(projectId.value);
   } catch (err: any) {
     tasksError.value = err?.message || "Failed to load tasks";
+  }
+}
+
+function openConnectRepoDialog() {
+  repoMessage.value = "";
+  repoError.value = "";
+  repoForm.value = {
+    repo_url: projectRepo.value?.repo_url || "",
+    repo_full_name: projectRepo.value?.repo_full_name || "",
+    default_branch: projectRepo.value?.default_branch || "main",
+    installation_id:
+      projectRepo.value?.installation_id !== null && projectRepo.value?.installation_id !== undefined
+        ? String(projectRepo.value.installation_id)
+        : "",
+  };
+  showConnectRepoDialog.value = true;
+}
+
+async function loadProjectRepo() {
+  repoError.value = "";
+  if (!projectId.value) return;
+  try {
+    projectRepo.value = await fetchProjectRepo(projectId.value);
+  } catch (err: any) {
+    projectRepo.value = null;
+    if (err?.message && !String(err.message).includes("Project repository not connected")) {
+      repoError.value = err.message;
+    }
+  }
+}
+
+async function submitConnectRepo() {
+  if (!projectId.value) return;
+  if (!repoForm.value.repo_url.trim()) {
+    repoError.value = "Repository URL is required.";
+    return;
+  }
+  repoLoading.value = true;
+  repoError.value = "";
+  repoMessage.value = "";
+  try {
+    projectRepo.value = await connectProjectRepo(projectId.value, {
+      provider: "github",
+      repo_url: repoForm.value.repo_url.trim(),
+      repo_full_name: repoForm.value.repo_full_name.trim() || null,
+      default_branch: repoForm.value.default_branch.trim() || "main",
+      installation_id: repoForm.value.installation_id.trim()
+        ? Number.parseInt(repoForm.value.installation_id.trim(), 10)
+        : null,
+      created_by: "ui-user",
+    });
+    showConnectRepoDialog.value = false;
+    repoMessage.value = "Repository connected.";
+  } catch (err: any) {
+    repoError.value = err?.message || "Failed to connect repository";
+  } finally {
+    repoLoading.value = false;
   }
 }
 
@@ -1004,6 +1105,7 @@ onMounted(async () => {
   await loadTasks();
   await loadProjectMeta();
   await loadRuns();
+  await loadProjectRepo();
   await loadWorkItems();
   await loadRunEvents();
 });

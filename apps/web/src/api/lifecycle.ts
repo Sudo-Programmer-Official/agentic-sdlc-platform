@@ -147,6 +147,23 @@ export async function updateRunStatus(runId: string, status: string) {
   return parseResponse(resp);
 }
 
+export async function forkRun(
+  runId: string,
+  payload: {
+    executor?: string;
+    branch_name?: string;
+    start_now?: boolean;
+    summary_overrides?: Record<string, any>;
+  } = {}
+) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/fork`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(resp);
+}
+
 export async function fetchHealth(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/health`);
   return parseResponse(resp);
@@ -175,5 +192,20 @@ export async function getWorkDag(runId: string) {
 
 export async function listRunEvents(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/events`);
+  return parseResponse(resp);
+}
+
+export async function listArtifacts(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/artifacts`);
+  return parseResponse(resp);
+}
+
+export async function explainArtifact(projectId: string, artifactId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/artifacts/${artifactId}/explain`);
+  return parseResponse(resp);
+}
+
+export async function fetchArtifactContextByUri(projectId: string, uri: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/artifacts/context?uri=${encodeURIComponent(uri)}`);
   return parseResponse(resp);
 }

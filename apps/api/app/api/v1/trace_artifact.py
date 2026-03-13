@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,9 +15,11 @@ from app.schemas.trace import TraceCreate, TraceOut
 from app.schemas.artifact import ArtifactCreate, ArtifactOut
 from app.schemas.approval import ApprovalCreate, ApprovalOut
 from app.schemas.graph import GraphResult, GraphNode, GraphEdge
+from app.schemas.graph_context import GraphContextResponse
 from app.schemas.provenance import Provenance
-from app.schemas.explain import ExplainTaskResponse
-from app.schemas.persistence import DocumentOut, TaskOut
+from app.schemas.explain import ExplainArtifactResponse, ExplainTaskResponse
+from app.schemas.persistence import DocumentOut, RunOut, TaskOut, WorkItemOut
+from app.services.graph_context import build_graph_context
 
 router = APIRouter(prefix="/store", tags=["store-graph"])
 public_router = APIRouter(tags=["graph"])
@@ -154,6 +156,7 @@ async def create_artifact(
 
 
 @router.get("/projects/{project_id}/artifacts", response_model=List[ArtifactOut])
+@public_router.get("/projects/{project_id}/artifacts", response_model=List[ArtifactOut])
 async def list_artifacts(project_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> List[ArtifactOut]:
     await _assert_project(session, project_id)
     result = await session.execute(select(Artifact).where(Artifact.project_id == project_id))
@@ -387,6 +390,69 @@ async def backtrace_analysis(
     )
 
 
+@router.get(
+    "/projects/{project_id}/graph/context/{entity_type}/{entity_id}",
+    response_model=GraphContextResponse,
+)
+@public_router.get(
+    "/projects/{project_id}/graph/context/{entity_type}/{entity_id}",
+    response_model=GraphContextResponse,
+)
+async def graph_context(
+    project_id: uuid.UUID,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    max_depth: int = 4,
+    session: AsyncSession = Depends(get_session),
+) -> GraphContextResponse:
+    await _assert_project(session, project_id)
+    try:
+        return await build_graph_context(
+            session,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            project_id=project_id,
+            max_depth=max_depth,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get(
+    "/projects/{project_id}/artifacts/context",
+    response_model=GraphContextResponse,
+)
+@public_router.get(
+    "/projects/{project_id}/artifacts/context",
+    response_model=GraphContextResponse,
+)
+async def artifact_context_by_uri(
+    project_id: uuid.UUID,
+    uri: str = Query(..., min_length=1),
+    max_depth: int = 4,
+    session: AsyncSession = Depends(get_session),
+) -> GraphContextResponse:
+    await _assert_project(session, project_id)
+    artifact = await session.scalar(
+        select(Artifact)
+        .where(
+            Artifact.project_id == project_id,
+            Artifact.uri == uri,
+            Artifact.deleted_at.is_(None),
+        )
+        .order_by(Artifact.version.desc(), Artifact.created_at.desc())
+    )
+    if not artifact:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found for uri")
+    return await build_graph_context(
+        session,
+        entity_type="artifact",
+        entity_id=artifact.id,
+        project_id=project_id,
+        max_depth=max_depth,
+    )
+
+
 # ---------------------------
 # Document history
 # ---------------------------
@@ -570,4 +636,102 @@ async def explain_task(
         confidence_aggregate=confidence_aggregate,
         provenance_summary=provenance_summary,
         regeneration_history=regeneration_history,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/artifacts/{artifact_id}/explain",
+    response_model=ExplainArtifactResponse,
+)
+@public_router.get(
+    "/projects/{project_id}/artifacts/{artifact_id}/explain",
+    response_model=ExplainArtifactResponse,
+)
+async def explain_artifact(
+    project_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    max_depth: int = 4,
+    session: AsyncSession = Depends(get_session),
+) -> ExplainArtifactResponse:
+    artifact = await session.get(Artifact, artifact_id)
+    if not artifact or artifact.project_id != project_id or artifact.deleted_at:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+
+    context = await build_graph_context(
+        session,
+        entity_type="artifact",
+        entity_id=artifact_id,
+        project_id=project_id,
+        max_depth=max_depth,
+    )
+
+    task = await session.get(Task, artifact.task_id) if artifact.task_id else None
+    run = await session.get(Run, artifact.run_id) if artifact.run_id else None
+    work_item = await session.get(WorkItem, artifact.work_item_id) if artifact.work_item_id else None
+
+    origin_doc_ids = {node.id for node in context.ancestors if node.type == "document"}
+    origin_docs: list[DocumentOut] = []
+    if origin_doc_ids:
+        docs = (
+            await session.execute(
+                select(Document).where(Document.id.in_(origin_doc_ids), Document.deleted_at.is_(None))
+            )
+        ).scalars().all()
+        origin_docs = [DocumentOut.model_validate(doc) for doc in docs]
+
+    approval_rows = (
+        await session.execute(
+            select(Approval).where(
+                Approval.project_id == project_id,
+                Approval.target_type == "artifact",
+                Approval.target_id == artifact_id,
+                Approval.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    approvals = [ApprovalOut.model_validate(approval) for approval in approval_rows]
+
+    prov_rows = (
+        await session.execute(
+            select(Trace).where(
+                Trace.project_id == project_id,
+                Trace.deleted_at.is_(None),
+                ((Trace.from_type == "artifact") & (Trace.from_id == artifact_id))
+                | ((Trace.to_type == "artifact") & (Trace.to_id == artifact_id)),
+            )
+        )
+    ).scalars().all()
+    provenance = None
+    confidence = None
+    for trace in prov_rows:
+        if any([trace.ai_model_name, trace.ai_prompt_hash, trace.ai_run_id, trace.confidence_score]):
+            provenance = Provenance(
+                ai_model_name=trace.ai_model_name,
+                ai_prompt_hash=trace.ai_prompt_hash,
+                ai_run_id=trace.ai_run_id,
+                confidence_score=trace.confidence_score,
+            )
+            confidence = trace.confidence_score
+            break
+
+    lineage_summary = {
+        "origin_document_count": len(origin_docs),
+        "has_task": task is not None,
+        "has_run": run is not None,
+        "has_work_item": work_item is not None,
+        "uri": artifact.uri,
+        "artifact_type": artifact.type,
+    }
+
+    return ExplainArtifactResponse(
+        artifact=ArtifactOut.model_validate(artifact),
+        task=TaskOut.model_validate(task) if task else None,
+        run=RunOut.model_validate(run) if run else None,
+        work_item=WorkItemOut.model_validate(work_item) if work_item else None,
+        origin_documents=origin_docs,
+        approvals=approvals,
+        context=context,
+        provenance=provenance,
+        confidence_score=confidence,
+        lineage_summary=lineage_summary,
     )

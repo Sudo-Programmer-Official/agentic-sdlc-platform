@@ -9,7 +9,6 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.db.models import Run, WorkItem
 from app.services.event_log import record_event
-from app.services.runtime_lineage import link_run_to_work_item
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 
@@ -91,66 +90,6 @@ async def tick(session):
                 except Exception:
                     pass
             continue
-
-        # If tests failed and fixes are allowed, enqueue fix and keep running
-        failed_tests = (
-            await session.execute(
-                select(WorkItem).where(
-                    WorkItem.run_id == run.id,
-                    WorkItem.type == "RUN_TESTS",
-                    WorkItem.status == "FAILED",
-                )
-            )
-        ).scalars().all()
-        if failed_tests:
-            fix_attempts = (
-                await session.execute(
-                    select(func.count()).where(
-                        WorkItem.run_id == run.id,
-                        WorkItem.type == "FIX_TEST_FAILURE",
-                    )
-                )
-            ).scalar() or 0
-            pending_fix = (
-                await session.execute(
-                    select(func.count()).where(
-                        WorkItem.run_id == run.id,
-                        WorkItem.type == "FIX_TEST_FAILURE",
-                        WorkItem.status.in_(["QUEUED", "RUNNING", "CLAIMED"]),
-                    )
-                )
-            ).scalar() or 0
-            if fix_attempts < settings.max_fix_attempts_per_run and pending_fix == 0:
-                wi = failed_tests[0]
-                fix = WorkItem(
-                    project_id=wi.project_id,
-                    tenant_id=wi.tenant_id,
-                    run_id=wi.run_id,
-                    type="FIX_TEST_FAILURE",
-                    key=f"FIX_TEST_FAILURE_{fix_attempts + 1}",
-                    status="QUEUED",
-                    executor="codex",
-                    priority=9,
-                    required_capabilities=["code"],
-                    payload={
-                        "test_exit_code": (wi.result or {}).get("exit_code"),
-                        "stdout": (wi.result or {}).get("stdout"),
-                        "stderr": (wi.result or {}).get("stderr"),
-                    },
-                )
-                session.add(fix)
-                await session.flush()
-                await link_run_to_work_item(session, fix)
-                await record_event(
-                    session,
-                    project_id=fix.project_id,
-                    run_id=fix.run_id,
-                    work_item_id=fix.id,
-                    event_type="WORK_ITEM_CREATED",
-                    actor_type="SYSTEM",
-                    payload={"work_item_id": str(fix.id), "type": fix.type},
-                )
-                continue
 
         failed_non_superseded = (
             await session.execute(

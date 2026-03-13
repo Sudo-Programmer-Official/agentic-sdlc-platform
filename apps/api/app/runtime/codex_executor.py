@@ -13,6 +13,9 @@ from app.runtime.tools.repo_tools import RepoTools
 from app.core.config import get_settings
 from app.runtime.tools.redaction import SECRET_PATTERNS
 from app.db.models import WorkItem
+from app.db.session import SessionLocal
+from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_context, compact_graph_context
+from app.services.workspace_supervisor import workspace_uri
 
 
 SYSTEM_PROMPT = """You are an automated code change worker.
@@ -39,9 +42,24 @@ class CodexExecutor(TaskExecutor):
         return self._client
 
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
-        repo = RepoTools(self.repo_root)
+        repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
+        self.repo_root = repo_root
+        repo = RepoTools(repo_root)
 
         context_bundle = self._build_context(repo, work_item)
+        context_bundle.setdefault("meta", {})
+        context_bundle["meta"]["workspace"] = {
+            "workspace_root": context.workspace_root,
+            "repo_path": context.repo_path,
+            "artifacts_path": context.artifacts_path,
+            "logs_path": context.logs_path,
+            "patches_path": context.patches_path,
+            "branch_name": context.branch_name,
+            "workspace_status": context.workspace_status,
+        }
+        graph_context = await self._load_graph_context(work_item)
+        if graph_context:
+            context_bundle["graph_context"] = graph_context
 
         # Adaptive patch ratio based on stage
         ratio = self.max_patch_ratio_default
@@ -64,6 +82,7 @@ class CodexExecutor(TaskExecutor):
                 "context_files": context_bundle.get("files", {}),
                 "meta": context_bundle.get("meta", {}),
                 "artifacts": context_bundle.get("artifacts", {}),
+                "graph_context": context_bundle.get("graph_context"),
                 "output_schema": CodexPlan.model_json_schema(),
             }
         )
@@ -157,7 +176,22 @@ class CodexExecutor(TaskExecutor):
         diff = repo.git_diff()
         artifacts = [a.model_dump() for a in plan.artifacts]
         if diff:
-            artifacts.append({"type": "git_diff", "content": diff})
+            if context.patches_path:
+                patch_dir = Path(context.patches_path)
+                patch_dir.mkdir(parents=True, exist_ok=True)
+                patch_name = f"{work_item.type.lower()}-{work_item.id}.patch"
+                patch_path = patch_dir / patch_name
+                patch_path.write_text(diff, encoding="utf-8")
+                artifacts.append(
+                    {
+                        "type": "git_diff",
+                        "uri": workspace_uri("patches", patch_name),
+                        "path": str(patch_path),
+                        "content": diff,
+                    }
+                )
+            else:
+                artifacts.append({"type": "git_diff", "content": diff})
 
         # Save review metrics / patch stats
         review_metrics = {}
@@ -316,6 +350,21 @@ class CodexExecutor(TaskExecutor):
             },
             "artifacts": artifacts,
         }
+
+    async def _load_graph_context(self, work_item: WorkItem) -> dict[str, Any] | None:
+        try:
+            async with SessionLocal() as session:
+                context = await build_graph_context(
+                    session,
+                    entity_type="work_item",
+                    entity_id=work_item.id,
+                    project_id=work_item.project_id,
+                    max_depth=EXECUTOR_CONTEXT_LIMITS.max_depth,
+                    limits=EXECUTOR_CONTEXT_LIMITS,
+                )
+            return compact_graph_context(context)
+        except Exception:
+            return None
 
     def _resolve_local_import(self, module: str) -> str | None:
         """

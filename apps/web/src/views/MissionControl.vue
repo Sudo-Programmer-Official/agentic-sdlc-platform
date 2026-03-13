@@ -27,6 +27,9 @@
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <el-button :loading="loading" @click="loadAll">Refresh</el-button>
+          <el-button plain :disabled="!forkEnabled" @click="openForkDialog">
+            Fork Run
+          </el-button>
           <el-button type="danger" plain :disabled="!cancelEnabled" @click="cancelLatestRun">
             Cancel Run
           </el-button>
@@ -41,6 +44,20 @@
         <div class="rounded-lg bg-slate-50 px-3 py-2">
           Latest Run
           <span class="ml-2 font-mono text-slate-900">{{ latestRun?.id || "—" }}</span>
+        </div>
+        <div class="rounded-lg bg-slate-50 px-3 py-2">
+          Workspace
+          <span class="ml-2">
+            <el-tag :type="workspaceStatusTagType(latestRun?.workspace_status)" effect="light" size="small">
+              {{ latestRun?.workspace_status || "PENDING" }}
+            </el-tag>
+          </span>
+          <div class="mt-1 font-mono text-[11px] text-slate-500">
+            {{ latestRun?.branch_name || "—" }}
+          </div>
+          <div class="font-mono text-[11px] text-slate-400">
+            {{ shortenPath(latestRun?.repo_path) }}
+          </div>
         </div>
         <div v-if="error" class="rounded-lg bg-rose-50 px-3 py-2 text-rose-600">
           {{ error }}
@@ -181,14 +198,113 @@
       </div>
 
       <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div class="text-sm uppercase tracking-wide text-slate-400">Deferred Panels</div>
-        <div class="mt-4 space-y-3 text-sm text-slate-500">
-          <p>Change requests and raw audit panels are hidden in this pass.</p>
-          <p>They will come back once they are backed by the same store-based runtime APIs.</p>
-          <p>Artifacts are the next natural addition after this runtime view is stable.</p>
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-sm uppercase tracking-wide text-slate-400">Artifacts</div>
+            <div class="text-xs text-slate-500">Artifacts captured by the latest run with explainable lineage.</div>
+          </div>
+          <el-tag effect="light" type="info">
+            {{ latestArtifacts.length }} item{{ latestArtifacts.length === 1 ? "" : "s" }}
+          </el-tag>
         </div>
+        <el-table
+          v-if="latestArtifacts.length"
+          :data="latestArtifacts"
+          class="mt-4"
+          size="small"
+          style="width: 100%"
+        >
+          <el-table-column prop="type" label="Type" min-width="120" />
+          <el-table-column label="Artifact" min-width="220">
+            <template #default="{ row }">
+              <div class="font-mono text-xs text-slate-700">{{ shortenUri(row.uri) }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="Work Item" min-width="160">
+            <template #default="{ row }">
+              {{ artifactWorkItemLabel(row.work_item_id) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="Actions" width="100">
+            <template #default="{ row }">
+              <el-button link type="primary" @click="openArtifactExplain(row)">Explain</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-else class="mt-4 text-sm text-slate-500">No artifacts captured for this run yet.</div>
+        <div v-if="artifactError" class="mt-3 text-sm text-rose-600">{{ artifactError }}</div>
       </div>
     </div>
+
+    <el-dialog v-model="artifactDialogOpen" title="Explain Artifact" width="720px">
+      <div v-if="artifactExplainLoading" class="text-sm text-slate-500">Loading artifact context...</div>
+      <div v-else-if="artifactExplainResult" class="space-y-3 text-sm text-slate-700">
+        <div><strong>Artifact:</strong> {{ artifactExplainResult.artifact.type }} · {{ artifactExplainResult.artifact.uri }}</div>
+        <div><strong>Origin docs:</strong> {{ artifactExplainResult.origin_documents?.length || 0 }}</div>
+        <div><strong>Task:</strong> {{ artifactExplainResult.task?.title || "—" }}</div>
+        <div><strong>Run:</strong> {{ artifactExplainResult.run?.id || "—" }}</div>
+        <div><strong>Work item:</strong> {{ artifactExplainResult.work_item?.key || artifactExplainResult.work_item?.type || "—" }}</div>
+        <div><strong>Confidence:</strong> {{ artifactExplainResult.confidence_score ?? "—" }}</div>
+        <div><strong>Why this exists:</strong> {{ artifactIntentText(artifactExplainResult) }}</div>
+      </div>
+      <div v-if="artifactExplainError" class="mt-2 text-sm text-rose-600">{{ artifactExplainError }}</div>
+    </el-dialog>
+
+    <el-dialog v-model="forkDialogOpen" title="Fork Run" width="560px">
+      <div class="space-y-4">
+        <div class="text-sm text-slate-600">
+          Clone the latest run DAG, workspace settings, and execution metadata into a new run.
+        </div>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Executor</span>
+            <select
+              v-model="forkExecutor"
+              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              <option v-for="option in forkExecutorOptions" :key="option" :value="option">
+                {{ option }}
+              </option>
+            </select>
+          </label>
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Branch Name</span>
+            <input
+              v-model="forkBranchName"
+              type="text"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              placeholder="run/my-fork"
+            />
+          </label>
+        </div>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">Fork Notes</span>
+          <textarea
+            v-model="forkNotes"
+            rows="3"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Why this fork exists, policy overrides, or operator notes"
+          />
+        </label>
+        <label class="flex items-center gap-2 text-sm text-slate-700">
+          <input v-model="forkStartNow" type="checkbox" class="rounded border-slate-300" />
+          Start the forked run immediately
+        </label>
+        <div class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+          Source run
+          <span class="ml-2 font-mono text-slate-800">{{ latestRun?.id || "—" }}</span>
+        </div>
+        <div v-if="forkError" class="text-sm text-rose-600">{{ forkError }}</div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <el-button :disabled="forkLoading" @click="forkDialogOpen = false">Cancel</el-button>
+          <el-button type="primary" :loading="forkLoading" :disabled="!forkEnabled" @click="submitForkRun">
+            Fork Run
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 
   <div v-else class="rounded-xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
@@ -204,9 +320,12 @@ import AgentPanel from "../components/AgentPanel.vue";
 import ExecutionTimeline from "../components/ExecutionTimeline.vue";
 import StageBadge from "../components/StageBadge.vue";
 import {
+  explainArtifact,
   fetchHealth,
   fetchLifecycleScore,
   fetchProjectMeta,
+  forkRun,
+  listArtifacts,
   listRunEvents,
   listRuns,
   listWorkItems,
@@ -233,15 +352,34 @@ const lifecycleScore = ref<any | null>(null);
 const runs = ref<any[]>([]);
 const workItems = ref<any[]>([]);
 const runEvents = ref<any[]>([]);
+const artifacts = ref<any[]>([]);
 const loading = ref(false);
 const error = ref("");
+const artifactError = ref("");
+const artifactDialogOpen = ref(false);
+const artifactExplainLoading = ref(false);
+const artifactExplainError = ref("");
+const artifactExplainResult = ref<any | null>(null);
+const forkDialogOpen = ref(false);
+const forkLoading = ref(false);
+const forkError = ref("");
+const forkExecutor = ref("dummy");
+const forkBranchName = ref("");
+const forkNotes = ref("");
+const forkStartNow = ref(true);
 
 const projectId = computed(() => (route.params.projectId as string) || "");
 const latestRun = computed(() => runs.value[0] || null);
 const hasRun = computed(() => Boolean(latestRun.value?.id));
+const forkEnabled = computed(() => Boolean(latestRun.value?.id));
 const currentStage = computed(() => project.value?.status || "UNKNOWN");
 const lifecycleWarnings = computed<string[]>(() => lifecycleScore.value?.warnings || []);
 const cancelEnabled = computed(() => ["QUEUED", "RUNNING"].includes(latestRun.value?.status || ""));
+const forkExecutorOptions = computed(() => {
+  const options = new Set(["dummy", "codex", "test"]);
+  if (latestRun.value?.executor) options.add(String(latestRun.value.executor));
+  return Array.from(options);
+});
 const coveragePercent = computed(() => {
   const ratio = lifecycleScore.value?.coverage?.coverage_ratio;
   return typeof ratio === "number" ? `${Math.round(ratio * 100)}%` : "—";
@@ -328,6 +466,11 @@ const runtimeCounts = computed(() => {
   return counts;
 });
 
+const latestArtifacts = computed(() => {
+  if (!latestRun.value?.id) return [];
+  return artifacts.value.filter((artifact) => artifact.run_id === latestRun.value.id);
+});
+
 watch(
   projectId,
   () => {
@@ -360,7 +503,20 @@ function resetState() {
   runs.value = [];
   workItems.value = [];
   runEvents.value = [];
+  artifacts.value = [];
   error.value = "";
+  artifactError.value = "";
+  artifactDialogOpen.value = false;
+  artifactExplainLoading.value = false;
+  artifactExplainError.value = "";
+  artifactExplainResult.value = null;
+  forkDialogOpen.value = false;
+  forkLoading.value = false;
+  forkError.value = "";
+  forkExecutor.value = "dummy";
+  forkBranchName.value = "";
+  forkNotes.value = "";
+  forkStartNow.value = true;
 }
 
 function primeContext() {
@@ -427,14 +583,18 @@ async function loadRunRuntime() {
   if (!latestRun.value?.id) {
     workItems.value = [];
     runEvents.value = [];
+    artifacts.value = [];
     return;
   }
-  const [items, events] = await Promise.all([
+  artifactError.value = "";
+  const [items, events, projectArtifacts] = await Promise.all([
     listWorkItems(projectId.value, latestRun.value.id),
     listRunEvents(latestRun.value.id),
+    listArtifacts(projectId.value),
   ]);
   workItems.value = items;
   runEvents.value = events;
+  artifacts.value = Array.isArray(projectArtifacts) ? projectArtifacts : [];
 }
 
 async function refreshRuntime() {
@@ -490,8 +650,56 @@ async function cancelLatestRun() {
   }
 }
 
+function openForkDialog() {
+  if (!latestRun.value?.id) return;
+  forkDialogOpen.value = true;
+  forkError.value = "";
+  forkExecutor.value = latestRun.value.executor || "dummy";
+  forkBranchName.value = latestRun.value.branch_name ? `${latestRun.value.branch_name}-fork` : "";
+  forkNotes.value = "";
+  forkStartNow.value = true;
+}
+
+async function submitForkRun() {
+  if (!latestRun.value?.id) return;
+  forkLoading.value = true;
+  forkError.value = "";
+  try {
+    await forkRun(latestRun.value.id, {
+      executor: forkExecutor.value || undefined,
+      branch_name: forkBranchName.value.trim() || undefined,
+      start_now: forkStartNow.value,
+      summary_overrides: forkNotes.value.trim()
+        ? {
+            fork_notes: forkNotes.value.trim(),
+          }
+        : {},
+    });
+    forkDialogOpen.value = false;
+    await loadAll();
+  } catch (err: any) {
+    forkError.value = err?.message || "Failed to fork run.";
+  } finally {
+    forkLoading.value = false;
+  }
+}
+
 function goToOverview() {
   router.push(`/projects/${projectId.value}`);
+}
+
+async function openArtifactExplain(artifact: any) {
+  artifactDialogOpen.value = true;
+  artifactExplainLoading.value = true;
+  artifactExplainError.value = "";
+  artifactExplainResult.value = null;
+  try {
+    artifactExplainResult.value = await explainArtifact(projectId.value, artifact.id);
+  } catch (err: any) {
+    artifactExplainError.value = err?.message || "Failed to explain artifact.";
+  } finally {
+    artifactExplainLoading.value = false;
+  }
 }
 
 function formatTimestamp(value?: string | null) {
@@ -507,6 +715,13 @@ function runStatusTagType(status?: string | null) {
   if (status === "FAILED" || status === "CANCELED") return "danger";
   if (status === "QUEUED") return "info";
   return "default";
+}
+
+function workspaceStatusTagType(status?: string | null) {
+  if (status === "SEEDED") return "success";
+  if (status === "READY") return "info";
+  if (status === "ERROR") return "danger";
+  return "warning";
 }
 
 function workItemStatusTagType(status?: string | null) {
@@ -540,6 +755,7 @@ function mapEventMessage(eventType: string, title?: string) {
   if (eventType === "RUN_COMPLETED") return "Run completed";
   if (eventType === "RUN_FAILED") return "Run failed";
   if (eventType === "RUN_CANCELED") return "Run canceled";
+  if (eventType === "RUN_FORKED") return "Run forked";
   if (eventType === "WORK_DAG_CREATED") return "Work DAG created";
   if (eventType === "WORK_ITEM_CREATED") return `Task ${itemTitle} created`;
   if (eventType === "WORK_ITEM_CLAIMED") return `Task ${itemTitle} claimed`;
@@ -557,5 +773,29 @@ function humanizeToken(value: string) {
     .replace(/[_-]+/g, " ")
     .toLowerCase()
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function shortenUri(uri?: string | null) {
+  if (!uri) return "—";
+  if (uri.length <= 52) return uri;
+  return `...${uri.slice(-49)}`;
+}
+
+function shortenPath(path?: string | null) {
+  if (!path) return "—";
+  if (path.length <= 56) return path;
+  return `...${path.slice(-53)}`;
+}
+
+function artifactWorkItemLabel(workItemId?: string | null) {
+  if (!workItemId) return "—";
+  const item = displayWorkItems.value.find((entry) => entry.task_id === workItemId);
+  return item?.title || workItemId;
+}
+
+function artifactIntentText(explainResult: any) {
+  const semantics = explainResult?.context?.root?.meta?.semantics || {};
+  const summary = explainResult?.context?.root?.meta?.summary;
+  return semantics.intent || summary || "Artifact recorded with lineage context.";
 }
 </script>

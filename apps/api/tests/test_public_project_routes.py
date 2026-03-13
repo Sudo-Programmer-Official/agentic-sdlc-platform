@@ -2,11 +2,12 @@ import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Project, Run
+from app.db.models import Project, Run, WorkItem, WorkItemEdge, Trace
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -90,3 +91,119 @@ async def test_public_run_status_patch_cancels_queued_run(db_session):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "CANCELED"
+
+
+@pytest.mark.anyio
+async def test_public_run_fork_clones_dag_and_metadata(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Forkable run", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="FAILED",
+        executor="codex",
+        branch_name="run/source-1234",
+        summary={"goal": "Fix failing tests", "policy": "strict"},
+    )
+    session.add(source_run)
+    await session.flush()
+
+    wi_plan = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="PLAN_DAG",
+        key="PLAN_DAG",
+        status="DONE",
+        priority=10,
+        executor="codex",
+        payload={"title": "Plan work"},
+        result={"executor": "codex"},
+    )
+    wi_test = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="RUN_TESTS",
+        key="RUN_TESTS",
+        status="FAILED",
+        priority=9,
+        executor="test",
+        payload={"title": "Run tests"},
+        result={"stderr": "tests failed"},
+        last_error="tests failed",
+    )
+    session.add_all([wi_plan, wi_test])
+    await session.flush()
+    session.add(
+        WorkItemEdge(
+            tenant_id=tenant_id,
+            run_id=source_run.id,
+            from_work_item_id=wi_plan.id,
+            to_work_item_id=wi_test.id,
+        )
+    )
+    await session.commit()
+    await session.refresh(source_run)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/runs/{source_run.id}/fork",
+            json={
+                "executor": "dummy",
+                "branch_name": "run/forked-9999",
+                "start_now": False,
+                "summary_overrides": {"fork_notes": "replay with dummy"},
+            },
+        )
+
+    assert response.status_code == 201
+    data = response.json()
+    fork_id = data["id"]
+    assert data["executor"] == "dummy"
+    assert data["status"] == "QUEUED"
+    assert data["branch_name"] == "run/forked-9999"
+    assert data["summary"]["forked_from_run_id"] == str(source_run.id)
+    assert data["summary"]["fork_notes"] == "replay with dummy"
+
+    fork_run = await session.get(Run, uuid.UUID(fork_id))
+    assert fork_run is not None
+    assert fork_run.workspace_root is not None
+    assert fork_run.repo_path is not None
+
+    fork_items = (
+        await session.execute(
+            select(WorkItem).where(WorkItem.run_id == fork_run.id).order_by(WorkItem.created_at.asc(), WorkItem.id.asc())
+        )
+    ).scalars().all()
+    assert len(fork_items) == 2
+    assert {item.type for item in fork_items} == {"PLAN_DAG", "RUN_TESTS"}
+    assert all(item.status == "QUEUED" for item in fork_items)
+    assert all(item.result == {} for item in fork_items)
+    assert all(item.last_error is None for item in fork_items)
+    assert {item.executor for item in fork_items} == {"dummy", "test"}
+
+    fork_edges = (
+        await session.execute(select(WorkItemEdge).where(WorkItemEdge.run_id == fork_run.id))
+    ).scalars().all()
+    assert len(fork_edges) == 1
+    fork_ids = {item.id for item in fork_items}
+    assert fork_edges[0].from_work_item_id in fork_ids
+    assert fork_edges[0].to_work_item_id in fork_ids
+
+    fork_traces = (
+        await session.execute(
+            select(Trace).where(
+                Trace.project_id == project.id,
+                Trace.from_type == "run",
+                Trace.from_id == source_run.id,
+                Trace.to_type == "run",
+                Trace.to_id == fork_run.id,
+                Trace.relation_type == "forks",
+            )
+        )
+    ).scalars().all()
+    assert len(fork_traces) == 1

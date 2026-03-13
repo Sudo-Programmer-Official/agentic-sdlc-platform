@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     test_command: str = "pytest -q"
     test_timeout_seconds: int = 180
     test_output_max_bytes: int = 200_000
+    workspace_base_dir: str = "/tmp/agentic-sdlc-workspaces"
+    workspace_repo_source: str | None = None
     tenancy_enforcement: bool = False
     run_migrations_on_startup: bool = False
     alembic_config_path: str | None = None

@@ -132,6 +132,12 @@ const steps = computed(() => {
     } else if (message.startsWith("Task") && message.endsWith("failed")) {
       because = "Task failed; execution halted to prevent cascading errors.";
       next = "Review error, then retry or cancel.";
+    } else if (message.startsWith("Auto recovery queued")) {
+      because = "The runtime classified the failure and inserted a repair node into the DAG.";
+      next = "Wait for the recovery node to execute, then resume downstream work.";
+    } else if (message.startsWith("Recovery queued")) {
+      because = "A completed recovery node scheduled a follow-up retry.";
+      next = "Observe the retried step and confirm the run continues.";
     } else if (log.tool === "file_write") {
       because = "Agent produced a documented artifact for review.";
       next = "Continue task execution.";

@@ -87,6 +87,11 @@ class RunOut(BaseModel):
     project_id: uuid.UUID
     status: str
     executor: str
+    workspace_root: Optional[str] = None
+    repo_path: Optional[str] = None
+    branch_name: Optional[str] = None
+    workspace_status: str = "PENDING"
+    workspace_error: Optional[str] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     summary: Optional[dict] = None

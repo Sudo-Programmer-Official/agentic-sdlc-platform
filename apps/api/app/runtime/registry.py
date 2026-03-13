@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from app.runtime.dummy_executor import DummyExecutor
 from app.runtime.codex_executor import CodexExecutor
@@ -16,5 +17,12 @@ _EXECUTOR_FACTORIES: dict[str, Callable[[], TaskExecutor]] = {
 
 
 def get_executor(name: str) -> TaskExecutor:
+    return build_executor(name)
+
+
+def build_executor(name: str, repo_root: Path | None = None) -> TaskExecutor:
     factory = _EXECUTOR_FACTORIES.get(name.lower(), _EXECUTOR_FACTORIES["dummy"])
-    return factory()
+    try:
+        return factory(repo_root=repo_root)
+    except TypeError:
+        return factory()

@@ -3,20 +3,22 @@ from __future__ import annotations
 import uuid
 import asyncio
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Callable
 
 from sqlalchemy import select, func, and_, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Agent, Run, WorkItem, WorkItemEdge
-from app.runtime.context import RunContext
 from app.runtime.executor import TaskExecutor
-from app.runtime.registry import get_executor
+from app.runtime.registry import build_executor, get_executor
 from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_work_item_status
+from app.runtime.recovery_policy import maybe_apply_recovery
 from app.runtime.dag import generate_template_dag
 from app.core.config import get_settings
+from app.services.workspace_supervisor import build_run_context, ensure_run_workspace
 
 
 class RunOrchestrator:
@@ -35,6 +37,7 @@ class RunOrchestrator:
                 return
             if executor_name:
                 self.executor = get_executor(executor_name)
+            await ensure_run_workspace(session, run)
             now = datetime.now(timezone.utc)
             previous = run.status
             run.status = "RUNNING"
@@ -52,6 +55,9 @@ class RunOrchestrator:
 
         # Step 2: ensure DAG exists
         async with self.session_factory() as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                return
             await generate_template_dag(
                 session,
                 project_id=run.project_id,
@@ -75,7 +81,6 @@ class RunOrchestrator:
 
         async with self.session_factory() as session:
             use_external_runtime = await self._should_use_external_runtime(session, run_id, actor_type, actor_id)
-            context = RunContext(project_id=run.project_id, run_id=run.id)
             while True:
                 await session.commit()
                 # refresh run status
@@ -124,13 +129,25 @@ class RunOrchestrator:
                 statuses = (
                     await session.execute(
                         select(
-                            func.count().filter(WorkItem.status == "FAILED"),
                             func.count().filter(WorkItem.status.in_(["RUNNING", "CLAIMED"])),
                             func.count().filter(WorkItem.status == "QUEUED"),
                         ).where(WorkItem.run_id == run_id)
                     )
                 ).first()
-                failed_count, active_count, queued_count = statuses
+                active_count, queued_count = statuses
+                failed_items = (
+                    await session.execute(
+                        select(WorkItem.result).where(
+                            WorkItem.run_id == run_id,
+                            WorkItem.status == "FAILED",
+                        )
+                    )
+                ).scalars().all()
+                failed_count = sum(
+                    1
+                    for result in failed_items
+                    if not (isinstance(result, dict) and result.get("superseded") is True)
+                )
 
                 if failed_count and queued_count == 0 and active_count == 0:
                     run_failed = True
@@ -175,7 +192,7 @@ class RunOrchestrator:
                     continue
 
                 for wi in runnable:
-                    await self._process_work_item(session, wi, run, context)
+                    await self._process_work_item(session, wi, run)
 
             # finalize run
             final_status = "FAILED" if run_failed else ("CANCELED" if run.status == "CANCELED" else "COMPLETED")
@@ -265,7 +282,6 @@ class RunOrchestrator:
         session: AsyncSession,
         wi: WorkItem,
         run: Run,
-        context: RunContext,
     ) -> None:
         try:
             now = datetime.now(timezone.utc)
@@ -283,7 +299,8 @@ class RunOrchestrator:
             session.add(wi)
             await session.flush()
 
-            executor = get_executor(wi.executor)
+            context = await build_run_context(session, run, require_repo=wi.executor in {"codex", "test"})
+            executor = build_executor(wi.executor, repo_root=None if not context.repo_path else Path(context.repo_path))
             result = await executor.execute(wi, context)
             wi.status = result.get("status", "DONE")
             wi.result = result.get("payload", {})
@@ -304,6 +321,7 @@ class RunOrchestrator:
             )
             session.add(wi)
             await session.flush()
+            await maybe_apply_recovery(session, wi)
         except Exception as exc:
             wi.status = "FAILED"
             wi.last_error = str(exc)
@@ -319,3 +337,5 @@ class RunOrchestrator:
                 actor_type="SYSTEM",
                 payload={"error": str(exc)},
             )
+            await session.flush()
+            await maybe_apply_recovery(session, wi)

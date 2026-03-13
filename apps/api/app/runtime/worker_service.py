@@ -3,108 +3,28 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
-from sqlalchemy import select, func, and_, exists
+from sqlalchemy import select, and_, exists
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.db.models import Agent, WorkItem
-from app.runtime.context import RunContext
-from app.runtime.registry import get_executor
+from app.db.models import Agent, Run, WorkItem
+from app.runtime.registry import build_executor
+from app.runtime.recovery_policy import maybe_apply_recovery
 from app.services.event_log import record_event
-from app.services.runtime_lineage import link_run_to_work_item, persist_work_item_artifacts
+from app.services.runtime_lineage import persist_work_item_artifacts
+from app.services.workspace_supervisor import build_run_context
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 
 
-async def enqueue_fix_item(session, failed_wi: WorkItem) -> None:
-    # cap attempts
-    count = (
-        await session.execute(
-            select(func.count()).where(
-                WorkItem.run_id == failed_wi.run_id,
-                WorkItem.type == "FIX_TEST_FAILURE",
-            )
-        )
-    ).scalar() or 0
-    if count >= settings.max_fix_attempts_per_run:
-        return
-    fix = WorkItem(
-        project_id=failed_wi.project_id,
-        tenant_id=failed_wi.tenant_id,
-        run_id=failed_wi.run_id,
-        type="FIX_TEST_FAILURE",
-        key=f"FIX_TEST_FAILURE_{count + 1}",
-        status="QUEUED",
-        executor="codex",
-        priority=9,
-        required_capabilities=["code"],
-        payload={
-            "test_exit_code": (failed_wi.result or {}).get("exit_code"),
-            "stdout": (failed_wi.result or {}).get("stdout"),
-            "stderr": (failed_wi.result or {}).get("stderr"),
-        },
-    )
-    session.add(fix)
-    await session.flush()
-    await link_run_to_work_item(session, fix)
-    await record_event(
-        session,
-        project_id=fix.project_id,
-        run_id=fix.run_id,
-        work_item_id=fix.id,
-        event_type="WORK_ITEM_CREATED",
-        actor_type="SYSTEM",
-        payload={"work_item_id": str(fix.id), "type": fix.type},
-    )
-
-
-async def enqueue_test_run(session, source_wi: WorkItem) -> None:
-    # mark previous failed RUN_TESTS as superseded (keep status FAILED for audit)
-    prev_failed = (
-        await session.execute(
-            select(WorkItem).where(
-                WorkItem.run_id == source_wi.run_id,
-                WorkItem.type == "RUN_TESTS",
-                WorkItem.status == "FAILED",
-            )
-        )
-    ).scalars().all()
-    for pf in prev_failed:
-        payload = pf.result or {}
-        payload["superseded"] = True
-        payload["superseded_by"] = str(source_wi.id)
-        pf.result = payload
-        session.add(pf)
-    test = WorkItem(
-        project_id=source_wi.project_id,
-        tenant_id=source_wi.tenant_id,
-        run_id=source_wi.run_id,
-        type="RUN_TESTS",
-        key=f"RUN_TESTS_{uuid.uuid4().hex[:4]}",
-        status="QUEUED",
-        executor="test",
-        priority=8,
-        required_capabilities=["test"],
-        payload={},
-    )
-    session.add(test)
-    await session.flush()
-    await link_run_to_work_item(session, test)
-    await record_event(
-        session,
-        project_id=test.project_id,
-        run_id=test.run_id,
-        work_item_id=test.id,
-        event_type="WORK_ITEM_CREATED",
-        actor_type="SYSTEM",
-        payload={"work_item_id": str(test.id), "type": test.type},
-    )
-
-
 async def execute_item(session, wi: WorkItem, agent: Agent):
-    executor = get_executor(wi.executor)
-    context = RunContext(project_id=wi.project_id, run_id=wi.run_id)
+    run = await session.get(Run, wi.run_id)
+    if run is None:
+        return
+    context = await build_run_context(session, run, require_repo=wi.executor in {"codex", "test"})
+    executor = build_executor(wi.executor, repo_root=None if not context.repo_path else Path(context.repo_path))
     try:
         result = await executor.execute(wi, context)
         wi.status = result.get("status", "DONE")
@@ -123,6 +43,8 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
             actor_id=str(agent.id),
             payload={"work_item_id": str(wi.id), "status": wi.status},
         )
+        await session.flush()
+        await maybe_apply_recovery(session, wi)
     except Exception as exc:
         wi.status = "FAILED"
         wi.finished_at = datetime.now(timezone.utc)
@@ -138,6 +60,8 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
             actor_id=str(agent.id),
             payload={"work_item_id": str(wi.id), "error": str(exc)},
         )
+        await session.flush()
+        await maybe_apply_recovery(session, wi)
 
 
 async def tick_worker(agent_id: uuid.UUID):

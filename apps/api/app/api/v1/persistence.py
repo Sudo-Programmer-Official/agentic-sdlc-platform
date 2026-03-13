@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, func, and_, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
@@ -43,7 +43,10 @@ from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_run_status as guarded_update_run_status, update_work_item_status
 from app.runtime.orchestrator import RunOrchestrator
+from app.runtime.recovery_policy import maybe_apply_recovery
 from app.db.session import SessionLocal
+from app.services.run_replay import fork_run
+from app.services.workspace_supervisor import ensure_run_workspace
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
     TaskCounts,
@@ -119,13 +122,25 @@ async def _maybe_finalize_run(session: AsyncSession, run_id: uuid.UUID) -> None:
     counts = (
         await session.execute(
             select(
-                func.count().filter(WorkItem.status == "FAILED"),
                 func.count().filter(WorkItem.status.in_(["RUNNING", "CLAIMED"])),
                 func.count().filter(WorkItem.status == "QUEUED"),
             ).where(WorkItem.run_id == run_id)
         )
     ).first()
-    failed, active, queued = counts
+    active, queued = counts
+    failed_results = (
+        await session.execute(
+            select(WorkItem.result).where(
+                WorkItem.run_id == run_id,
+                WorkItem.status == "FAILED",
+            )
+        )
+    ).scalars().all()
+    failed = sum(
+        1
+        for result in failed_results
+        if not (isinstance(result, dict) and result.get("superseded") is True)
+    )
     if failed and active == 0 and queued == 0:
         run.status = "FAILED"
         run.finished_at = datetime.utcnow()
@@ -242,6 +257,7 @@ async def create_run(
     run.executor = executor_name
     session.add(run)
     await session.flush()
+    await ensure_run_workspace(session, run)
     await log_activity(
         session,
         project_id=project_id,
@@ -293,6 +309,13 @@ async def get_run(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: A
 
 class RunStatusUpdate(BaseModel):
     status: str
+
+
+class RunForkRequest(BaseModel):
+    executor: str | None = None
+    branch_name: str | None = None
+    start_now: bool = True
+    summary_overrides: dict = Field(default_factory=dict)
 
 
 class RunEventOut(BaseModel):
@@ -362,6 +385,28 @@ async def patch_run_status(
     await session.commit()
     await session.refresh(run)
     return _run_out(run)
+
+
+@router.post("/runs/{run_id}/fork", response_model=RunOut, status_code=status.HTTP_201_CREATED)
+@public_router.post("/runs/{run_id}/fork", response_model=RunOut, status_code=status.HTTP_201_CREATED)
+async def fork_existing_run(
+    run_id: uuid.UUID,
+    payload: RunForkRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunOut:
+    source_run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    if not source_run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    forked = await fork_run(
+        session,
+        source_run=source_run,
+        executor=payload.executor,
+        branch_name=payload.branch_name,
+        summary_overrides=payload.summary_overrides,
+        start_now=payload.start_now,
+    )
+    return _run_out(forked)
 
 
 @router.get("/runs/{run_id}/events", response_model=List[RunEventOut])
@@ -582,6 +627,7 @@ async def complete_work_item(
             actor_type="AGENT",
             payload={"work_item_id": str(wi.id), "status": "DONE"},
         )
+        await maybe_apply_recovery(session, wi)
         await _maybe_finalize_run(session, wi.run_id)
     await session.refresh(wi)
     return _wi_out(wi)
@@ -639,6 +685,7 @@ async def fail_work_item(
             payload={"work_item_id": str(wi.id), "error": payload.error, "retry": retrying},
         )
         if not retrying:
+            await maybe_apply_recovery(session, wi)
             await _maybe_finalize_run(session, wi.run_id)
     await session.refresh(wi)
     return _wi_out(wi)

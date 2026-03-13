@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -42,9 +43,10 @@ async def runtime_db(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db):
+async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db, tmp_path):
     monkeypatch.setenv("RUNTIME_MODE", "embedded")
     monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(tmp_path / "workspaces"))
     get_settings.cache_clear()
     tenant_id = uuid.uuid4()
 
@@ -65,6 +67,12 @@ async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db
         run = await session.get(Run, run_id)
         assert run is not None
         assert run.status == "COMPLETED"
+        assert run.workspace_status == "READY"
+        assert run.workspace_root is not None
+        assert run.repo_path is not None
+        assert Path(run.workspace_root).exists()
+        assert Path(run.repo_path).exists()
+        assert Path(run.workspace_root, "context", "workspace.json").exists()
 
         work_items = (
             await session.execute(
@@ -252,7 +260,7 @@ async def test_embedded_runtime_persists_canonical_artifacts_and_produces_traces
         run_id = run.id
         project_id = project.id
 
-    monkeypatch.setattr(orchestrator_module, "get_executor", lambda _: ArtifactExecutor())
+    monkeypatch.setattr(orchestrator_module, "build_executor", lambda *_args, **_kwargs: ArtifactExecutor())
     orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
     await orchestrator.start(run_id)
 
@@ -278,3 +286,115 @@ async def test_embedded_runtime_persists_canonical_artifacts_and_produces_traces
             )
         ).scalars().all()
         assert len(produce_edges) == len(artifacts)
+
+
+class HealingExecutor:
+    name = "dummy"
+
+    def __init__(self):
+        self.test_attempts = 0
+
+    async def execute(self, work_item, context):
+        if work_item.type == "RUN_TESTS":
+            self.test_attempts += 1
+            if self.test_attempts == 1:
+                return {
+                    "status": "FAILED",
+                    "message": "tests failed",
+                    "payload": {
+                        "exit_code": 1,
+                        "stdout": "",
+                        "stderr": "test failed for auth flow",
+                    },
+                }
+            return {
+                "status": "DONE",
+                "message": "tests passed",
+                "payload": {
+                    "exit_code": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                },
+            }
+        if work_item.type == "FIX_TEST_FAILURE":
+            return {
+                "status": "DONE",
+                "message": "fix applied",
+                "payload": {"artifacts": [{"type": "git_diff", "content": "diff --git a/auth.py b/auth.py"}]},
+            }
+        return {
+            "status": "DONE",
+            "message": "ok",
+            "payload": {"executor": "healing"},
+        }
+
+
+@pytest.mark.anyio
+async def test_embedded_runtime_self_heals_test_failure(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Healing runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+        project_id = project.id
+
+    healing_executor = HealingExecutor()
+    monkeypatch.setattr(orchestrator_module, "build_executor", lambda *_args, **_kwargs: healing_executor)
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at, WorkItem.id)
+            )
+        ).scalars().all()
+        assert len(work_items) == 9
+        assert sum(1 for wi in work_items if wi.type == "FIX_TEST_FAILURE") == 1
+        assert sum(1 for wi in work_items if wi.type == "RUN_TESTS") == 2
+
+        failed_test = next(wi for wi in work_items if wi.type == "RUN_TESTS" and wi.status == "FAILED")
+        retried_test = next(wi for wi in work_items if wi.type == "RUN_TESTS" and wi.status == "DONE" and wi.id != failed_test.id)
+        fix_item = next(wi for wi in work_items if wi.type == "FIX_TEST_FAILURE")
+        assert failed_test.result["failure_class"] == "test_failure"
+        assert failed_test.result["recovery_action"] == "spawn_fix_node"
+        assert failed_test.result["superseded"] is True
+        assert failed_test.result["superseded_by"] == str(retried_test.id)
+        assert fix_item.result["recovery_action"] == "spawn_retry_node"
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        recovery_events = [event for event in events if event.event_type == "WORK_ITEM_RECOVERY"]
+        assert len(recovery_events) == 2
+        assert any(event.payload and event.payload.get("recovery_type") == "FIX_TEST_FAILURE" for event in recovery_events)
+        assert any(event.payload and event.payload.get("recovery_type") == "RUN_TESTS" for event in recovery_events)
+
+        traces = (
+            await session.execute(
+                select(Trace).where(
+                    Trace.project_id == project_id,
+                    Trace.from_type == "work_item",
+                    Trace.to_type == "work_item",
+                    Trace.relation_type == "supersedes",
+                )
+            )
+        ).scalars().all()
+        assert any(trace.from_id == failed_test.id and trace.to_id == fix_item.id for trace in traces)
+        assert any(trace.from_id == failed_test.id and trace.to_id == retried_test.id for trace in traces)

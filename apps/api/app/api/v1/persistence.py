@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from datetime import timedelta
 from typing import List
 
@@ -186,7 +186,7 @@ async def _maybe_finalize_run(session: AsyncSession, run_id: uuid.UUID) -> None:
     )
     if failed and active == 0 and queued == 0:
         run.status = "FAILED"
-        run.finished_at = datetime.utcnow()
+        run.finished_at = datetime.now(timezone.utc)
         session.add(run)
         await record_event(
             session,
@@ -197,7 +197,7 @@ async def _maybe_finalize_run(session: AsyncSession, run_id: uuid.UUID) -> None:
         )
     elif failed == 0 and active == 0 and queued == 0:
         run.status = "COMPLETED"
-        run.finished_at = datetime.utcnow()
+        run.finished_at = datetime.now(timezone.utc)
         session.add(run)
         await record_event(
             session,
@@ -906,7 +906,7 @@ async def agent_heartbeat(agent_id: uuid.UUID, session: AsyncSession = Depends(g
     agent = await session.get(Agent, agent_id)
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-    agent.last_heartbeat_at = datetime.utcnow()
+    agent.last_heartbeat_at = datetime.now(timezone.utc)
     async with session.begin():
         session.add(agent)
     await session.refresh(agent)
@@ -936,7 +936,7 @@ async def claim_work_items(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     limit = max(1, min(payload.limit, agent.max_concurrency or 1))
     lease_seconds = max(10, min(payload.lease_seconds, 600))
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     lease_expires = now + timedelta(seconds=lease_seconds)
 
     from sqlalchemy.orm import aliased
@@ -1006,7 +1006,7 @@ async def complete_work_item(
     wi = result.scalar_one_or_none()
     if not wi:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Work item not runnable or already finished.")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if wi.lease_expires_at and wi.lease_expires_at < now:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lease expired; please re-claim the work item.")
     ok = await update_work_item_status(
@@ -1050,7 +1050,7 @@ async def fail_work_item(
     wi = result.scalar_one_or_none()
     if not wi:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Work item not runnable or already finished.")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if wi.lease_expires_at and wi.lease_expires_at < now:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lease expired; please re-claim the work item.")
     retrying = payload.retry and wi.attempt + 1 < wi.max_attempts

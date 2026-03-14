@@ -1,5 +1,7 @@
 # Runtime Foundation Spec (v1) — Prompt2PR Software Factory
 
+See also: `docs/agent-runtime-vision-roadmap.md`. The roadmap is the current product-level reference for durable bootstrap, truthful runtime UX, and the phased path from manual proof loop to deeper automation. This document remains the narrower runtime implementation baseline.
+
 ## Goal
 Turn the current “manual run controls” into a real execution runtime that is:
 - deterministic  

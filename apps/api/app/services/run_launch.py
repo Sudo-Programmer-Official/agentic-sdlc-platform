@@ -169,25 +169,28 @@ async def launch_run_for_project(
 
     bind = session.get_bind()
     is_sqlite = bind is not None and bind.dialect.name == "sqlite"
+    run_id = run.id
+    project_id = run.project_id
 
     if schedule:
         orchestrator = RunOrchestrator(SessionLocal, executor_name=run.executor)
         try:
             await orchestrator.bootstrap_in_session(
                 session,
-                run.id,
+                run_id,
                 actor_type=actor_type,
                 actor_id=actor_id,
                 executor_name=run.executor,
             )
         except Exception:
-            log.exception("Run bootstrap failed run_id=%s project_id=%s", run.id, run.project_id)
+            await session.rollback()
+            log.exception("Run bootstrap failed run_id=%s project_id=%s", run_id, project_id)
             raise
         await session.refresh(run)
         if not is_sqlite:
             _schedule_orchestrator_start(
                 orchestrator,
-                run_id=run.id,
+                run_id=run_id,
                 actor_type=actor_type,
                 actor_id=actor_id,
                 executor_name=run.executor,
@@ -195,8 +198,8 @@ async def launch_run_for_project(
         else:
             log.info(
                 "Run execution handoff deferred run_id=%s project_id=%s reason=sqlite_test_session",
-                run.id,
-                run.project_id,
+                run_id,
+                project_id,
             )
 
     return run

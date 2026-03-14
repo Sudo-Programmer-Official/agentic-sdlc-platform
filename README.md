@@ -14,9 +14,11 @@ clear boundaries for future service extraction.
 
 ## Docs
 - `docs/ARCHITECTURE.md`: architecture overview, module boundaries, and run lifecycle diagram
+- `docs/agent-runtime-vision-roadmap.md`: north-star roadmap for durable runs, Mission Control truthfulness, and the GitHub proof loop
 - `docs/ai-routing-cost-control.md`: routing rules, budgets, retries, cache policy, and AI ops dashboard
 - `docs/architecture/knowledge-verification-subsystem.md`: engineering memory review/publish flow
 - `docs/knowledge-verification-subsystem.md`: developer guide for the knowledge subsystem
+- `docs/runtime-foundation-spec.md`: runtime execution primitives, orchestrator rules, and event model baseline
 - `docs/task-run-execution-flow.md`: explicit task-to-run binding for manually created tasks and operator run flow
 
 ## Status

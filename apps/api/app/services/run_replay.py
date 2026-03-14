@@ -185,16 +185,19 @@ async def fork_run(
     await session.refresh(forked_run)
 
     if start_now:
+        run_id = forked_run.id
+        project_id = forked_run.project_id
         orchestrator = RunOrchestrator(SessionLocal, executor_name=forked_run.executor)
         try:
             await orchestrator.bootstrap_in_session(
                 session,
-                forked_run.id,
+                run_id,
                 actor_type="USER",
                 executor_name=forked_run.executor,
             )
         except Exception:
-            log.exception("Run bootstrap failed for replay run_id=%s project_id=%s", forked_run.id, forked_run.project_id)
+            await session.rollback()
+            log.exception("Run bootstrap failed for replay run_id=%s project_id=%s", run_id, project_id)
             raise
         await session.refresh(forked_run)
         bind = session.get_bind()
@@ -202,7 +205,7 @@ async def fork_run(
         if not is_sqlite:
             _schedule_orchestrator_start(
                 orchestrator,
-                run_id=forked_run.id,
+                run_id=run_id,
                 actor_type="USER",
                 actor_id=None,
                 executor_name=forked_run.executor,
@@ -210,8 +213,8 @@ async def fork_run(
         else:
             log.info(
                 "Run execution handoff deferred run_id=%s project_id=%s reason=sqlite_test_session",
-                forked_run.id,
-                forked_run.project_id,
+                run_id,
+                project_id,
             )
 
     return forked_run

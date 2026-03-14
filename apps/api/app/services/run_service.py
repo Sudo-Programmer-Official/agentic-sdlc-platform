@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 from uuid import uuid4
@@ -349,9 +349,9 @@ class RunService:
             )
 
         if to_status == RunStatus.RUNNING and run.started_at is None:
-            run.started_at = datetime.utcnow()
+            run.started_at = datetime.now(timezone.utc)
         if to_status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED}:
-            run.finished_at = datetime.utcnow()
+            run.finished_at = datetime.now(timezone.utc)
 
         run.status = to_status
         self._store.update(run)
@@ -377,7 +377,7 @@ class RunService:
         if task is None or run is None:
             return
         task.status = TaskStatus.RUNNING
-        task.started_at = datetime.utcnow()
+        task.started_at = datetime.now(timezone.utc)
         self._task_service.update_task(task)
         if context.logger:
             context.logger.log(
@@ -412,7 +412,7 @@ class RunService:
                         details={"task_id": task.task_id, "path": str(output_path)},
                     )
             task.status = TaskStatus.DONE
-            task.finished_at = datetime.utcnow()
+            task.finished_at = datetime.now(timezone.utc)
             self._task_service.update_task(task)
             if context.logger:
                 context.logger.log(
@@ -427,7 +427,7 @@ class RunService:
         except Exception as exc:
             task.status = TaskStatus.FAILED
             task.error = str(exc)
-            task.finished_at = datetime.utcnow()
+            task.finished_at = datetime.now(timezone.utc)
             self._task_service.update_task(task)
             if context.logger:
                 context.logger.log(

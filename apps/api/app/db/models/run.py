@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Text, JSON, func
+from sqlalchemy import DateTime, String, Text, JSON, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +24,6 @@ class Run(TimestampMixin, Base):
     branch_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     workspace_status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
     workspace_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)

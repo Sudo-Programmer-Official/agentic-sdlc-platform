@@ -6,6 +6,52 @@ const DEFAULT_API_BASE = import.meta.env.DEV
 
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
+export function createEmptyRepoMap(message = "No local repo workspace is available yet. Start a repo-backed run first.") {
+  return {
+    source_type: "workspace",
+    repo_root: "",
+    repo_full_name: null,
+    branch_name: null,
+    total_files: 0,
+    indexed_symbols: 0,
+    dependency_edges: 0,
+    test_links: 0,
+    snapshot_indexed_at: null,
+    directories: [],
+    top_features: [],
+    files: [],
+    ready: false,
+    setup_state: "WORKSPACE_REQUIRED",
+    message,
+  };
+}
+
+export function createEmptyProjectPreviewProfile(message = "Preview profile not configured yet.") {
+  return {
+    configured: false,
+    message,
+    enabled: true,
+    mode: "local",
+    frontend_root: null,
+    backend_root: null,
+    compose_file: null,
+    frontend_build_command: null,
+    backend_build_command: null,
+    frontend_start_command: null,
+    backend_start_command: null,
+    frontend_healthcheck_path: "/",
+    backend_healthcheck_path: "/",
+    frontend_port: null,
+    backend_port: null,
+    env_overrides: {},
+    ttl_hours: 24,
+    max_previews_per_project: null,
+    created_by: null,
+    created_at: null,
+    updated_at: null,
+  };
+}
+
 export type CreateTaskPayload = {
   title: string;
   description?: string | null;
@@ -179,7 +225,7 @@ export async function fetchRepoMap(projectId: string, limit = 180) {
   try {
     return await parseApiResponse(resp);
   } catch (err) {
-    if (isApiErrorStatus(err, 409)) return null;
+    if (isApiErrorStatus(err, 409)) return createEmptyRepoMap((err as any)?.message);
     throw err;
   }
 }
@@ -231,7 +277,7 @@ export async function fetchProjectPreviewProfile(projectId: string) {
   try {
     return await parseApiResponse(resp);
   } catch (err) {
-    if (isApiErrorStatus(err, 404)) return null;
+    if (isApiErrorStatus(err, 404)) return createEmptyProjectPreviewProfile((err as any)?.message);
     throw err;
   }
 }

@@ -60,9 +60,9 @@
       </MetricCard>
       <MetricCard
         label="Repository Map"
-        :value="repoMap?.total_files ?? 0"
-        :detail="`${repoMap?.directories?.length || 0} directories · ${repoMap?.top_features?.length || 0} focus areas`"
-        tone="success"
+        :value="repoMapReady ? (repoMap?.total_files ?? 0) : 'Setup'"
+        :detail="repoMapMetricDetail"
+        :tone="repoMapReady ? 'success' : 'warning'"
       >
         <template #icon><AppIcon name="map" size="lg" /></template>
       </MetricCard>
@@ -255,16 +255,18 @@
 
       <div class="space-y-4">
         <div class="premium-card operator-panel p-6">
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <div class="text-sm uppercase tracking-wide text-slate-400">Repository Map</div>
-              <div class="text-xs text-slate-500">
-                Keep the AI grounded in the architecture: subsystems, directories, top files, and mapped features.
-              </div>
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <div class="text-sm uppercase tracking-wide text-slate-400">Repository Map</div>
+            <div class="text-xs text-slate-500">
+              Keep the AI grounded in the architecture: subsystems, directories, top files, and mapped features.
             </div>
-            <el-tag effect="light" type="success">{{ repoMap?.source_type || "workspace" }}</el-tag>
           </div>
-          <div v-if="repoMap" class="mt-4 space-y-4">
+          <el-tag effect="light" :type="repoMapReady ? 'success' : 'warning'">
+            {{ repoMapReady ? (repoMap?.source_type || "workspace") : "SETUP NEEDED" }}
+          </el-tag>
+        </div>
+          <div v-if="repoMapReady" class="mt-4 space-y-4">
             <div>
               <div class="text-xs uppercase tracking-wide text-slate-400">Top Features</div>
               <div class="mt-3 flex flex-wrap gap-2">
@@ -297,8 +299,17 @@
               </div>
             </div>
           </div>
-          <div v-else class="premium-empty mt-4">
-            Repo map unavailable. Connect a repo and run a repo-backed execution to populate architecture context.
+          <div v-else class="premium-empty mt-4 space-y-3">
+            <div class="font-semibold text-slate-800">{{ repoMapSetupTitle }}</div>
+            <div>{{ repoMapMetricDetail }}</div>
+            <div class="flex flex-wrap gap-2">
+              <el-button size="small" plain @click="goToOverview">
+                {{ projectRepo ? "Project Overview" : "Connect Repo" }}
+              </el-button>
+              <el-button size="small" type="primary" plain @click="goToMissionControl">
+                Execution View
+              </el-button>
+            </div>
           </div>
         </div>
 
@@ -311,17 +322,26 @@
               </div>
             </div>
             <div class="flex gap-2">
-              <el-tag effect="light" :type="previewProfile?.enabled ? 'success' : 'warning'">
-                {{ previewProfile?.enabled ? "PROFILE READY" : "PROFILE NEEDED" }}
+              <el-tag effect="light" :type="previewProfileConfigured ? 'success' : 'warning'">
+                {{ previewProfileConfigured ? "PROFILE READY" : "PROFILE NEEDED" }}
               </el-tag>
               <el-button plain size="small" @click="openPreviewProfileDialog">
-                {{ previewProfile ? "Edit Profile" : "Configure" }}
+                {{ previewProfileConfigured ? "Edit Profile" : "Configure" }}
               </el-button>
             </div>
           </div>
           <div class="mt-4 space-y-3 text-sm text-slate-600">
+            <div
+              v-if="!previewProfileConfigured"
+              class="rounded-xl border border-sky-200 bg-sky-50 px-3 py-3 text-xs text-sky-700"
+            >
+              <div class="font-semibold text-sky-900">Preview profile not configured yet.</div>
+              <div class="mt-1">
+                {{ previewProfileSetupMessage }}
+              </div>
+            </div>
             <div><strong>Run:</strong> {{ selectedRun ? shortenId(selectedRun.id) : "—" }}</div>
-            <div><strong>Status:</strong> {{ selectedRunPreview?.status || "NOT_CONFIGURED" }}</div>
+            <div><strong>Status:</strong> {{ previewDeliveryStatus }}</div>
             <div><strong>Mode:</strong> {{ selectedRunPreview?.mode || previewProfile?.mode || "local" }}</div>
             <div v-if="selectedRunPreview?.frontend?.url"><strong>Frontend:</strong> <a :href="selectedRunPreview.frontend.url" target="_blank" rel="noreferrer" class="underline">{{ selectedRunPreview.frontend.url }}</a></div>
             <div v-if="selectedRunPreview?.backend?.url"><strong>Backend:</strong> <a :href="selectedRunPreview.backend.url" target="_blank" rel="noreferrer" class="underline">{{ selectedRunPreview.backend.url }}</a></div>
@@ -339,7 +359,7 @@
                 type="primary"
                 size="small"
                 :loading="previewLaunchLoading"
-                :disabled="!selectedRun?.id || !previewProfile?.enabled || Boolean(selectedRunPreview?.requires_verification)"
+                :disabled="!selectedRun?.id || !previewProfileConfigured || !previewProfile?.enabled || Boolean(selectedRunPreview?.requires_verification)"
                 @click="startSelectedRunPreview"
               >
                 {{ selectedRunPreview?.preview_url ? "Refresh Preview" : "Launch Preview" }}
@@ -504,6 +524,9 @@ type RepoMapResponse = {
   directories: string[];
   top_features: string[];
   files: RepoMapFile[];
+  ready?: boolean;
+  setup_state?: string | null;
+  message?: string | null;
 };
 
 type RunTimelineResponse = {
@@ -557,6 +580,8 @@ type AgentRecord = {
 };
 
 type PreviewProfileRecord = {
+  configured?: boolean;
+  message?: string | null;
   enabled: boolean;
   mode?: string;
   frontend_root?: string | null;
@@ -636,6 +661,29 @@ const completedTaskCount = computed(
 );
 const activeRunCount = computed(() => runs.value.filter((run) => ["RUNNING", "QUEUED"].includes(String(run.status || "").toUpperCase())).length);
 const completedRunCount = computed(() => runs.value.filter((run) => String(run.status || "").toUpperCase() === "COMPLETED").length);
+const repoMapReady = computed(() => Boolean(repoMap.value && repoMap.value.ready !== false));
+const repoMapSetupTitle = computed(() => {
+  if (!projectRepo.value) return "No repository connected yet.";
+  return "No repo workspace yet.";
+});
+const repoMapMetricDetail = computed(() => {
+  if (repoMapReady.value) {
+    return `${repoMap.value?.directories?.length || 0} directories · ${repoMap.value?.top_features?.length || 0} focus areas`;
+  }
+  if (!projectRepo.value) {
+    return "Connect a repository, then start a repo-backed run to build the map.";
+  }
+  return repoMap.value?.message || "Start a repo-backed run to build the map.";
+});
+const previewProfileConfigured = computed(() => Boolean(previewProfile.value && previewProfile.value.configured !== false));
+const previewProfileSetupMessage = computed(
+  () => previewProfile.value?.message || "Configure the project roots and launch commands once to enable preview delivery."
+);
+const previewDeliveryStatus = computed(() => {
+  if (selectedRunPreview.value?.status) return selectedRunPreview.value.status;
+  if (!previewProfileConfigured.value) return "PROFILE_NEEDED";
+  return "READY_TO_LAUNCH";
+});
 
 const visibleTasks = computed(() => {
   const taskRows = tasks.value.slice(0, 4).map((task) => ({

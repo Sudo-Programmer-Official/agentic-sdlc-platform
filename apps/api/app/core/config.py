@@ -3,10 +3,69 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import List
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/agentic_sdlc"
+VALID_ASYNCPG_SSLMODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+ASYNCPG_SSLMODE_ALIASES = {
+    "required": "require",
+    "enabled": "require",
+    "true": "require",
+    "1": "require",
+    "on": "require",
+    "disabled": "disable",
+    "false": "disable",
+    "0": "disable",
+    "off": "disable",
+}
+ASYNCPG_SSL_ALIASES = {
+    "enabled": "require",
+    "true": "require",
+    "1": "require",
+    "on": "require",
+    "false": "disable",
+    "0": "disable",
+    "off": "disable",
+}
+
+
+def normalize_database_url(value: str) -> str:
+    raw_value = str(value)
+    try:
+        url = make_url(raw_value)
+    except Exception:
+        return raw_value
+
+    if not url.drivername.endswith("+asyncpg"):
+        return raw_value
+
+    sslmode = url.query.get("sslmode")
+    ssl = url.query.get("ssl")
+    normalized_query_updates: dict[str, str] = {}
+
+    if sslmode is not None:
+        normalized_sslmode = str(sslmode).lower()
+        if normalized_sslmode in VALID_ASYNCPG_SSLMODES:
+            normalized_query_value = normalized_sslmode
+        else:
+            normalized_query_value = ASYNCPG_SSLMODE_ALIASES.get(normalized_sslmode)
+        if normalized_query_value is not None and normalized_query_value != sslmode:
+            normalized_query_updates["sslmode"] = normalized_query_value
+
+    if ssl is not None and sslmode is None:
+        normalized_ssl = ASYNCPG_SSL_ALIASES.get(str(ssl).lower())
+        if normalized_ssl is not None:
+            normalized_query_updates["sslmode"] = normalized_ssl
+
+    if not normalized_query_updates:
+        return raw_value
+
+    return url.difference_update_query(["ssl"]).update_query_dict(normalized_query_updates).render_as_string(
+        hide_password=False
+    )
 
 
 class Settings(BaseSettings):
@@ -86,6 +145,11 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url_value(cls, value: str) -> str:
+        return normalize_database_url(value)
 
     model_config = SettingsConfigDict(env_file=(".env", "apps/api/.env"), extra="ignore")
 

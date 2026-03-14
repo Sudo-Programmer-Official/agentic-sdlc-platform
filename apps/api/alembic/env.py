@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 from pathlib import Path
 from logging.config import fileConfig
@@ -58,7 +57,7 @@ target_metadata = Base.metadata
 
 def get_url() -> str:
     settings = get_settings()
-    return os.getenv("DATABASE_URL", settings.database_url)
+    return settings.database_url
 
 
 def run_migrations_offline() -> None:

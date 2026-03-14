@@ -1,4 +1,4 @@
-from app.core.config import Settings
+from app.core.config import Settings, normalize_database_url
 
 
 def test_settings_read_apps_api_env_file(monkeypatch, tmp_path):
@@ -17,3 +17,15 @@ def test_settings_read_apps_api_env_file(monkeypatch, tmp_path):
 
     assert settings.openai_api_key == "test-key"
     assert settings.database_url == "postgresql+asyncpg://user:pass@db:5432/app"
+
+
+def test_settings_normalize_asyncpg_sslmode_alias():
+    settings = Settings(database_url="postgresql+asyncpg://user:pass@db:5432/app?sslmode=required")
+
+    assert settings.database_url == "postgresql+asyncpg://user:pass@db:5432/app?sslmode=require"
+
+
+def test_normalize_database_url_leaves_unknown_sslmode_unchanged():
+    database_url = "postgresql+asyncpg://user:pass@db:5432/app?sslmode=custom-value"
+
+    assert normalize_database_url(database_url) == database_url

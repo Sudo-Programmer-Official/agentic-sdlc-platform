@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 
@@ -29,6 +30,27 @@ def _build_task_run_summary(task: Task) -> dict[str, str | None]:
         "task_description": description,
         "task_source": task.source,
     }
+
+
+def _schedule_orchestrator_start(
+    orchestrator: RunOrchestrator,
+    *,
+    run_id: uuid.UUID,
+    actor_type: str,
+    actor_id: str | None,
+    executor_name: str,
+) -> None:
+    task = asyncio.create_task(
+        orchestrator.start(run_id, actor_type=actor_type, actor_id=actor_id, executor_name=executor_name)
+    )
+
+    def _log_result(completed: asyncio.Task[None]) -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            exc = completed.exception()
+            if exc is not None:
+                log.exception("Run orchestration failed run_id=%s", run_id, exc_info=exc)
+
+    task.add_done_callback(_log_result)
 
 
 async def launch_run_for_project(
@@ -146,10 +168,35 @@ async def launch_run_for_project(
     await session.refresh(run)
 
     bind = session.get_bind()
-    should_schedule = schedule and not (bind is not None and bind.dialect.name == "sqlite")
+    is_sqlite = bind is not None and bind.dialect.name == "sqlite"
 
-    if should_schedule:
+    if schedule:
         orchestrator = RunOrchestrator(SessionLocal, executor_name=run.executor)
-        asyncio.create_task(orchestrator.start(run.id, actor_type=actor_type, actor_id=actor_id, executor_name=run.executor))
+        try:
+            await orchestrator.bootstrap_in_session(
+                session,
+                run.id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                executor_name=run.executor,
+            )
+        except Exception:
+            log.exception("Run bootstrap failed run_id=%s project_id=%s", run.id, run.project_id)
+            raise
+        await session.refresh(run)
+        if not is_sqlite:
+            _schedule_orchestrator_start(
+                orchestrator,
+                run_id=run.id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                executor_name=run.executor,
+            )
+        else:
+            log.info(
+                "Run execution handoff deferred run_id=%s project_id=%s reason=sqlite_test_session",
+                run.id,
+                run.project_id,
+            )
 
     return run

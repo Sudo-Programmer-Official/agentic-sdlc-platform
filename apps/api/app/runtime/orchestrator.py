@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -22,6 +23,8 @@ from app.core.config import get_settings
 from app.services.task_decomposition import persist_run_task_decomposition
 from app.services.workspace_supervisor import build_run_context, ensure_run_workspace
 
+log = logging.getLogger("app.runtime.orchestrator")
+
 
 class RunOrchestrator:
     """Drives a run end-to-end using a provided executor."""
@@ -31,19 +34,43 @@ class RunOrchestrator:
         self.executor = executor or get_executor(executor_name)
         self.settings = get_settings()
 
-    async def start(self, run_id: uuid.UUID, actor_type: str = "SYSTEM", actor_id: str | None = None, executor_name: str | None = None) -> None:
-        # Step 1: transition run to RUNNING if still QUEUED
+    async def bootstrap(
+        self,
+        run_id: uuid.UUID,
+        actor_type: str = "SYSTEM",
+        actor_id: str | None = None,
+        executor_name: str | None = None,
+    ) -> bool:
         async with self.session_factory() as session:
-            run = await self._load_run_for_update(session, run_id)
-            if run is None or run.status != "QUEUED":
-                return
-            if executor_name:
-                self.executor = get_executor(executor_name)
+            return await self.bootstrap_in_session(
+                session,
+                run_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                executor_name=executor_name,
+            )
+
+    async def bootstrap_in_session(
+        self,
+        session: AsyncSession,
+        run_id: uuid.UUID,
+        actor_type: str = "SYSTEM",
+        actor_id: str | None = None,
+        executor_name: str | None = None,
+    ) -> bool:
+        if executor_name:
+            self.executor = get_executor(executor_name)
+
+        run = await self._load_run_for_update(session, run_id)
+        if run is None or run.status in {"COMPLETED", "FAILED", "CANCELED"}:
+            return False
+
+        if run.status == "QUEUED":
             await ensure_run_workspace(session, run)
             now = datetime.now(timezone.utc)
             previous = run.status
             run.status = "RUNNING"
-            run.started_at = now
+            run.started_at = run.started_at or now
             await record_event(
                 session,
                 project_id=run.project_id,
@@ -54,69 +81,106 @@ class RunOrchestrator:
                 payload={"previous": previous, "new": "RUNNING"},
             )
             await session.commit()
-
-        # Step 2: ensure DAG exists
-        async with self.session_factory() as session:
-            run = await session.get(Run, run_id)
-            if run is None:
-                return
-            selected_task_id = None
-            if isinstance(run.summary, dict):
-                selected_task_id = run.summary.get("task_id")
-            work_item_count = await generate_template_dag(
-                session,
-                project_id=run.project_id,
-                run_id=run_id,
-                executor=self.executor.name,
-                tenant_id=run.tenant_id,
-                run_summary=run.summary,
-            )
-            snapshot = await persist_run_plan_snapshot(session, run)
-            decomposition = await persist_run_task_decomposition(session, run)
-            await record_event(
-                session,
-                project_id=run.project_id,
-                run_id=run.id,
-                event_type="WORK_DAG_CREATED",
-                actor_type=actor_type,
-                tenant_id=run.tenant_id,
-                task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
-                payload={"work_item_count": work_item_count, "task_id": selected_task_id},
-            )
-            await record_event(
-                session,
-                project_id=run.project_id,
-                run_id=run.id,
-                event_type="RUN_PLAN_CAPTURED",
-                actor_type=actor_type,
-                actor_id=actor_id,
-                tenant_id=run.tenant_id,
-                task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
-                payload={
-                    "task_id": selected_task_id,
-                    "goal": snapshot.get("goal"),
-                    "step_count": len(snapshot.get("steps", [])),
-                    "validation_steps": snapshot.get("validation_steps", []),
-                },
-            )
-            await record_event(
-                session,
-                project_id=run.project_id,
-                run_id=run.id,
-                event_type="RUN_TASK_DECOMPOSED",
-                actor_type=actor_type,
-                actor_id=actor_id,
-                tenant_id=run.tenant_id,
-                task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
-                payload={
-                    "task_id": selected_task_id,
-                    "goal": decomposition.get("goal"),
-                    "template_key": decomposition.get("template_key"),
-                    "subtask_count": len(decomposition.get("subtasks", [])),
-                    "risk_level": decomposition.get("risk_level"),
-                },
-            )
+        else:
+            await ensure_run_workspace(session, run)
             await session.commit()
+
+        existing_work_item_id = await session.scalar(select(WorkItem.id).where(WorkItem.run_id == run_id).limit(1))
+        if existing_work_item_id:
+            return True
+
+        run = await session.get(Run, run_id)
+        if run is None:
+            return False
+
+        log.info("Run bootstrap started run_id=%s project_id=%s executor=%s", run.id, run.project_id, self.executor.name)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="RUN_BOOTSTRAP_STARTED",
+            actor_type=actor_type,
+            actor_id=actor_id,
+            tenant_id=run.tenant_id,
+            payload={"executor": self.executor.name, "status": run.status},
+        )
+        await session.flush()
+
+        selected_task_id = None
+        if isinstance(run.summary, dict):
+            selected_task_id = run.summary.get("task_id")
+        work_item_count = await generate_template_dag(
+            session,
+            project_id=run.project_id,
+            run_id=run_id,
+            executor=self.executor.name,
+            tenant_id=run.tenant_id,
+            run_summary=run.summary,
+        )
+        snapshot = await persist_run_plan_snapshot(session, run)
+        decomposition = await persist_run_task_decomposition(session, run)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="WORK_DAG_CREATED",
+            actor_type=actor_type,
+            tenant_id=run.tenant_id,
+            task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
+            payload={"work_item_count": work_item_count, "task_id": selected_task_id},
+        )
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="RUN_PLAN_CAPTURED",
+            actor_type=actor_type,
+            actor_id=actor_id,
+            tenant_id=run.tenant_id,
+            task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
+            payload={
+                "task_id": selected_task_id,
+                "goal": snapshot.get("goal"),
+                "step_count": len(snapshot.get("steps", [])),
+                "validation_steps": snapshot.get("validation_steps", []),
+            },
+        )
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="RUN_TASK_DECOMPOSED",
+            actor_type=actor_type,
+            actor_id=actor_id,
+            tenant_id=run.tenant_id,
+            task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
+            payload={
+                "task_id": selected_task_id,
+                "goal": decomposition.get("goal"),
+                "template_key": decomposition.get("template_key"),
+                "subtask_count": len(decomposition.get("subtasks", [])),
+                "risk_level": decomposition.get("risk_level"),
+            },
+        )
+        log.info(
+            "Run bootstrap seeded work items run_id=%s project_id=%s work_item_count=%s executor=%s",
+            run.id,
+            run.project_id,
+            work_item_count,
+            self.executor.name,
+        )
+        await session.commit()
+        return True
+
+    async def start(self, run_id: uuid.UUID, actor_type: str = "SYSTEM", actor_id: str | None = None, executor_name: str | None = None) -> None:
+        bootstrapped = await self.bootstrap(
+            run_id,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            executor_name=executor_name,
+        )
+        if not bootstrapped:
+            return
 
         # Step 3: scheduler loop
         max_conc = max(1, self.settings.max_workitem_concurrency)
@@ -124,6 +188,31 @@ class RunOrchestrator:
 
         async with self.session_factory() as session:
             use_external_runtime = await self._should_use_external_runtime(session, run_id, actor_type, actor_id)
+            run = await session.get(Run, run_id)
+            if run is None:
+                return
+            effective_mode = "external" if use_external_runtime else "embedded"
+            log.info(
+                "Run execution handoff run_id=%s project_id=%s requested_mode=%s effective_mode=%s",
+                run.id,
+                run.project_id,
+                self.settings.runtime_mode,
+                effective_mode,
+            )
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                event_type="RUN_EXECUTION_HANDOFF",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                tenant_id=run.tenant_id,
+                payload={
+                    "requested_mode": self.settings.runtime_mode,
+                    "effective_mode": effective_mode,
+                },
+            )
+            await session.commit()
             while True:
                 await session.commit()
                 # refresh run status

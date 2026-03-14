@@ -37,7 +37,7 @@ def _event_status(event_type: str) -> str:
         return "success"
     if "RECOVERY" in upper or "RETRIED" in upper:
         return "recovery"
-    if upper.endswith("RUNNING") or upper.endswith("STARTED") or upper.endswith("CLAIMED"):
+    if upper.endswith("RUNNING") or upper.endswith("STARTED") or upper.endswith("CLAIMED") or upper.endswith("HANDOFF"):
         return "running"
     if "CANCELED" in upper or "FALLBACK" in upper:
         return "warning"
@@ -49,7 +49,9 @@ def _event_title(event: RunEvent, work_item: WorkItem | None) -> str:
     label = _work_item_label(work_item)
     mapping = {
         "RUN_CREATED": "Run created",
+        "RUN_BOOTSTRAP_STARTED": "Planner bootstrap started",
         "RUN_PLAN_CAPTURED": "Run plan captured",
+        "RUN_EXECUTION_HANDOFF": "Execution handoff decided",
         "RUN_RUNNING": "Run started",
         "RUN_COMPLETED": "Run completed",
         "RUN_FAILED": "Run failed",

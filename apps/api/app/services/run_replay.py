@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import copy
+import logging
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,7 +14,10 @@ from app.runtime.orchestrator import RunOrchestrator
 from app.db.session import SessionLocal
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
+from app.services.run_launch import _schedule_orchestrator_start
 from app.services.workspace_supervisor import ensure_run_workspace
+
+log = logging.getLogger("app.run_replay")
 
 
 def _fork_branch_name(source_run: Run, override: str | None) -> str:
@@ -183,6 +186,32 @@ async def fork_run(
 
     if start_now:
         orchestrator = RunOrchestrator(SessionLocal, executor_name=forked_run.executor)
-        asyncio.create_task(orchestrator.start(forked_run.id, actor_type="USER", executor_name=forked_run.executor))
+        try:
+            await orchestrator.bootstrap_in_session(
+                session,
+                forked_run.id,
+                actor_type="USER",
+                executor_name=forked_run.executor,
+            )
+        except Exception:
+            log.exception("Run bootstrap failed for replay run_id=%s project_id=%s", forked_run.id, forked_run.project_id)
+            raise
+        await session.refresh(forked_run)
+        bind = session.get_bind()
+        is_sqlite = bind is not None and bind.dialect.name == "sqlite"
+        if not is_sqlite:
+            _schedule_orchestrator_start(
+                orchestrator,
+                run_id=forked_run.id,
+                actor_type="USER",
+                actor_id=None,
+                executor_name=forked_run.executor,
+            )
+        else:
+            log.info(
+                "Run execution handoff deferred run_id=%s project_id=%s reason=sqlite_test_session",
+                forked_run.id,
+                forked_run.project_id,
+            )
 
     return forked_run

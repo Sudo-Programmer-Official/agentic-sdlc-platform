@@ -104,6 +104,8 @@ async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db
             )
         ).scalars().all()
         event_types = [event.event_type for event in events]
+        assert "RUN_BOOTSTRAP_STARTED" in event_types
+        assert "RUN_EXECUTION_HANDOFF" in event_types
         assert "RUN_RUNNING" in event_types
         assert "WORK_DAG_CREATED" in event_types
         assert "RUN_PLAN_CAPTURED" in event_types
@@ -222,6 +224,8 @@ async def test_external_mode_falls_back_to_embedded_when_no_workers_exist(monkey
             )
         ).scalars().all()
         event_types = [event.event_type for event in events]
+        assert "RUN_BOOTSTRAP_STARTED" in event_types
+        assert "RUN_EXECUTION_HANDOFF" in event_types
         assert "RUN_RUNTIME_FALLBACK" in event_types
         fallback = next(event for event in events if event.event_type == "RUN_RUNTIME_FALLBACK")
         assert fallback.payload == {
@@ -229,6 +233,44 @@ async def test_external_mode_falls_back_to_embedded_when_no_workers_exist(monkey
             "effective_mode": "embedded",
             "reason": "no_active_workers",
         }
+
+
+@pytest.mark.anyio
+async def test_launch_run_bootstraps_work_items_before_background_execution(monkeypatch, runtime_db, tmp_path):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Bootstrapped launch project", tenant_id=tenant_id)
+        session.add(project)
+        await session.commit()
+
+        run = await launch_run_for_project(
+            session,
+            tenant_id=tenant_id,
+            project_id=project.id,
+            executor_name="dummy",
+            schedule=True,
+        )
+        run_id = run.id
+
+        work_items = (
+            await session.execute(select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at.asc()))
+        ).scalars().all()
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+
+        assert run.status == "RUNNING"
+        assert len(work_items) == 7
+        assert any(event.event_type == "RUN_BOOTSTRAP_STARTED" for event in events)
+        assert any(event.event_type == "RUN_RUNNING" for event in events)
+        assert any(event.event_type == "WORK_DAG_CREATED" for event in events)
 
 
 @pytest.mark.anyio

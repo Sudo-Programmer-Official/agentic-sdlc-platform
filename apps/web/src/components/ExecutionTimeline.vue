@@ -31,7 +31,7 @@
         <div class="absolute left-4 top-0 h-full w-px bg-[var(--border-soft)]" />
         <div
           class="absolute left-[9px] top-5 h-3 w-3 rounded-full"
-          :style="stepTone(step.state)"
+          :style="stepDotTone(step.state)"
         />
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="min-w-0 flex-1">
@@ -44,7 +44,7 @@
               <strong>Next:</strong> {{ step.next }}
             </div>
           </div>
-          <span class="topbar-chip" :style="stepTone(step.state)">
+          <span class="topbar-chip" :style="stepBadgeTone(step.state)">
             {{ step.state }}
           </span>
         </div>
@@ -108,9 +108,18 @@ const steps = computed(() => {
       because = `Run created for stage ${log.stage} to execute work under governance.`;
       next = "Prepare workspace and begin scheduled tasks.";
       state = "CREATED";
+    } else if (message === "Planner bootstrap started") {
+      because = "The planner is now narrowing scope and seeding the initial execution DAG.";
+      next = "Wait for work items to appear in the queue.";
+      state = "RUNNING";
     } else if (message === "Run started") {
       because = "Execution began and agents can now claim work.";
       next = tasks.length ? "Watch the next ready work item start." : "Wait for planner output.";
+      state = "RUNNING";
+    } else if (message === "Execution handoff decided") {
+      const effectiveMode = details.effective_mode || "embedded";
+      because = `Bootstrap completed and the run was handed off to the ${effectiveMode} runtime path.`;
+      next = effectiveMode === "external" ? "Wait for a worker to claim the next ready item." : "Watch the runtime execute the next ready item.";
       state = "RUNNING";
     } else if (message === "Run completed") {
       because = "All required tasks finished successfully.";
@@ -254,21 +263,52 @@ function deriveWaitingStep(tasks: Array<any>, runStatus?: string, currentStage?:
     return {
       timestamp: "Now",
       title: "Waiting on planner",
-      because: `Run is queued for stage ${currentStage || "current"} and no work items exist yet.`,
-      next: "Wait for planning output or start with a new intake action.",
+      because: `Planner has not created work items for stage ${currentStage || "current"} yet, so execution cannot start.`,
+      next: "Wait for planner bootstrap or retry the run if this state does not clear.",
       state: "WAITING",
+    };
+  }
+
+  if (runStatus === "RUNNING" && tasks.length === 0) {
+    return {
+      timestamp: "Now",
+      title: "Planner bootstrap in progress",
+      because: "The run has started, but the planner is still seeding the initial work items.",
+      next: "Wait for the DAG to appear or inspect bootstrap logs if this state lingers.",
+      state: "RUNNING",
     };
   }
 
   return null;
 }
 
-function stepTone(state: string) {
-  if (state === "RUNNING") return { background: "var(--warning)", color: "var(--warning)" };
-  if (state === "COMPLETED") return { background: "var(--success)", color: "var(--success)" };
-  if (state === "FAILED" || state === "BLOCKED") return { background: "var(--danger)", color: "var(--danger)" };
-  if (state === "RECOVERY") return { background: "#8b7dff", color: "#8b7dff" };
-  return { background: "var(--accent)", color: "var(--accent)" };
+function statePalette(state: string) {
+  if (state === "RUNNING") {
+    return { solid: "var(--warning)", soft: "rgba(245, 158, 11, 0.14)" };
+  }
+  if (state === "COMPLETED") {
+    return { solid: "var(--success)", soft: "rgba(34, 197, 94, 0.14)" };
+  }
+  if (state === "FAILED" || state === "BLOCKED") {
+    return { solid: "var(--danger)", soft: "rgba(239, 68, 68, 0.14)" };
+  }
+  if (state === "RECOVERY") {
+    return { solid: "#8b7dff", soft: "rgba(139, 125, 255, 0.14)" };
+  }
+  return { solid: "var(--accent)", soft: "rgba(91, 156, 255, 0.14)" };
+}
+
+function stepDotTone(state: string) {
+  return { background: statePalette(state).solid };
+}
+
+function stepBadgeTone(state: string) {
+  const palette = statePalette(state);
+  return {
+    background: palette.soft,
+    borderColor: palette.soft,
+    color: palette.solid,
+  };
 }
 
 function summaryStyle(type: string) {

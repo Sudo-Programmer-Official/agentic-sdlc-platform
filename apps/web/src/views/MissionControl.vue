@@ -1714,7 +1714,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import AgentPanel from "../components/AgentPanel.vue";
@@ -1936,7 +1936,8 @@ const runStatusTone = computed<"neutral" | "success" | "warning" | "danger">(() 
   return "neutral";
 });
 
-let pollHandle: ReturnType<typeof setInterval> | null = null;
+let pollHandle: ReturnType<typeof setTimeout> | null = null;
+let pollDelayMs: number | null = null;
 let pollInFlight = false;
 
 const displayWorkItems = computed(() =>
@@ -2123,7 +2124,16 @@ watch(
   { immediate: true }
 );
 
+onMounted(() => {
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", syncPolling);
+  }
+});
+
 onBeforeUnmount(() => {
+  if (typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", syncPolling);
+  }
   stopPolling();
 });
 
@@ -2397,21 +2407,41 @@ async function refreshRuntime() {
 }
 
 function syncPolling() {
-  const shouldPoll = ["QUEUED", "RUNNING"].includes(latestRun.value?.status || "");
-  if (shouldPoll && pollHandle === null) {
-    pollHandle = setInterval(() => {
-      void refreshRuntime();
-    }, 3000);
-  } else if (!shouldPoll && pollHandle !== null) {
+  const intervalMs = pollIntervalMs();
+  if (intervalMs === null) {
     stopPolling();
+    return;
   }
+  if (pollHandle !== null && pollDelayMs === intervalMs) {
+    return;
+  }
+  stopPolling();
+  pollDelayMs = intervalMs;
+  pollHandle = setTimeout(async () => {
+    pollHandle = null;
+    pollDelayMs = null;
+    await refreshRuntime();
+  }, intervalMs);
 }
 
 function stopPolling() {
   if (pollHandle !== null) {
-    clearInterval(pollHandle);
+    clearTimeout(pollHandle);
     pollHandle = null;
   }
+  pollDelayMs = null;
+}
+
+function pollIntervalMs() {
+  const status = latestRun.value?.status || "";
+  if (status !== "QUEUED" && status !== "RUNNING") {
+    return null;
+  }
+  const hidden = typeof document !== "undefined" && document.hidden;
+  if (status === "QUEUED") {
+    return hidden ? 15000 : 12000;
+  }
+  return hidden ? 10000 : 6000;
 }
 
 async function startRunFromIntake(item: any) {
@@ -2915,11 +2945,13 @@ function normalizeTimelineStatus(status?: string | null) {
 function mapEventMessage(eventType: string, title?: string) {
   const itemTitle = title || "Work item";
   if (eventType === "RUN_CREATED") return "Run created";
+  if (eventType === "RUN_BOOTSTRAP_STARTED") return "Planner bootstrap started";
   if (eventType === "RUN_RUNNING") return "Run started";
   if (eventType === "RUN_COMPLETED") return "Run completed";
   if (eventType === "RUN_FAILED") return "Run failed";
   if (eventType === "RUN_CANCELED") return "Run canceled";
   if (eventType === "RUN_FORKED") return "Run forked";
+  if (eventType === "RUN_EXECUTION_HANDOFF") return "Execution handoff decided";
   if (eventType === "WORK_DAG_CREATED") return "Work DAG created";
   if (eventType === "WORK_ITEM_CREATED") return `Task ${itemTitle} created`;
   if (eventType === "WORK_ITEM_CLAIMED") return `Task ${itemTitle} claimed`;

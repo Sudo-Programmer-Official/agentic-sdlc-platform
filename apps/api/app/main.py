@@ -68,7 +68,14 @@ def create_app() -> FastAPI:
     async def unhandled_exception_handler(request, exc):
         """Log and surface a short error id for faster prod debugging."""
         error_id = uuid.uuid4().hex[:8]
-        log.exception("Unhandled error id=%s path=%s", error_id, request.url.path, exc_info=exc)
+        log.exception(
+            "Unhandled error id=%s path=%s type=%s error=%s",
+            error_id,
+            request.url.path,
+            type(exc).__name__,
+            exc,
+            exc_info=exc,
+        )
         return JSONResponse(
             status_code=500,
             content={"error": "internal_server_error", "error_id": error_id},

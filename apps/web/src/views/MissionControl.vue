@@ -306,9 +306,13 @@
               </div>
               <div class="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
                 <div><strong>Verified files:</strong> {{ runNarrative.verification.verified_files?.join(", ") || "—" }}</div>
+                <div><strong>Actual files:</strong> {{ runNarrative.verification.actual_files?.join(", ") || "—" }}</div>
                 <div><strong>Nearest tests:</strong> {{ runNarrative.verification.nearest_tests?.join(", ") || "—" }}</div>
                 <div><strong>File budget:</strong> {{ runNarrative.verification.file_count }}/{{ runNarrative.verification.max_files }}</div>
                 <div><strong>Depth budget:</strong> {{ runNarrative.verification.scope_depth }}/{{ runNarrative.verification.max_dependency_depth }}</div>
+                <div><strong>Scope match:</strong> {{ verificationScopeLabel(runNarrative.verification.scope_match) }}</div>
+                <div><strong>Extra files:</strong> {{ runNarrative.verification.extra_files?.join(", ") || "—" }}</div>
+                <div><strong>Missing planned files:</strong> {{ runNarrative.verification.missing_files?.join(", ") || "—" }}</div>
               </div>
               <div v-if="runNarrative.verification.findings?.length" class="mt-3 space-y-2">
                 <div
@@ -1738,6 +1742,7 @@ import {
   fetchProjectMeta,
   fetchRunTimeline,
   findSimilarRuns,
+  hasRunMemorySearchContext,
   forkRun,
   launchRunPreview,
   listApprovals,
@@ -2342,7 +2347,8 @@ async function loadSimilarRuns() {
     (typeof summary.strategy_goal === "string" && summary.strategy_goal.trim()) ||
     "";
   const errorText = latestErrorHint.value?.trim() || "";
-  if (!projectId.value || !latestRun.value?.id || (!goal && !errorText)) {
+  const files = Array.isArray(summary.changed_files) ? summary.changed_files.filter((file: any) => typeof file === "string" && file.trim()) : [];
+  if (!projectId.value || !latestRun.value?.id || !hasRunMemorySearchContext({ goal, error: errorText, files })) {
     runMemoryLoading.value = false;
     runMemoryResult.value = null;
     runMemoryError.value = "";
@@ -2354,7 +2360,7 @@ async function loadSimilarRuns() {
     runMemoryResult.value = await findSimilarRuns(projectId.value, {
       goal: goal || undefined,
       error: errorText || undefined,
-      files: [],
+      files,
       limit: 5,
     });
   } catch (err: any) {
@@ -2859,6 +2865,12 @@ function verificationFindingTagType(severity?: string | null) {
   if (severity === "high") return "danger";
   if (severity === "warning") return "warning";
   return "info";
+}
+
+function verificationScopeLabel(scopeMatch?: boolean | null) {
+  if (scopeMatch === true) return "Matched";
+  if (scopeMatch === false) return "Drifted";
+  return "Unknown";
 }
 
 function timelineStatusTagType(status?: string | null) {

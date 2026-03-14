@@ -83,9 +83,11 @@ a {
 
 .app-shell {
   min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: var(--shell-grid);
   background: transparent;
+  overflow: hidden;
 }
 
 .app-sidebar {
@@ -95,6 +97,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  overflow-y: auto;
   padding: 1.4rem 1rem;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 18%),
@@ -251,8 +254,11 @@ a {
 
 .app-content {
   min-width: 0;
+  min-height: 0;
+  height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .app-header {
@@ -272,6 +278,8 @@ a {
 }
 
 .app-main {
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 1.5rem;
 }
 
@@ -881,12 +889,20 @@ a {
 
 @media (max-width: 1080px) {
   .app-shell {
+    height: auto;
     grid-template-columns: 1fr;
+    overflow: visible;
   }
 
   .app-sidebar {
     position: static;
     height: auto;
+    overflow: visible;
+  }
+
+  .app-content {
+    height: auto;
+    overflow: visible;
   }
 
   .app-header {

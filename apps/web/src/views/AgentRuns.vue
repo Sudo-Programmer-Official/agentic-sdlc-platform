@@ -293,6 +293,7 @@ import {
   fetchProjectMeta,
   fetchRunTimeline,
   findSimilarRuns,
+  hasRunMemorySearchContext,
   listRuns,
 } from "../api/lifecycle";
 import { updateProjectContext } from "../state/projectContext";
@@ -435,10 +436,17 @@ async function loadSimilarRuns() {
   }
   memoryError.value = "";
   try {
-    const payload = await findSimilarRuns(projectId.value, {
+    const memoryQuery = {
       goal: selectedTimeline.value.summary.goal_text || undefined,
       error: selectedTimeline.value.summary.primary_error || undefined,
       files: selectedTimeline.value.summary.changed_files || [],
+    };
+    if (!hasRunMemorySearchContext(memoryQuery)) {
+      similarRuns.value = [];
+      return;
+    }
+    const payload = await findSimilarRuns(projectId.value, {
+      ...memoryQuery,
       limit: 4,
     });
     similarRuns.value = Array.isArray(payload?.matches)

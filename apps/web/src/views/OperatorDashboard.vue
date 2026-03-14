@@ -470,8 +470,8 @@ import {
   fetchRunPreview,
   fetchRunTimeline,
   findSimilarRuns,
+  hasRunMemorySearchContext,
   launchRunPreview,
-  listAgents,
   listRuns,
   listTasks,
   saveProjectPreviewProfile,
@@ -731,25 +731,24 @@ async function loadDashboard() {
   loading.value = true;
   error.value = "";
   try {
-    const [projectResp, taskResp, runResp, overviewResp, repoMapResp, repoResp, profileResp, agentResp] = await Promise.all([
+    const [projectResp, taskResp, runResp, overviewResp, repoMapResp, repoResp, profileResp] = await Promise.all([
       fetchProjectMeta(projectId.value),
       listTasks(projectId.value).catch(() => []),
       listRuns(projectId.value).catch(() => []),
       fetchMissionControlOverview(projectId.value).catch(() => null),
-      fetchRepoMap(projectId.value).catch(() => null),
-      fetchProjectRepo(projectId.value).catch(() => null),
-      fetchProjectPreviewProfile(projectId.value).catch(() => null),
-      listAgents().catch(() => []),
+      fetchRepoMap(projectId.value),
+      fetchProjectRepo(projectId.value),
+      fetchProjectPreviewProfile(projectId.value),
     ]);
 
     project.value = projectResp;
     tasks.value = Array.isArray(taskResp) ? taskResp : [];
     runs.value = Array.isArray(runResp) ? runResp : [];
     overview.value = overviewResp;
-    repoMap.value = repoMapResp;
-    projectRepo.value = repoResp;
-    previewProfile.value = profileResp;
-    workers.value = Array.isArray(agentResp) ? agentResp.filter((agent: AgentRecord) => agent.kind === "worker") : [];
+    repoMap.value = repoMapResp || null;
+    projectRepo.value = repoResp || null;
+    previewProfile.value = profileResp || null;
+    workers.value = [];
     previewProfileError.value = "";
 
     updateProjectContext({
@@ -791,12 +790,19 @@ async function loadRunDetail(runId: string) {
     } else {
       selectedDiff.value = null;
     }
-    similarRuns.value = await findSimilarRuns(projectId.value, {
+    const memoryQuery = {
       goal: timeline?.summary?.goal_text || "",
       error: timeline?.summary?.primary_error || "",
       files: timeline?.summary?.changed_files || [],
-      limit: 3,
-    }).catch(() => []);
+    };
+    if (hasRunMemorySearchContext(memoryQuery)) {
+      similarRuns.value = await findSimilarRuns(projectId.value, {
+        ...memoryQuery,
+        limit: 3,
+      }).catch(() => []);
+    } else {
+      similarRuns.value = [];
+    }
   } catch (err: any) {
     selectedTimeline.value = null;
     selectedRunPreview.value = null;

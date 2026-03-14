@@ -49,6 +49,9 @@ EXPECTED_COMMANDS_BY_TYPE = {
     "REVIEW_INTEGRATION": ["review integration"],
 }
 
+_SINGULAR_PATH_KEYS = ("file", "filepath", "path", "target_file")
+_LIST_PATH_KEYS = ("files", "expected_files")
+
 
 def _humanize_token(token: str) -> str:
     return token.replace("_", " ").replace("-", " ").strip().title()
@@ -72,9 +75,25 @@ def _goal_for_run(run: Run) -> str | None:
     return None
 
 
+def _expected_files_for_payload(payload: dict | None) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    files: list[str] = []
+    for key in _SINGULAR_PATH_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            files.append(value.strip())
+    for key in _LIST_PATH_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list):
+            files.extend(str(path).strip() for path in value if isinstance(path, str) and path.strip())
+    return list(dict.fromkeys(files))
+
+
 def build_plan_snapshot(run: Run, work_items: list[WorkItem]) -> dict:
     steps = []
     for item in work_items:
+        expected_files = _expected_files_for_payload(item.payload)
         steps.append(
             {
                 "id": str(item.id),
@@ -83,7 +102,7 @@ def build_plan_snapshot(run: Run, work_items: list[WorkItem]) -> dict:
                 "status": item.status,
                 "rationale": RATIONALE_BY_TYPE.get(item.type, "Carry the run forward with the next bounded step."),
                 "success_criteria": SUCCESS_CRITERIA_BY_TYPE.get(item.type, ["Step completes without runtime errors."]),
-                "expected_files": [],
+                "expected_files": expected_files,
                 "expected_commands": EXPECTED_COMMANDS_BY_TYPE.get(item.type, []),
                 "work_item_id": str(item.id),
                 "work_item_type": item.type,
@@ -97,13 +116,16 @@ def build_plan_snapshot(run: Run, work_items: list[WorkItem]) -> dict:
     expected_commands = list(
         dict.fromkeys(command for step in steps for command in step["expected_commands"])
     )
+    expected_files = list(
+        dict.fromkeys(path for step in steps for path in step["expected_files"])
+    )
     validation_steps = [step["title"] for step in steps if step["phase"] in {"verify", "review"}]
 
     return {
         "goal": _goal_for_run(run),
         "rationale": "Execute a bounded run plan, validate the patch, and only hand work off once review signals are readable.",
         "success_criteria": success_criteria,
-        "expected_files": [],
+        "expected_files": expected_files,
         "expected_commands": expected_commands,
         "validation_steps": validation_steps,
         "risk_level": "LOW",

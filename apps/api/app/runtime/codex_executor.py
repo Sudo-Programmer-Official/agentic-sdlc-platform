@@ -5,15 +5,23 @@ from pathlib import Path
 from typing import Any
 import re
 
+from app.db.models import Run, WorkItem
+from app.db.session import SessionLocal
 from app.runtime.executor import TaskExecutor, TaskResult
 from app.runtime.context import RunContext
+from app.runtime.patch_guard import (
+    build_patch_guard_meta,
+    derive_allowed_files,
+    evaluate_patch_guard,
+    has_mutating_actions,
+)
 from app.runtime.schemas.executor_io import CodexPlan
 from app.runtime.llm.openai_client import OpenAIClient
 from app.runtime.tools.repo_tools import RepoTools
 from app.core.config import get_settings
 from app.runtime.tools.redaction import SECRET_PATTERNS
-from app.db.models import WorkItem
-from app.db.session import SessionLocal
+from app.schemas.run_narrative import RunPatchVerificationSummary
+from app.services.patch_verification import build_run_patch_plan_and_verification
 from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_context, compact_graph_context
 from app.services.workspace_supervisor import workspace_uri
 
@@ -48,6 +56,12 @@ class CodexExecutor(TaskExecutor):
 
         context_bundle = self._build_context(repo, work_item)
         context_bundle.setdefault("meta", {})
+        allowed_files = derive_allowed_files(
+            work_item_id=str(work_item.id),
+            work_item_type=work_item.type,
+            payload=work_item.payload,
+            plan_snapshot=context.plan_snapshot,
+        )
         context_bundle["meta"]["workspace"] = {
             "workspace_root": context.workspace_root,
             "repo_path": context.repo_path,
@@ -76,6 +90,7 @@ class CodexExecutor(TaskExecutor):
                     if isinstance(step, dict)
                 ],
             }
+        context_bundle["meta"]["patch_guard"] = build_patch_guard_meta(context, allowed_files)
         graph_context = await self._load_graph_context(work_item)
         if graph_context:
             context_bundle["graph_context"] = graph_context
@@ -129,6 +144,31 @@ class CodexExecutor(TaskExecutor):
                     "payload": {"raw": raw},
                     "warnings": ["schema_validation_failed"],
                 }
+
+        patch_guard = evaluate_patch_guard(actions=plan.actions, allowed_files=allowed_files)
+        verification = await self._load_patch_verification(work_item, context)
+        if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):
+            return {
+                "status": "FAILED",
+                "message": "Patch execution requires operator confirmation before mutating the repository.",
+                "payload": {
+                    "actions": [a.model_dump() for a in plan.actions],
+                    "verification": verification.model_dump(),
+                    "touched_files": patch_guard.touched_files,
+                },
+                "warnings": ["requires_confirmation"],
+            }
+        if not patch_guard.ok:
+            return {
+                "status": "FAILED",
+                "message": "; ".join(patch_guard.violations),
+                "payload": {
+                    "actions": [a.model_dump() for a in plan.actions],
+                    "allowed_files": patch_guard.allowed_files,
+                    "touched_files": patch_guard.touched_files,
+                },
+                "warnings": ["patch_guard_violation"],
+            }
 
         # Apply actions
         total_written = 0
@@ -229,6 +269,12 @@ class CodexExecutor(TaskExecutor):
             "payload": {
                 "artifacts": artifacts,
                 "warnings": plan.warnings,
+                "patch_guard": {
+                    "allowed_files": patch_guard.allowed_files,
+                    "touched_files": patch_guard.touched_files,
+                    "file_budget": patch_guard.file_budget,
+                    "hard_file_budget": patch_guard.hard_file_budget,
+                },
                 "review": review_metrics,
                 "usage": usage,
             },
@@ -382,6 +428,42 @@ class CodexExecutor(TaskExecutor):
                     limits=EXECUTOR_CONTEXT_LIMITS,
                 )
             return compact_graph_context(context)
+        except Exception:
+            return None
+
+    async def _load_patch_verification(
+        self,
+        work_item: WorkItem,
+        context: RunContext,
+    ) -> RunPatchVerificationSummary | None:
+        plan_snapshot = context.plan_snapshot if isinstance(context.plan_snapshot, dict) else {}
+        planned_files = [
+            path
+            for path in plan_snapshot.get("expected_files", [])
+            if isinstance(path, str) and path.strip()
+        ]
+        planned_steps = [
+            step.get("title")
+            for step in plan_snapshot.get("steps", [])
+            if isinstance(step, dict) and isinstance(step.get("title"), str) and step.get("title").strip()
+        ]
+        goal = plan_snapshot.get("goal")
+        confidence_score = plan_snapshot.get("confidence_score")
+        try:
+            async with SessionLocal() as session:
+                run = await session.get(Run, context.run_id)
+                if run is None:
+                    return None
+                _, verification = await build_run_patch_plan_and_verification(
+                    session,
+                    tenant_id=work_item.tenant_id,
+                    run=run,
+                    goal=goal if isinstance(goal, str) and goal.strip() else None,
+                    planned_steps=planned_steps,
+                    planned_files=planned_files,
+                    confidence_score=confidence_score if isinstance(confidence_score, (int, float)) else None,
+                )
+                return verification
         except Exception:
             return None
 

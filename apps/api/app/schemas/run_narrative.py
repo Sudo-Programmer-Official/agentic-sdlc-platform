@@ -67,6 +67,10 @@ class RunPatchVerificationSummary(BaseModel):
     max_dependency_depth: int = 2
     nearest_tests: list[str] = Field(default_factory=list)
     verified_files: list[str] = Field(default_factory=list)
+    actual_files: list[str] = Field(default_factory=list)
+    extra_files: list[str] = Field(default_factory=list)
+    missing_files: list[str] = Field(default_factory=list)
+    scope_match: bool | None = None
     findings: list[RunPatchVerificationFinding] = Field(default_factory=list)
     suggested_next_action: str | None = None
 

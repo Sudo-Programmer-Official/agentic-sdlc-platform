@@ -218,6 +218,10 @@ async def test_run_narrative_returns_plan_reflections_and_working_context(db_ses
     assert data["verification"]["requires_confirmation"] is True
     assert data["verification"]["risk_level"] == "HIGH"
     assert data["verification"]["verified_files"] == ["app/auth.py"]
+    assert data["verification"]["actual_files"] == ["app/auth.py"]
+    assert data["verification"]["extra_files"] == []
+    assert data["verification"]["missing_files"] == []
+    assert data["verification"]["scope_match"] is True
     assert any(finding["code"] == "sensitive_scope" for finding in data["verification"]["findings"])
 
     failed_reflection = next(item for item in data["reflections"] if item["title"] == "Run auth tests")

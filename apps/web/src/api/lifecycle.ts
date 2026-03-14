@@ -1,37 +1,10 @@
+import { isApiErrorStatus, parseApiResponse } from "./http";
+
 const DEFAULT_API_BASE = import.meta.env.DEV
   ? "http://localhost:8000/api/v1"
   : "https://api.prompt2pr.com/api/v1";
 
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
-
-async function parseResponse(resp: Response) {
-  if (resp.ok) return resp.json();
-
-  let payload: any = null;
-  try {
-    payload = await resp.json();
-  } catch {
-    payload = null;
-  }
-
-  const detail = payload?.detail;
-  const error = payload?.error;
-  const errorId = payload?.error_id;
-
-  let message = "Request failed";
-  if (typeof detail === "string" && detail) {
-    message = detail;
-  } else if (Array.isArray(detail) && detail.length) {
-    message = detail.map((item) => item?.msg || JSON.stringify(item)).join(", ");
-  } else if (typeof error === "string" && error) {
-    message = errorId ? `${error} (${errorId})` : error;
-  } else {
-    const text = await resp.text().catch(() => "");
-    if (text) message = text;
-  }
-
-  throw new Error(message);
-}
 
 export type CreateTaskPayload = {
   title: string;
@@ -135,7 +108,7 @@ export async function previewImpact(projectId: string, documentId: string, propo
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ proposed_body: proposedBody })
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function regenerateTasks(projectId: string, documentId: string, force = false) {
@@ -144,12 +117,12 @@ export async function regenerateTasks(projectId: string, documentId: string, for
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function listTasks(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/tasks`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function createTask(projectId: string, payload: CreateTaskPayload) {
@@ -158,32 +131,37 @@ export async function createTask(projectId: string, payload: CreateTaskPayload) 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function explainTask(projectId: string, taskId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/tasks/${taskId}/explain`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function listActivity(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/activity`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchProjectMeta(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchMissionControlOverview(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/mission-control/overview`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchRepoMap(projectId: string, limit = 180) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/repo-map?limit=${encodeURIComponent(String(limit))}`);
-  return parseResponse(resp);
+  try {
+    return await parseApiResponse(resp);
+  } catch (err) {
+    if (isApiErrorStatus(err, 409)) return null;
+    throw err;
+  }
 }
 
 export async function updateProjectStage(projectId: string, toStage: string) {
@@ -192,12 +170,12 @@ export async function updateProjectStage(projectId: string, toStage: string) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ to_stage: toStage })
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function listDocuments(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/documents`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function createDocument(projectId: string, payload: CreateDocumentPayload) {
@@ -206,12 +184,17 @@ export async function createDocument(projectId: string, payload: CreateDocumentP
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchProjectRepo(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/repo`);
-  return parseResponse(resp);
+  try {
+    return await parseApiResponse(resp);
+  } catch (err) {
+    if (isApiErrorStatus(err, 404)) return null;
+    throw err;
+  }
 }
 
 export async function connectProjectRepo(projectId: string, payload: ConnectRepoPayload) {
@@ -220,12 +203,17 @@ export async function connectProjectRepo(projectId: string, payload: ConnectRepo
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchProjectPreviewProfile(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/preview-profile`);
-  return parseResponse(resp);
+  try {
+    return await parseApiResponse(resp);
+  } catch (err) {
+    if (isApiErrorStatus(err, 404)) return null;
+    throw err;
+  }
 }
 
 export async function saveProjectPreviewProfile(projectId: string, payload: PreviewProfilePayload) {
@@ -234,7 +222,7 @@ export async function saveProjectPreviewProfile(projectId: string, payload: Prev
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function listApprovals(
@@ -249,7 +237,7 @@ export async function listApprovals(
   if (filters.target_id) query.set("target_id", filters.target_id);
   const suffix = query.toString() ? `?${query.toString()}` : "";
   const resp = await fetch(`${API_BASE}/projects/${projectId}/approvals${suffix}`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function createApproval(projectId: string, payload: CreateApprovalPayload) {
@@ -258,13 +246,13 @@ export async function createApproval(projectId: string, payload: CreateApprovalP
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 // Runs
 export async function listRuns(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function createRun(projectId: string, executor = "dummy") {
@@ -273,7 +261,7 @@ export async function createRun(projectId: string, executor = "dummy") {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ executor }),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function updateRunStatus(runId: string, status: string) {
@@ -282,7 +270,7 @@ export async function updateRunStatus(runId: string, status: string) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status })
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function forkRun(
@@ -299,7 +287,7 @@ export async function forkRun(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function createRunPullRequest(
@@ -316,12 +304,12 @@ export async function createRunPullRequest(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchRunPreview(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/preview`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function launchRunPreview(
@@ -335,21 +323,21 @@ export async function launchRunPreview(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function deleteRunPreview(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/preview`, {
     method: "DELETE",
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function compareRuns(runA: string, runB: string) {
   const resp = await fetch(
     `${API_BASE}/runs/compare?run_a=${encodeURIComponent(runA)}&run_b=${encodeURIComponent(runB)}`
   );
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function createRunStrategies(
@@ -368,22 +356,33 @@ export async function createRunStrategies(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchRunStrategies(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/strategies`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchRunTimeline(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/timeline`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchRunNarrative(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/narrative`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
+}
+
+export function hasRunMemorySearchContext(payload: {
+  goal?: string;
+  error?: string;
+  files?: string[];
+}) {
+  const goal = typeof payload.goal === "string" ? payload.goal.trim() : "";
+  const error = typeof payload.error === "string" ? payload.error.trim() : "";
+  const files = Array.isArray(payload.files) ? payload.files.filter((file) => typeof file === "string" && file.trim()) : [];
+  return Boolean(goal || error || files.length);
 }
 
 export async function findSimilarRuns(
@@ -395,71 +394,83 @@ export async function findSimilarRuns(
     limit?: number;
   }
 ) {
+  const goal = typeof payload.goal === "string" ? payload.goal.trim() : "";
+  const error = typeof payload.error === "string" ? payload.error.trim() : "";
+  const files = Array.isArray(payload.files) ? payload.files.filter((file) => typeof file === "string" && file.trim()) : [];
+
+  if (!hasRunMemorySearchContext({ goal, error, files })) {
+    return {
+      matches: [],
+      limit: payload.limit || 0,
+      query: { goal: goal || null, error: error || null, files },
+    };
+  }
+
   const query = new URLSearchParams();
-  if (payload.goal) query.set("goal", payload.goal);
-  if (payload.error) query.set("error", payload.error);
-  for (const file of payload.files || []) {
-    if (file) query.append("file", file);
+  if (goal) query.set("goal", goal);
+  if (error) query.set("error", error);
+  for (const file of files) {
+    query.append("file", file);
   }
   if (payload.limit) query.set("limit", String(payload.limit));
   const resp = await fetch(`${API_BASE}/projects/${projectId}/runs/memory?${query.toString()}`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchHealth(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/health`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchLifecycleScore(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/lifecycle-score`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchLifecycleScoreHistory(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/lifecycle-score-history`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 // Work items / DAG / events
 export async function listWorkItems(projectId: string, runId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/runs/${runId}/work-items`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function getWorkDag(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/work-dag`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function listRunEvents(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/events`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function listAgents() {
   const resp = await fetch(`${API_BASE}/agents`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function listArtifacts(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/artifacts`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function explainArtifact(projectId: string, artifactId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/artifacts/${artifactId}/explain`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchArtifactDiff(projectId: string, artifactId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/artifacts/${artifactId}/diff`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function fetchArtifactContextByUri(projectId: string, uri: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/artifacts/context?uri=${encodeURIComponent(uri)}`);
-  return parseResponse(resp);
+  return parseApiResponse(resp);
 }
 
 export async function sendOperatorMessage(payload: OperatorMessagePayload) {
@@ -468,5 +479,5 @@ export async function sendOperatorMessage(payload: OperatorMessagePayload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return parseResponse(resp) as Promise<OperatorResponse>;
+  return parseApiResponse(resp) as Promise<OperatorResponse>;
 }

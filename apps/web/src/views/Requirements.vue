@@ -40,6 +40,13 @@
       />
     </div>
 
+    <div
+      v-if="graph && !frNodes.length && !qrNodes.length && !edges.length"
+      class="rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-700"
+    >
+      No requirements graph exists yet. Paste a PRD above or add FR/QR nodes manually to start the graph.
+    </div>
+
     <div v-if="graph" class="grid gap-4 lg:grid-cols-2">
       <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-3">
         <div class="flex items-center justify-between">

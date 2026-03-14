@@ -10,6 +10,7 @@ from app.db.models import Artifact, Run, RunEvent, WorkItem
 from app.schemas.persistence import RunOut
 from app.schemas.run_narrative import (
     RunNarrativeResponse,
+    RunPatchVerificationFinding,
     RunTaskDecomposition,
     RunPlanSnapshot,
     RunPlanStep,
@@ -401,6 +402,28 @@ async def build_run_narrative(
         planned_files=list(plan.expected_files or []),
         confidence_score=plan.confidence_score,
     )
+    planned_scope = {
+        *patch_plan.primary_files,
+        *patch_plan.dependent_files,
+        *patch_plan.related_tests,
+    }
+    actual_files = sorted(changed_files)
+    extra_files = sorted(set(actual_files) - planned_scope) if planned_scope else []
+    missing_files = sorted(set(patch_plan.primary_files) - set(actual_files))
+    verification.actual_files = actual_files
+    verification.extra_files = extra_files
+    verification.missing_files = missing_files
+    verification.scope_match = None if not actual_files else not extra_files
+    if extra_files:
+        verification.findings.append(
+            RunPatchVerificationFinding(
+                code="scope_drift",
+                severity="high",
+                title="Patch drifted beyond the planned scope",
+                detail="The final changed files exceeded the planned patch envelope and should be reviewed before approval.",
+                files=extra_files[:8],
+            )
+        )
 
     task_decomposition = RunTaskDecomposition.model_validate(
         stored_decomposition if isinstance(stored_decomposition, dict) else build_task_decomposition(run, work_items)

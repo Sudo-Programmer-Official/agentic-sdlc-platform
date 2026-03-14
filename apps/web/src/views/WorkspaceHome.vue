@@ -7,7 +7,7 @@
         Create governed SDLC runs, connect repositories, track healing paths, and turn engineering goals into reviewable outcomes.
       </p>
       <div class="mt-6 flex flex-wrap gap-3">
-        <el-button type="primary" size="large" :loading="loading" @click="createProject">
+        <el-button type="primary" size="large" :loading="loading" @click="handlePrimaryCreateAction">
           Create Project
         </el-button>
         <el-button size="large" plain @click="focusProjectInput">
@@ -32,7 +32,7 @@
     </section>
 
     <section class="grid gap-4 xl:grid-cols-[1.1fr,1fr]">
-      <div class="premium-card p-6">
+      <div ref="createProjectSection" class="premium-card p-6">
         <div class="flex items-center justify-between">
           <div>
             <div class="text-sm uppercase tracking-wide text-slate-400">Create Project</div>
@@ -41,11 +41,14 @@
           <span class="topbar-chip">New</span>
         </div>
         <div class="mt-5 grid gap-3">
-          <el-input v-model="projectName" placeholder="Project name" />
+          <el-input ref="projectNameInput" v-model="projectName" placeholder="Project name" />
           <el-input v-model="projectDescription" placeholder="Describe the mission or product area" />
           <div class="flex flex-wrap gap-3">
             <el-button type="primary" :loading="loading" @click="createProject">Create Project</el-button>
             <el-button plain @click="seedDemoContent">Use Demo Values</el-button>
+          </div>
+          <div v-if="error" class="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-600">
+            {{ error }}
           </div>
         </div>
       </div>
@@ -117,16 +120,13 @@
         </div>
       </div>
     </section>
-
-    <div v-if="error" class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-600">
-      {{ error }}
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 
 import AppIcon from "../components/AppIcon.vue";
 import MetricCard from "../components/MetricCard.vue";
@@ -141,6 +141,8 @@ const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
 const router = useRouter();
 const projectIdInput = ref<any | null>(null);
+const projectNameInput = ref<any | null>(null);
+const createProjectSection = ref<HTMLElement | null>(null);
 const projectName = ref("");
 const projectDescription = ref("");
 const projectId = ref("");
@@ -190,6 +192,8 @@ async function hydrateEnvironment() {
 async function createProject() {
   if (!projectName.value.trim()) {
     error.value = "Project name is required.";
+    focusCreateProjectForm();
+    ElMessage.warning(error.value);
     return;
   }
   error.value = "";
@@ -236,6 +240,23 @@ function openProject() {
 
 function openKnownProject(id: string) {
   router.push(`/projects/${id}`);
+}
+
+function handlePrimaryCreateAction() {
+  if (!projectName.value.trim()) {
+    error.value = "Enter a project name to create a new workspace.";
+    focusCreateProjectForm();
+    ElMessage.warning(error.value);
+    return;
+  }
+  void createProject();
+}
+
+function focusCreateProjectForm() {
+  createProjectSection.value?.scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => {
+    projectNameInput.value?.focus?.();
+  }, 120);
 }
 
 function focusProjectInput() {

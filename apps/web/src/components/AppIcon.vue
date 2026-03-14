@@ -25,6 +25,8 @@
     <path v-else-if="name === 'mission'" d="M12 2l2.2 4.8L19 9l-4.8 2.2L12 16l-2.2-4.8L5 9l4.8-2.2z" />
     <path v-else-if="name === 'timeline'" d="M6 6v12M12 9v9M18 4v14" />
     <path v-else-if="name === 'approvals'" d="m5 13 4 4L19 7" />
+    <path v-else-if="name === 'knowledge'" d="M6 4h9a3 3 0 0 1 3 3v13H9a3 3 0 0 0-3-3z" />
+    <path v-if="name === 'knowledge'" d="M6 4v13a3 3 0 0 1 3 3M18 7h-6" />
     <path v-else-if="name === 'runs'" d="M5 7h14M5 12h9M5 17h6" />
     <path v-else-if="name === 'operator'" d="M8 8a4 4 0 1 1 8 0v1.8a2 2 0 0 0 .5 1.3l1.2 1.4A1.2 1.2 0 0 1 16.8 15H7.2a1.2 1.2 0 0 1-.9-2l1.2-1.4A2 2 0 0 0 8 9.8z" />
     <path v-if="name === 'operator'" d="M10 18h4M12 15v3M18.5 6.5 20 5M4 5l1.5 1.5M12 3V1.5" />

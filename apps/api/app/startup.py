@@ -6,6 +6,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from sqlalchemy.engine import make_url
 
 from app.core.config import Settings, get_settings
 
@@ -48,12 +49,39 @@ def build_alembic_config(settings: Settings | None = None) -> Config:
     return cfg
 
 
+def _safe_database_target(database_url: str) -> str:
+    try:
+        url = make_url(database_url)
+    except Exception:
+        return "<unparseable>"
+
+    host = url.host or "<local>"
+    port = url.port or "-"
+    database = url.database or "-"
+    return f"{url.drivername}://{host}:{port}/{database}"
+
+
 async def run_startup_migrations() -> None:
     settings = get_settings()
     if not settings.run_migrations_on_startup:
+        log.info("Startup migrations disabled.")
         return
 
     cfg = build_alembic_config(settings)
-    log.info("Applying database migrations before serving requests.")
-    await asyncio.to_thread(command.upgrade, cfg, "head")
+    database_target = _safe_database_target(settings.database_url)
+    log.info(
+        "Applying database migrations before serving requests config=%s database=%s",
+        cfg.config_file_name,
+        database_target,
+    )
+    try:
+        await asyncio.to_thread(command.upgrade, cfg, "head")
+    except Exception as exc:
+        log.error(
+            "Startup migration failed config=%s database=%s error=%s",
+            cfg.config_file_name,
+            database_target,
+            exc,
+        )
+        raise
     log.info("Database migrations are up to date.")

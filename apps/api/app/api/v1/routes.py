@@ -48,6 +48,7 @@ from app.services import (
     github_adapter,
     documentation_guard,
     github_store,
+    knowledge_service,
 )
 from app.services.vcs.github_store import GitHubIntegration
 from app.services.errors import (
@@ -707,7 +708,7 @@ def reject_change(change_id: str, payload: ChangeRequestDecision) -> ChangeReque
 
 
 @router.post("/webhooks/github")
-async def github_webhook(request: Request) -> dict:
+async def github_webhook(request: Request, session: AsyncSession = Depends(get_session)) -> dict:
     if github_adapter is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -719,12 +720,43 @@ async def github_webhook(request: Request) -> dict:
     if not github_adapter.verify_signature(body, signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
 
+    payload = await request.json()
     event = request.headers.get("X-GitHub-Event")
+    delivery_id = request.headers.get("X-GitHub-Delivery")
+
+    if event == "push":
+        created_events = await knowledge_service.ingest_github_push_events(
+            session,
+            payload=payload,
+            delivery_id=delivery_id,
+        )
+        for knowledge_event in created_events:
+            await knowledge_service.maybe_enqueue_analysis(session, knowledge_event.id)
+        return {
+            "status": "ok",
+            "event": "push",
+            "knowledge_events_created": len(created_events),
+        }
+
     if event != "pull_request":
         return {"status": "ignored", "reason": "event_not_supported"}
 
-    payload = await request.json()
     action = payload.get("action")
+    if action == "closed" and (payload.get("pull_request") or {}).get("merged") is True:
+        created_events = await knowledge_service.ingest_github_pr_merged_events(
+            session,
+            payload=payload,
+            delivery_id=delivery_id,
+        )
+        for knowledge_event in created_events:
+            await knowledge_service.maybe_enqueue_analysis(session, knowledge_event.id)
+        return {
+            "status": "ok",
+            "event": "pull_request",
+            "action": action,
+            "knowledge_events_created": len(created_events),
+        }
+
     if action not in {"opened", "synchronize", "reopened"}:
         return {"status": "ignored", "reason": f"action_{action}"}
 

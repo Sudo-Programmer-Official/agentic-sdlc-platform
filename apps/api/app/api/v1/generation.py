@@ -17,6 +17,7 @@ from app.api.v1.health import project_health
 from app.api.v1.lifecycle_score import lifecycle_score
 from app.services.llm_generator import LLMTaskGenerator
 from app.services.activity_log import log_activity
+from app.services.ai_policy import AIPolicyError
 
 router = APIRouter(prefix="/store", tags=["generation"])
 public_router = APIRouter(tags=["generation"])
@@ -62,8 +63,19 @@ async def generate_tasks(
             detail=f"Health index {lifecycle_score_resp['health_index']} below threshold {settings.health_regen_threshold}. Use force=true to regenerate.",
         )
 
-    generator = LLMTaskGenerator()
-    generated, prov = await generator.generate(doc.title, doc.body, payload)
+    generator = LLMTaskGenerator(session=session, tenant_id=doc.tenant_id, project_id=project_id, document_id=doc.id)
+    try:
+        generated, prov = await generator.generate(doc.title, doc.body, payload)
+    except AIPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": exc.reason,
+                "next_action": exc.next_action,
+                "job_id": str(exc.job_id) if exc.job_id else None,
+                **exc.details,
+            },
+        ) from exc
 
     # Find previous document version for deprecation flow
     prev_doc_stmt = (

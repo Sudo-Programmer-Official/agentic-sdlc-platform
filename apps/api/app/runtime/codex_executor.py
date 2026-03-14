@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from app.schemas.run_narrative import RunPatchVerificationSummary
 from app.services.patch_verification import build_run_patch_plan_and_verification
 from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_context, compact_graph_context
 from app.services.workspace_supervisor import workspace_uri
+from app.services.ai_policy import AIJobManager, AIJobRequest, contains_sensitive_paths, estimate_tokens, is_retryable_error, retry_error_kind
 
 
 SYSTEM_PROMPT = """You are an automated code change worker.
@@ -39,6 +41,7 @@ class CodexExecutor(TaskExecutor):
         self.settings = get_settings()
         self.repo_root = repo_root or Path.cwd()
         self._client: OpenAIClient | None = None
+        self._job_manager = AIJobManager()
         # Simple heuristic caps for patch size
         self.max_patch_lines = 2000
         self.max_patch_files = 50
@@ -94,6 +97,10 @@ class CodexExecutor(TaskExecutor):
         graph_context = await self._load_graph_context(work_item)
         if graph_context:
             context_bundle["graph_context"] = graph_context
+        job_request = self._build_ai_job_request(work_item, context_bundle, allowed_files)
+        cache_context = await self._job_manager.load_cached_context_fragments(job_request)
+        if cache_context.fragments:
+            context_bundle["meta"]["cached_context"] = cache_context.fragments
 
         # Adaptive patch ratio based on stage
         ratio = self.max_patch_ratio_default
@@ -120,34 +127,130 @@ class CodexExecutor(TaskExecutor):
                 "output_schema": CodexPlan.model_json_schema(),
             }
         )
-
-        raw, usage = await self._get_client().generate(SYSTEM_PROMPT, user_prompt)
+        filters_used = ["diff_narrowing", "stack_trace_extraction", "path_hint_lookup", "graph_context_lookup"]
+        if cache_context.fragments:
+            filters_used.append("cache_lookup")
+        prepared = await self._job_manager.prepare_job(
+            job_request,
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            filters_used=filters_used,
+            cache_hit_count=cache_context.cache_hits,
+            completion_token_estimate=self.settings.codex_max_tokens,
+            block_on_human_review=True,
+        )
+        if prepared.stop_reason:
+            return {
+                "status": "FAILED",
+                "message": prepared.stop_reason,
+                "payload": {
+                    "ai_job_id": str(prepared.job_id),
+                    "next_action": prepared.next_action,
+                    "estimated_cost_cents": prepared.estimated_cost_cents,
+                    "context_size": prepared.context_size,
+                },
+                "warnings": ["ai_policy_stop"],
+            }
 
         plan: CodexPlan | None = None
-        for attempt in range(2):
+        raw = ""
+        usage: dict[str, Any] = {}
+        current_user_prompt = user_prompt
+        parse_retry_used = False
+        for attempt in range(prepared.policy.max_retries + 1):
+            await self._job_manager.record_attempt(prepared.job_id)
             try:
+                raw, usage = await self._get_client().generate(
+                    SYSTEM_PROMPT,
+                    current_user_prompt,
+                    model=prepared.model_name or self.settings.codex_model,
+                    temperature=self.settings.codex_temperature,
+                    max_tokens=self.settings.codex_max_tokens,
+                    timeout=self.settings.codex_timeout_seconds,
+                )
                 data = json.loads(raw)
                 plan = CodexPlan.model_validate(data)
                 break
             except Exception as exc:
-                if attempt == 0:
-                    # retry with strict reminder
-                    raw, usage = await self._get_client().generate(
-                        SYSTEM_PROMPT,
-                        user_prompt
-                        + "\nYour previous output was invalid JSON. Respond with EXACTLY one JSON object matching the schema. No prose.",
+                parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
+                if parse_failure and not parse_retry_used and attempt < prepared.policy.max_retries:
+                    parse_retry_used = True
+                    await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
+                    current_user_prompt = (
+                        f"{user_prompt}\nYour previous output was invalid. Respond with EXACTLY one JSON object matching the schema. No prose."
                     )
                     continue
+                if not parse_failure and attempt < prepared.policy.max_retries and is_retryable_error(exc):
+                    await self._job_manager.record_retry(prepared.job_id, retry_error_kind(exc))
+                    await asyncio.sleep(min(2 ** attempt, 3))
+                    continue
+                failure_reason = "output_contract_invalid" if parse_failure else "model_call_failed"
+                await self._job_manager.fail_job(
+                    prepared.job_id,
+                    reason=failure_reason,
+                    next_action="Reduce scope, tighten context, or request human review before retrying.",
+                    error_kind="structured_parser_failure" if parse_failure else retry_error_kind(exc),
+                    input_tokens=int(usage.get("input_tokens") or 0),
+                    output_tokens=int(usage.get("output_tokens") or 0),
+                )
                 return {
                     "status": "FAILED",
-                    "message": f"Invalid model output after retry: {exc}",
-                    "payload": {"raw": raw},
-                    "warnings": ["schema_validation_failed"],
+                    "message": f"AI policy halted execution: {failure_reason}",
+                    "payload": {
+                        "raw": raw,
+                        "ai_job_id": str(prepared.job_id),
+                        "next_action": "Reduce scope, tighten context, or request human review before retrying.",
+                    },
+                    "warnings": ["ai_policy_stop"],
                 }
+
+        if plan is None:
+            return {
+                "status": "FAILED",
+                "message": "ai_plan_missing",
+                "payload": {"ai_job_id": str(prepared.job_id)},
+                "warnings": ["ai_policy_stop"],
+            }
+
+        usage_input_tokens = int(usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + current_user_prompt))
+        usage_output_tokens = int(usage.get("output_tokens") or estimate_tokens(raw))
+        if plan.confidence is not None and plan.confidence < self.settings.ai_low_confidence_threshold:
+            await self._job_manager.fail_job(
+                prepared.job_id,
+                reason="low_confidence_output",
+                next_action="Narrow the file set or request human review before applying the patch.",
+                error_kind="low_confidence_reasoning",
+                input_tokens=usage_input_tokens,
+                output_tokens=usage_output_tokens,
+                approval_state="pending",
+                status="blocked",
+                details={"confidence": plan.confidence},
+            )
+            return {
+                "status": "FAILED",
+                "message": "low_confidence_output",
+                "payload": {
+                    "confidence": plan.confidence,
+                    "ai_job_id": str(prepared.job_id),
+                    "next_action": "Narrow the file set or request human review before applying the patch.",
+                },
+                "warnings": ["requires_confirmation"],
+            }
 
         patch_guard = evaluate_patch_guard(actions=plan.actions, allowed_files=allowed_files)
         verification = await self._load_patch_verification(work_item, context)
         if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):
+            await self._job_manager.fail_job(
+                prepared.job_id,
+                reason="human_review_required",
+                next_action="Confirm the patch plan before allowing mutating actions.",
+                error_kind="human_review_required",
+                input_tokens=usage_input_tokens,
+                output_tokens=usage_output_tokens,
+                approval_state="pending",
+                status="blocked",
+                details={"verification": verification.model_dump()},
+            )
             return {
                 "status": "FAILED",
                 "message": "Patch execution requires operator confirmation before mutating the repository.",
@@ -159,6 +262,15 @@ class CodexExecutor(TaskExecutor):
                 "warnings": ["requires_confirmation"],
             }
         if not patch_guard.ok:
+            await self._job_manager.fail_job(
+                prepared.job_id,
+                reason="patch_guard_violation",
+                next_action="Reduce the touched file set or adjust the scoped plan before retrying.",
+                error_kind="patch_guard_violation",
+                input_tokens=usage_input_tokens,
+                output_tokens=usage_output_tokens,
+                details={"violations": patch_guard.violations},
+            )
             return {
                 "status": "FAILED",
                 "message": "; ".join(patch_guard.violations),
@@ -217,6 +329,15 @@ class CodexExecutor(TaskExecutor):
                 elif act.type == "note":
                     continue
         except Exception as exc:
+            await self._job_manager.fail_job(
+                prepared.job_id,
+                reason="action_error",
+                next_action="Inspect the generated patch and rerun with a narrower scope.",
+                error_kind="action_error",
+                input_tokens=usage_input_tokens,
+                output_tokens=usage_output_tokens,
+                details={"error": str(exc)},
+            )
             return {
                 "status": "FAILED",
                 "message": f"Action error: {exc}",
@@ -226,6 +347,14 @@ class CodexExecutor(TaskExecutor):
         # Budget enforcement
         total_tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
         if total_tokens and total_tokens > self.settings.codex_max_run_tokens:
+            await self._job_manager.fail_job(
+                prepared.job_id,
+                reason="run_budget_exceeded",
+                next_action="Reduce context or split the work item before retrying.",
+                error_kind="run_budget_exceeded",
+                input_tokens=usage_input_tokens,
+                output_tokens=usage_output_tokens,
+            )
             return {
                 "status": "FAILED",
                 "message": "run_budget_exceeded",
@@ -262,6 +391,26 @@ class CodexExecutor(TaskExecutor):
             review_metrics["patch_complexity"] = plan.patch_complexity
         if 'git_diff' in {a["type"] for a in artifacts}:
             review_metrics["patch_lines"] = changed_lines if 'changed_lines' in locals() else None
+        final_status = "completed" if plan.status in {"DONE", "SKIPPED"} else "failed"
+        if final_status == "completed":
+            await self._job_manager.complete_job(
+                prepared.job_id,
+                input_tokens=usage_input_tokens,
+                output_tokens=usage_output_tokens,
+                confidence_score=plan.confidence,
+                details={"review_metrics": review_metrics, "warnings": plan.warnings},
+                status=final_status,
+            )
+        else:
+            await self._job_manager.fail_job(
+                prepared.job_id,
+                reason="model_reported_failure",
+                next_action="Inspect the returned plan and rerun with narrower context.",
+                error_kind="model_reported_failure",
+                input_tokens=usage_input_tokens,
+                output_tokens=usage_output_tokens,
+                details={"review_metrics": review_metrics, "warnings": plan.warnings},
+            )
 
         return {
             "status": plan.status,
@@ -269,6 +418,9 @@ class CodexExecutor(TaskExecutor):
             "payload": {
                 "artifacts": artifacts,
                 "warnings": plan.warnings,
+                "ai_job_id": str(prepared.job_id),
+                "ai_selected_tier": prepared.policy.selected_model_tier,
+                "ai_policy": self._policy_payload(prepared.policy),
                 "patch_guard": {
                     "allowed_files": patch_guard.allowed_files,
                     "touched_files": patch_guard.touched_files,
@@ -509,3 +661,95 @@ class CodexExecutor(TaskExecutor):
         if "PLAN" in work_item.type:
             return base + " You may propose broader changes here, but still minimize diff where possible."
         return base
+
+    def _build_ai_job_request(self, work_item: WorkItem, context_bundle: dict[str, Any], allowed_files: list[str]) -> AIJobRequest:
+        candidate_paths = self._candidate_paths(work_item, context_bundle, allowed_files)
+        risk_level = self._risk_level_for_work_item(work_item, candidate_paths)
+        if "PLAN" in work_item.type:
+            role = "planner"
+            task_type = "planning"
+            ambiguity = "high"
+            workflow_type = "interactive_planning"
+        elif work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+            role = "reviewer"
+            task_type = "review"
+            ambiguity = "high" if risk_level == "high" else "medium"
+            workflow_type = "pr_review"
+        elif work_item.type == "FIX_TEST_FAILURE":
+            role = "coder"
+            task_type = "bugfix"
+            ambiguity = "medium"
+            workflow_type = "repo_implementation_task"
+        elif work_item.type in {"WRITE_TESTS", "RUN_TESTS"}:
+            role = "coder"
+            task_type = "testing"
+            ambiguity = "medium"
+            workflow_type = "repo_implementation_task"
+        else:
+            role = "coder"
+            task_type = "implementation"
+            ambiguity = "medium"
+            workflow_type = "repo_implementation_task"
+        return AIJobRequest(
+            workflow_type=workflow_type,
+            role=role,
+            task_type=task_type,
+            ambiguity_level=ambiguity,
+            risk_level=risk_level,
+            tenant_id=work_item.tenant_id,
+            project_id=work_item.project_id,
+            run_id=work_item.run_id,
+            work_item_id=work_item.id,
+            changed_files=candidate_paths,
+            tests_failed=work_item.type == "FIX_TEST_FAILURE",
+            metadata={"work_item_type": work_item.type, "work_item_key": work_item.key},
+        )
+
+    def _candidate_paths(self, work_item: WorkItem, context_bundle: dict[str, Any], allowed_files: list[str]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def add(paths: list[str]) -> None:
+            for path in paths:
+                cleaned = (path or "").strip()
+                if not cleaned or cleaned in seen:
+                    continue
+                seen.add(cleaned)
+                ordered.append(cleaned)
+
+        add(list(context_bundle.get("files", {}).keys()))
+        add(allowed_files)
+        payload = work_item.payload or {}
+        for key in ("file", "filepath", "path", "target_file"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                add([value])
+            elif isinstance(value, list):
+                add([item for item in value if isinstance(item, str)])
+        if isinstance(payload.get("files"), list):
+            add([item for item in payload["files"] if isinstance(item, str)])
+        artifacts = context_bundle.get("artifacts", {})
+        diff_content = artifacts.get("git_diff") or artifacts.get("diff_summary")
+        if isinstance(diff_content, str):
+            add(self._paths_from_diff(diff_content))
+        return ordered[:12]
+
+    def _risk_level_for_work_item(self, work_item: WorkItem, candidate_paths: list[str]) -> str:
+        if contains_sensitive_paths(candidate_paths) or work_item.type == "REVIEW_INTEGRATION":
+            return "high"
+        if work_item.type in {"CODE_BACKEND", "CODE_FRONTEND", "FIX_TEST_FAILURE", "REVIEW_DIFF"} or len(candidate_paths) >= 4:
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _policy_payload(policy) -> dict[str, Any]:
+        return {
+            "task_type": policy.task_type,
+            "ambiguity_level": policy.ambiguity_level,
+            "risk_level": policy.risk_level,
+            "max_model_tier": policy.max_model_tier,
+            "max_retries": policy.max_retries,
+            "max_context_tokens": policy.max_context_tokens,
+            "budget_cents": policy.budget_cents,
+            "requires_human_review": policy.requires_human_review,
+        }

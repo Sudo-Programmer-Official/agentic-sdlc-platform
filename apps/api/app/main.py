@@ -20,6 +20,8 @@ from app.api.v1.snapshot import router as snapshot_router
 from app.api.v1.health import router as health_router, public_router as public_health_router
 from app.api.v1.lifecycle_score import router as lifecycle_router, public_router as public_lifecycle_router
 from app.api.v1.lifecycle_history import router as lifecycle_history_router, public_router as public_lifecycle_history_router
+from app.api.v1.knowledge import router as knowledge_router
+from app.api.v1.ai_ops import router as ai_ops_router
 from app.core.config import DEFAULT_DATABASE_URL, get_settings
 from app.services.build_info import get_build_history, get_current_build_info
 from app.startup import run_startup_migrations
@@ -83,7 +85,13 @@ def create_app() -> FastAPI:
             settings.api_prefix,
             settings.runtime_mode,
         )
-        await run_startup_migrations()
+        log.info("Startup phase=migrations begin")
+        try:
+            await run_startup_migrations()
+        except Exception:
+            log.exception("Application startup failed during phase=migrations")
+            raise
+        log.info("Startup phase=migrations complete")
 
     # Register the DB-backed public surface before the legacy v1 router so
     # overlapping /projects/... and /runs/... paths resolve to the current system.
@@ -108,6 +116,8 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix=settings.api_prefix)
     app.include_router(lifecycle_router, prefix=settings.api_prefix)
     app.include_router(lifecycle_history_router, prefix=settings.api_prefix)
+    app.include_router(knowledge_router, prefix=settings.api_prefix)
+    app.include_router(ai_ops_router, prefix=settings.api_prefix)
     return app
 
 

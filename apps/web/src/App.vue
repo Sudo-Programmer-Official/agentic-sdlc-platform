@@ -93,6 +93,8 @@ const automationMapPath = computed(() => (projectContext.projectId ? `/projects/
 const timelinePath = computed(() => (projectContext.projectId ? `/projects/${projectContext.projectId}/timeline` : "/"));
 const approvalsPath = computed(() => (projectContext.projectId ? `/projects/${projectContext.projectId}/approvals` : "/"));
 const runsPath = computed(() => (projectContext.projectId ? `/projects/${projectContext.projectId}/runs` : "/"));
+const aiOpsPath = computed(() => (projectContext.projectId ? `/projects/${projectContext.projectId}/ai-ops` : "/"));
+const knowledgePath = computed(() => (projectContext.projectId ? `/projects/${projectContext.projectId}/knowledge` : "/"));
 
 const navItems = computed(() => [
   {
@@ -157,6 +159,22 @@ const navItems = computed(() => [
     hint: "Review gates and governance",
     icon: "approvals",
     path: approvalsPath.value,
+    disabled: !projectContext.projectId,
+  },
+  {
+    key: "ai-ops",
+    label: "AI Ops",
+    hint: "Spend, retries, context and approval burn patterns",
+    icon: "operator",
+    path: aiOpsPath.value,
+    disabled: !projectContext.projectId,
+  },
+  {
+    key: "knowledge",
+    label: "Knowledge",
+    hint: "Engineering memory and documentation verification",
+    icon: "knowledge",
+    path: knowledgePath.value,
     disabled: !projectContext.projectId,
   },
   {

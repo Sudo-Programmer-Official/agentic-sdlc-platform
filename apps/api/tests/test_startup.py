@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from app.core.config import get_settings
@@ -64,3 +66,29 @@ async def test_run_startup_migrations_is_noop_when_disabled(monkeypatch):
     await startup.run_startup_migrations()
 
     assert called is False
+
+
+@pytest.mark.anyio
+async def test_run_startup_migrations_logs_failure_context(monkeypatch, tmp_path, caplog):
+    alembic_ini = tmp_path / "alembic.ini"
+    alembic_ini.write_text("[alembic]\nscript_location = alembic\n", encoding="utf-8")
+
+    def fake_upgrade(cfg, revision):
+        raise RuntimeError("boom")
+
+    monkeypatch.setenv("RUN_MIGRATIONS_ON_STARTUP", "true")
+    monkeypatch.setenv("ALEMBIC_CONFIG_PATH", str(alembic_ini))
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:supersecret@db.example.com:5432/app")
+    monkeypatch.setattr(startup.command, "upgrade", fake_upgrade)
+    caplog.set_level(logging.INFO, logger="app.startup")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await startup.run_startup_migrations()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Applying database migrations before serving requests" in message for message in messages)
+    assert any(
+        "Startup migration failed" in message and "postgresql+asyncpg://db.example.com:5432/app" in message
+        for message in messages
+    )
+    assert all("supersecret" not in message for message in messages)

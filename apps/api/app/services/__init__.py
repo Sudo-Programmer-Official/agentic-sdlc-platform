@@ -13,6 +13,7 @@ from .registry import (
     documentation_guard,
 )
 from .vcs import get_default_installation_id, get_vcs_adapter, normalize_provider_name, provider_registry
+from . import knowledge_service
 
 __all__ = [
     "approval_service",
@@ -30,4 +31,5 @@ __all__ = [
     "get_vcs_adapter",
     "get_default_installation_id",
     "normalize_provider_name",
+    "knowledge_service",
 ]

@@ -14,6 +14,9 @@ clear boundaries for future service extraction.
 
 ## Docs
 - `docs/ARCHITECTURE.md`: architecture overview, module boundaries, and run lifecycle diagram
+- `docs/ai-routing-cost-control.md`: routing rules, budgets, retries, cache policy, and AI ops dashboard
+- `docs/architecture/knowledge-verification-subsystem.md`: engineering memory review/publish flow
+- `docs/knowledge-verification-subsystem.md`: developer guide for the knowledge subsystem
 
 ## Status
 Foundation skeleton only. No business logic, no AWS integration.

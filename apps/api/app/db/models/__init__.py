@@ -19,6 +19,16 @@ from app.db.models.repo_symbol import RepoSymbol
 from app.db.models.repo_edge import RepoEdge
 from app.db.models.repo_test_link import RepoTestLink
 from app.db.models.repo_snapshot import RepoSnapshot
+from app.db.models.ai import AIArtifactCache, AIJobRun
+from app.db.models.knowledge import (
+    KnowledgeArtifact,
+    KnowledgeChange,
+    KnowledgeEvent,
+    KnowledgeFileMapping,
+    KnowledgeProposal,
+    KnowledgePublication,
+    KnowledgeReview,
+)
 
 __all__ = [
     "Project",
@@ -44,4 +54,13 @@ __all__ = [
     "RepoEdge",
     "RepoTestLink",
     "RepoSnapshot",
+    "AIJobRun",
+    "AIArtifactCache",
+    "KnowledgeEvent",
+    "KnowledgeChange",
+    "KnowledgeArtifact",
+    "KnowledgeProposal",
+    "KnowledgeReview",
+    "KnowledgePublication",
+    "KnowledgeFileMapping",
 ]

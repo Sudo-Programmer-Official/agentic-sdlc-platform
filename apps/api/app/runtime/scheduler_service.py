@@ -139,6 +139,12 @@ async def tick(session):
                 event_type="RUN_COMPLETED",
                 actor_type="SYSTEM",
             )
+            try:
+                from app.services import knowledge_service
+
+                await knowledge_service.ingest_agent_run_event(session, run_id=run.id, actor_id="system")
+            except Exception:
+                pass
         else:
             continue
         try:

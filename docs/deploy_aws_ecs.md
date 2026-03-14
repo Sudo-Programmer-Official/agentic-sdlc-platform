@@ -52,9 +52,13 @@ docker push $ECR_WEB:latest && docker push $ECR_WEB:v1 && docker push $ECR_WEB:$
   - **Web task**: container `agentic-sdlc-web`, image `$ECR_WEB:<tag>`, port 80.
 - Set environment variables via task definition or SSM:
   - API runtime: `DATABASE_URL`, `OPENAI_API_KEY`, `ENV=production`, `RUN_MIGRATIONS_ON_STARTUP=1` as needed for your rollout strategy.
-  - GitHub integration: `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_ALLOWED_ORG`.
+  - GitHub integration: `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_ALLOWED_ORG`, `RUNTIME_GIT_AUTH_MODE=github_app_https`.
   - Web build only: `VITE_API_BASE` (only used at build time; not required at runtime for the static web).
   - Prefer AWS Secrets Manager or SSM Parameter Store for secrets such as `OPENAI_API_KEY` and database credentials instead of baking them into images or committing `.env` files.
+  - Current production GitHub App values:
+    - `GITHUB_APP_ID=2904464`
+    - `GITHUB_APP_SLUG=prompt-to-pr`
+    - keep `GITHUB_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET` in Secrets Manager or SSM
 - Create an Application Load Balancer:
   - Target group for API (HTTP 8000) with health check path `/health`, matcher 200.
   - (Optional) Target group for Web if you want to front it with ALB instead of CloudFront/S3.

@@ -408,12 +408,71 @@
 
     <el-dialog v-model="showConnectRepoDialog" title="Connect Repository" width="620px">
       <div class="space-y-3">
+        <div
+          v-if="githubConnectInfo?.enabled"
+          class="rounded-2xl border border-sky-200 bg-sky-50 p-4"
+        >
+          <div class="text-sm font-semibold text-sky-900">Connect with GitHub</div>
+          <div class="mt-1 text-xs text-sky-700">
+            Install or authorize the GitHub App, then pick a repository instead of typing repo details manually.
+          </div>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <el-button type="primary" plain @click="startGitHubAppInstall">Continue with GitHub</el-button>
+            <el-button
+              v-if="repoForm.installation_id"
+              :loading="githubInstallLoading"
+              @click="loadGitHubInstallationRepositories"
+            >
+              Refresh Repositories
+            </el-button>
+          </div>
+          <div v-if="githubConnectInfo.allowed_org" class="mt-2 text-xs text-sky-700">
+            Allowed org: {{ githubConnectInfo.allowed_org }}
+          </div>
+          <div v-if="githubInstallMessage" class="mt-3 text-sm text-emerald-700">{{ githubInstallMessage }}</div>
+          <div v-if="githubInstallError" class="mt-3 text-sm text-rose-600">{{ githubInstallError }}</div>
+        </div>
+
+        <el-select
+          v-if="githubInstallationRepos.length"
+          v-model="selectedGitHubRepo"
+          filterable
+          placeholder="Choose a repository from this GitHub installation"
+          style="width: 100%"
+          @change="applySelectedGitHubRepository"
+        >
+          <el-option
+            v-for="repo in githubInstallationRepos"
+            :key="repo.id"
+            :label="repo.full_name"
+            :value="repo.full_name"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <span>{{ repo.full_name }}</span>
+              <span class="text-xs text-slate-400">{{ repo.default_branch || "main" }}</span>
+            </div>
+          </el-option>
+        </el-select>
+
+        <div
+          v-if="repoForm.installation_id && !githubInstallLoading && !githubInstallationRepos.length && githubConnectInfo?.enabled"
+          class="text-xs text-slate-500"
+        >
+          No repositories loaded yet for installation {{ repoForm.installation_id }}. Use refresh after GitHub authorization completes.
+        </div>
+
+        <div v-if="githubConnectInfo?.enabled" class="pt-1 text-xs uppercase tracking-wide text-slate-400">
+          Manual fallback
+        </div>
         <el-input v-model="repoForm.repo_url" placeholder="Repository URL or local path" />
         <div class="grid gap-3 md:grid-cols-2">
           <el-input v-model="repoForm.repo_full_name" placeholder="owner/repo (optional for GitHub API)" />
           <el-input v-model="repoForm.default_branch" placeholder="Default branch" />
         </div>
         <el-input v-model="repoForm.installation_id" placeholder="GitHub installation ID (optional)" />
+        <div class="text-xs text-slate-500">
+          You can still edit the repository URL manually if your runtime uses SSH, a local mirror, or host-level git credentials.
+        </div>
         <el-button type="primary" :loading="repoLoading" @click="submitConnectRepo">
           Save Repository
         </el-button>
@@ -516,14 +575,37 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
 import StageBadge from "../components/StageBadge.vue";
 import { projectContext, updateProjectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
-import { previewImpact, regenerateTasks, listTasks, createTask, createDocument, explainTask, listActivity, fetchHealth, fetchLifecycleScore, fetchLifecycleScoreHistory, listDocuments, fetchProjectMeta, updateProjectStage, listRuns, createRun, updateRunStatus, listWorkItems, listRunEvents, fetchProjectRepo, connectProjectRepo } from "../api/lifecycle";
+import {
+  previewImpact,
+  regenerateTasks,
+  listTasks,
+  createTask,
+  createDocument,
+  explainTask,
+  listActivity,
+  fetchHealth,
+  fetchLifecycleScore,
+  fetchLifecycleScoreHistory,
+  listDocuments,
+  fetchProjectMeta,
+  updateProjectStage,
+  listRuns,
+  createRun,
+  updateRunStatus,
+  listWorkItems,
+  listRunEvents,
+  fetchProjectRepo,
+  connectProjectRepo,
+  fetchGitHubConnectInfo,
+  listGitHubInstallationRepositories,
+} from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -615,6 +697,14 @@ const repoForm = ref({
   default_branch: "main",
   installation_id: "",
 });
+const githubConnectInfo = ref<any | null>(null);
+const githubConnectLoading = ref(false);
+const githubInstallLoading = ref(false);
+const githubInstallationRepos = ref<any[]>([]);
+const githubInstallError = ref("");
+const githubInstallMessage = ref("");
+const selectedGitHubRepo = ref("");
+const handledGitHubInstallation = ref("");
 const projectStatus = ref<string | null>(null);
 const allowedTransitions = ref<string[]>([]);
 const stageUpdating = ref(false);
@@ -769,6 +859,8 @@ async function loadTasks() {
 function openConnectRepoDialog() {
   repoMessage.value = "";
   repoError.value = "";
+  githubInstallError.value = "";
+  githubInstallMessage.value = "";
   repoForm.value = {
     repo_url: projectRepo.value?.repo_url || "",
     repo_full_name: projectRepo.value?.repo_full_name || "",
@@ -778,7 +870,119 @@ function openConnectRepoDialog() {
         ? String(projectRepo.value.installation_id)
         : "",
   };
+  selectedGitHubRepo.value = projectRepo.value?.repo_full_name || "";
+  void loadGitHubConnectInfo();
+  if (repoForm.value.installation_id.trim()) {
+    void loadGitHubInstallationRepositories();
+  } else {
+    githubInstallationRepos.value = [];
+  }
   showConnectRepoDialog.value = true;
+}
+
+async function loadGitHubConnectInfo() {
+  githubConnectLoading.value = true;
+  try {
+    githubConnectInfo.value = await fetchGitHubConnectInfo();
+  } catch {
+    githubConnectInfo.value = null;
+  } finally {
+    githubConnectLoading.value = false;
+  }
+}
+
+async function loadGitHubInstallationRepositories() {
+  const installationId = Number.parseInt(repoForm.value.installation_id.trim(), 10);
+  if (!Number.isFinite(installationId) || installationId <= 0) {
+    githubInstallationRepos.value = [];
+    githubInstallError.value = "GitHub installation ID is required before repositories can be loaded.";
+    return;
+  }
+
+  githubInstallLoading.value = true;
+  githubInstallError.value = "";
+  try {
+    const repos = await listGitHubInstallationRepositories(installationId);
+    githubInstallationRepos.value = Array.isArray(repos) ? repos : [];
+    if (!githubInstallationRepos.value.length) {
+      githubInstallMessage.value = "No repositories were returned for this installation yet.";
+      return;
+    }
+    const preferredRepo =
+      githubInstallationRepos.value.find((repo) => repo.full_name === repoForm.value.repo_full_name) ||
+      githubInstallationRepos.value[0];
+    if (preferredRepo) {
+      selectedGitHubRepo.value = preferredRepo.full_name;
+      applySelectedGitHubRepository(preferredRepo.full_name);
+    }
+    githubInstallMessage.value = "GitHub repositories loaded. Review the selected repo URL before saving.";
+  } catch (err: any) {
+    githubInstallationRepos.value = [];
+    githubInstallError.value = err?.message || "Failed to load repositories for this GitHub installation.";
+  } finally {
+    githubInstallLoading.value = false;
+  }
+}
+
+function applySelectedGitHubRepository(fullName: string) {
+  const selectedRepo = githubInstallationRepos.value.find((repo) => repo.full_name === fullName);
+  if (!selectedRepo) return;
+  selectedGitHubRepo.value = selectedRepo.full_name;
+  repoForm.value.repo_full_name = selectedRepo.full_name || "";
+  const mode = String(githubConnectInfo.value?.runtime_git_auth_mode || "auto").toLowerCase();
+  if (mode === "ssh") {
+    repoForm.value.repo_url =
+      selectedRepo.ssh_url || selectedRepo.clone_url || selectedRepo.html_url || repoForm.value.repo_url;
+  } else {
+    repoForm.value.repo_url =
+      selectedRepo.clone_url || selectedRepo.ssh_url || selectedRepo.html_url || repoForm.value.repo_url;
+  }
+  repoForm.value.default_branch = selectedRepo.default_branch || repoForm.value.default_branch || "main";
+  githubInstallMessage.value =
+    mode === "ssh"
+      ? "Repository selected from GitHub and normalized for SSH runtime access."
+      : "Repository selected from GitHub and normalized for GitHub App HTTPS runtime access.";
+}
+
+function startGitHubAppInstall() {
+  if (!githubConnectInfo.value?.install_url) {
+    githubInstallError.value = "GitHub App install flow is not configured yet.";
+    return;
+  }
+  const installUrl = new URL(githubConnectInfo.value.install_url);
+  installUrl.searchParams.set(
+    "state",
+    window.btoa(
+      JSON.stringify({
+        projectId: projectId.value,
+        returnPath: route.fullPath,
+      })
+    )
+  );
+  window.location.assign(installUrl.toString());
+}
+
+async function hydrateGitHubInstallFromRoute() {
+  const rawInstallationId = Array.isArray(route.query.installation_id)
+    ? route.query.installation_id[0]
+    : route.query.installation_id;
+  const installationId = Number.parseInt(String(rawInstallationId || ""), 10);
+  if (!Number.isFinite(installationId) || installationId <= 0) return;
+  if (handledGitHubInstallation.value === String(installationId)) return;
+
+  handledGitHubInstallation.value = String(installationId);
+  openConnectRepoDialog();
+  repoForm.value.installation_id = String(installationId);
+  githubInstallMessage.value =
+    String(route.query.setup_action || "").toLowerCase() === "install"
+      ? "GitHub authorization completed. Pick a repository from the connected installation."
+      : "GitHub installation detected. Pick a repository to finish connecting this project.";
+  await loadGitHubInstallationRepositories();
+
+  const nextQuery = { ...route.query } as Record<string, any>;
+  delete nextQuery.installation_id;
+  delete nextQuery.setup_action;
+  await router.replace({ query: nextQuery });
 }
 
 async function loadProjectRepo() {
@@ -1106,7 +1310,16 @@ onMounted(async () => {
   await loadProjectMeta();
   await loadRuns();
   await loadProjectRepo();
+  await loadGitHubConnectInfo();
   await loadWorkItems();
   await loadRunEvents();
+  await hydrateGitHubInstallFromRoute();
 });
+
+watch(
+  () => [route.query.installation_id, route.query.setup_action],
+  () => {
+    void hydrateGitHubInstallFromRoute();
+  }
+);
 </script>

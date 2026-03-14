@@ -58,6 +58,9 @@ async def create_pr_from_artifact(
         require_repo=True,
         repo_url=project_repo.repo_url,
         repo_branch=project_repo.default_branch,
+        repo_provider=project_repo.provider,
+        repo_full_name=project_repo.repo_full_name,
+        repo_installation_id=project_repo.installation_id,
     )
     repo_path = Path(run.repo_path or "")
     if not repo_path.exists():
@@ -65,8 +68,11 @@ async def create_pr_from_artifact(
 
     prepare_workspace_repo(
         repo_dir=repo_path,
+        provider=project_repo.provider,
         repo_url=project_repo.repo_url,
         default_branch=project_repo.default_branch,
+        repo_full_name=project_repo.repo_full_name,
+        installation_id=project_repo.installation_id,
         work_branch=working_branch,
     )
 
@@ -111,7 +117,14 @@ async def create_pr_from_artifact(
 
     commit_message = title or f"Agentic SDLC run {run.id}"
     commit_sha = commit_all(repo_path, commit_message)
-    push_branch(repo_path, working_branch)
+    push_branch(
+        repo_path,
+        working_branch,
+        provider=project_repo.provider,
+        repo_url=project_repo.repo_url,
+        repo_full_name=project_repo.repo_full_name,
+        installation_id=project_repo.installation_id,
+    )
 
     pr_payload = adapter.create_pull_request(
         project_repo.repo_full_name,

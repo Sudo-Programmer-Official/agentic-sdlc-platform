@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     preview_max_global: int = 20
     git_author_name: str = "Agentic SDLC"
     git_author_email: str = "agentic-sdlc@local"
+    runtime_git_auth_mode: str = "auto"  # auto | github_app_https | ssh | none
+    github_app_slug: str | None = None
+    github_allowed_org: str | None = None
     tenancy_enforcement: bool = False
     run_migrations_on_startup: bool = False
     alembic_config_path: str | None = None

@@ -51,6 +51,9 @@ async def launch_run_for_project(
         require_repo=run.executor in {"codex", "test"},
         repo_url=project_repo.repo_url if project_repo else None,
         repo_branch=project_repo.default_branch if project_repo else None,
+        repo_provider=project_repo.provider if project_repo else None,
+        repo_full_name=project_repo.repo_full_name if project_repo else None,
+        repo_installation_id=project_repo.installation_id if project_repo else None,
     )
     await log_activity(
         session,

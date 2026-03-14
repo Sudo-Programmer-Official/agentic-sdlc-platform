@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -11,7 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.models import Project, ProjectRepository
-from app.services.vcs import get_default_installation_id
+from app.services.vcs import get_default_installation_id, get_vcs_adapter
+from app.services.vcs.github_app import GitHubAppAdapter
+
+
+@dataclass(frozen=True)
+class RepoRuntimeAccess:
+    auth_mode: str
+    clean_repo_url: str
+    transport_url: str
+    git_config: tuple[tuple[str, str], ...] = ()
 
 
 def _normalize_provider(provider: str) -> str:
@@ -48,9 +58,18 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _run_git(args: list[str], cwd: Path | None = None) -> str:
+def _run_git(
+    args: list[str],
+    cwd: Path | None = None,
+    *,
+    git_config: tuple[tuple[str, str], ...] | None = None,
+) -> str:
+    command = ["git"]
+    for key, value in git_config or ():
+        command.extend(["-c", f"{key}={value}"])
+    command.extend(args)
     result = subprocess.run(
-        ["git", *args],
+        command,
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
@@ -62,6 +81,74 @@ def _run_git(args: list[str], cwd: Path | None = None) -> str:
         stderr = (result.stderr or result.stdout).strip()
         raise RuntimeError(stderr or f"git {' '.join(args)} failed")
     return (result.stdout or "").strip()
+
+
+def _looks_like_github_remote(repo_url: str) -> bool:
+    value = repo_url.strip()
+    if value.startswith("git@github.com:"):
+        return True
+    parsed = urlparse(value)
+    return parsed.netloc.lower() == "github.com"
+
+
+def _normalize_repo_url_for_mode(
+    *,
+    repo_url: str,
+    repo_full_name: str | None,
+    auth_mode: str,
+) -> str:
+    cleaned_repo_url = repo_url.strip()
+    if not cleaned_repo_url:
+        return cleaned_repo_url
+
+    full_name = _normalize_repo_full_name(cleaned_repo_url, repo_full_name)
+    if not full_name or not _looks_like_github_remote(cleaned_repo_url):
+        return cleaned_repo_url
+
+    mode = (auth_mode or "auto").strip().lower()
+    if mode == "ssh":
+        return f"git@github.com:{full_name}.git"
+    if mode in {"auto", "github_app_https"}:
+        return f"https://github.com/{full_name}.git"
+    return cleaned_repo_url
+
+
+def resolve_repo_runtime_access(
+    *,
+    provider: str,
+    repo_url: str,
+    repo_full_name: str | None = None,
+    installation_id: int | None = None,
+) -> RepoRuntimeAccess:
+    normalized_provider = _normalize_provider(provider)
+    cleaned_repo_url = repo_url.strip()
+    full_name = _normalize_repo_full_name(cleaned_repo_url, repo_full_name)
+    auth_mode = (get_settings().runtime_git_auth_mode or "auto").strip().lower()
+
+    if normalized_provider == "github" and full_name and _looks_like_github_remote(cleaned_repo_url):
+        if auth_mode == "ssh":
+            return RepoRuntimeAccess(
+                auth_mode="ssh",
+                clean_repo_url=cleaned_repo_url,
+                transport_url=f"git@github.com:{full_name}.git",
+            )
+
+        adapter = get_vcs_adapter(normalized_provider)
+        if auth_mode in {"auto", "github_app_https"} and installation_id and isinstance(adapter, GitHubAppAdapter):
+            return RepoRuntimeAccess(
+                auth_mode="github_app_https",
+                clean_repo_url=cleaned_repo_url,
+                transport_url=adapter.build_clone_url(full_name),
+                git_config=tuple(adapter.build_git_http_config(installation_id)),
+            )
+        if auth_mode == "github_app_https":
+            raise ValueError("GitHub App HTTPS runtime auth requires a valid installation_id and configured GitHub App")
+
+    return RepoRuntimeAccess(
+        auth_mode="plain",
+        clean_repo_url=cleaned_repo_url,
+        transport_url=cleaned_repo_url,
+    )
 
 
 async def get_project_repository(
@@ -91,7 +178,12 @@ async def connect_repo(
     if not cleaned_repo_url:
         raise ValueError("repo_url is required")
 
-    full_name = _normalize_repo_full_name(cleaned_repo_url, repo_full_name)
+    normalized_repo_url = _normalize_repo_url_for_mode(
+        repo_url=cleaned_repo_url,
+        repo_full_name=repo_full_name,
+        auth_mode=get_settings().runtime_git_auth_mode,
+    )
+    full_name = _normalize_repo_full_name(normalized_repo_url, repo_full_name)
     install_id = installation_id or get_default_installation_id(normalized_provider)
 
     existing = await get_project_repository(session, project_id=project.id, tenant_id=project.tenant_id)
@@ -99,7 +191,7 @@ async def connect_repo(
         existing = ProjectRepository(project_id=project.id, tenant_id=project.tenant_id)
 
     existing.provider = normalized_provider
-    existing.repo_url = cleaned_repo_url
+    existing.repo_url = normalized_repo_url
     existing.repo_full_name = full_name
     existing.default_branch = (default_branch or "main").strip()
     existing.installation_id = install_id
@@ -112,21 +204,30 @@ async def connect_repo(
 def prepare_workspace_repo(
     *,
     repo_dir: Path,
+    provider: str,
     repo_url: str,
     default_branch: str,
+    repo_full_name: str | None = None,
+    installation_id: int | None = None,
     work_branch: str | None = None,
 ) -> None:
+    access = resolve_repo_runtime_access(
+        provider=provider,
+        repo_url=repo_url,
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
+    )
     repo_dir = repo_dir.resolve()
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if (repo_dir / ".git").exists():
         try:
-            _run_git(["remote", "set-url", "origin", repo_url], cwd=repo_dir)
+            _run_git(["remote", "set-url", "origin", access.transport_url], cwd=repo_dir)
         except RuntimeError:
-            _run_git(["remote", "add", "origin", repo_url], cwd=repo_dir)
-        _run_git(["fetch", "origin", "--prune"], cwd=repo_dir)
+            _run_git(["remote", "add", "origin", access.transport_url], cwd=repo_dir)
+        _run_git(["fetch", "origin", "--prune"], cwd=repo_dir, git_config=access.git_config)
     else:
-        _run_git(["clone", repo_url, str(repo_dir)])
+        _run_git(["clone", access.transport_url, str(repo_dir)], git_config=access.git_config)
 
     base_branch = (default_branch or "main").strip() or "main"
     target_branch = (work_branch or base_branch).strip() or base_branch
@@ -160,5 +261,19 @@ def commit_all(repo_dir: Path, message: str) -> str:
     return _run_git(["rev-parse", "HEAD"], cwd=repo_dir)
 
 
-def push_branch(repo_dir: Path, branch_name: str) -> None:
-    _run_git(["push", "-u", "origin", branch_name], cwd=repo_dir)
+def push_branch(
+    repo_dir: Path,
+    branch_name: str,
+    *,
+    provider: str,
+    repo_url: str,
+    repo_full_name: str | None = None,
+    installation_id: int | None = None,
+) -> None:
+    access = resolve_repo_runtime_access(
+        provider=provider,
+        repo_url=repo_url,
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
+    )
+    _run_git(["push", "-u", "origin", branch_name], cwd=repo_dir, git_config=access.git_config)

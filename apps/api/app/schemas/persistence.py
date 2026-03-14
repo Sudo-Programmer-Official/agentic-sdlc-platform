@@ -132,6 +132,26 @@ class ProjectRepositoryOut(BaseModel):
         from_attributes = True
 
 
+class GitHubConnectInfoOut(BaseModel):
+    enabled: bool
+    app_slug: Optional[str] = None
+    allowed_org: Optional[str] = None
+    install_url: Optional[str] = None
+    runtime_git_auth_mode: str = "auto"
+
+
+class GitHubInstallationRepositoryOut(BaseModel):
+    id: int
+    name: str
+    full_name: str
+    clone_url: Optional[str] = None
+    ssh_url: Optional[str] = None
+    html_url: Optional[str] = None
+    default_branch: str = "main"
+    private: bool = False
+    owner_login: Optional[str] = None
+
+
 class PullRequestCreate(BaseModel):
     artifact_id: Optional[uuid.UUID] = None
     title: Optional[str] = None

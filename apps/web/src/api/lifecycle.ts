@@ -35,6 +35,26 @@ export type ConnectRepoPayload = {
   created_by?: string | null;
 };
 
+export type GitHubConnectInfo = {
+  enabled: boolean;
+  app_slug?: string | null;
+  allowed_org?: string | null;
+  install_url?: string | null;
+  runtime_git_auth_mode?: string | null;
+};
+
+export type GitHubInstallationRepository = {
+  id: number;
+  name: string;
+  full_name: string;
+  clone_url?: string | null;
+  ssh_url?: string | null;
+  html_url?: string | null;
+  default_branch?: string | null;
+  private?: boolean;
+  owner_login?: string | null;
+};
+
 export type PreviewProfilePayload = {
   enabled?: boolean;
   mode?: string;
@@ -214,6 +234,18 @@ export async function fetchProjectPreviewProfile(projectId: string) {
     if (isApiErrorStatus(err, 404)) return null;
     throw err;
   }
+}
+
+export async function fetchGitHubConnectInfo(): Promise<GitHubConnectInfo> {
+  const resp = await fetch(`${API_BASE}/integrations/github/connect`);
+  return parseApiResponse(resp);
+}
+
+export async function listGitHubInstallationRepositories(
+  installationId: number
+): Promise<GitHubInstallationRepository[]> {
+  const resp = await fetch(`${API_BASE}/integrations/github/installations/${installationId}/repositories`);
+  return parseApiResponse(resp);
 }
 
 export async function saveProjectPreviewProfile(projectId: string, payload: PreviewProfilePayload) {

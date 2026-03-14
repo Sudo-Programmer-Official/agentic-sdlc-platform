@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import Run
 from app.runtime.context import RunContext
-from app.services.repo_connector import prepare_workspace_repo
+from app.services.repo_connector import (
+    get_project_repository,
+    prepare_workspace_repo,
+    resolve_repo_runtime_access,
+)
 from app.services.workspace_commands import (
     get_workspace_allowed_command_prefixes,
     workspace_command_audit_path,
@@ -61,6 +65,7 @@ def _manifest(
     source: Path | None,
     repo_url: str | None,
     repo_branch: str | None,
+    repo_auth_mode: str | None,
 ) -> dict:
     settings = get_settings()
     return {
@@ -79,6 +84,7 @@ def _manifest(
         "repo_source": str(source) if source else None,
         "repo_url": repo_url,
         "repo_branch": repo_branch,
+        "repo_auth_mode": repo_auth_mode,
         "executor": run.executor,
         "plan_snapshot_path": str(paths.context / "plan.json"),
         "simulation_mode": getattr(settings, "workspace_simulation_mode", "ephemeral"),
@@ -117,7 +123,19 @@ async def ensure_run_workspace(
     repo_source_path: Path | None = None,
     repo_url: str | None = None,
     repo_branch: str | None = None,
+    repo_provider: str | None = None,
+    repo_full_name: str | None = None,
+    repo_installation_id: int | None = None,
 ) -> WorkspacePaths:
+    if require_repo and (not repo_url or not repo_provider):
+        project_repo = await get_project_repository(session, project_id=run.project_id, tenant_id=run.tenant_id)
+        if project_repo is not None:
+            repo_url = repo_url or project_repo.repo_url
+            repo_branch = repo_branch or project_repo.default_branch
+            repo_provider = repo_provider or project_repo.provider
+            repo_full_name = repo_full_name or project_repo.repo_full_name
+            repo_installation_id = repo_installation_id or project_repo.installation_id
+
     source = repo_source_path.resolve() if repo_source_path and repo_source_path.exists() else _resolve_repo_source()
     root = _workspace_root(run)
     paths = WorkspacePaths(
@@ -131,6 +149,15 @@ async def ensure_run_workspace(
         repo_seeded=False,
     )
 
+    access = None
+    if repo_url and repo_provider:
+        access = resolve_repo_runtime_access(
+            provider=repo_provider,
+            repo_url=repo_url,
+            repo_full_name=repo_full_name,
+            installation_id=repo_installation_id,
+        )
+
     try:
         for directory in (paths.root, paths.repo, paths.artifacts, paths.logs, paths.patches, paths.context):
             directory.mkdir(parents=True, exist_ok=True)
@@ -141,8 +168,11 @@ async def ensure_run_workspace(
         if require_repo and not repo_seeded and repo_url:
             prepare_workspace_repo(
                 repo_dir=paths.repo,
+                provider=repo_provider or "github",
                 repo_url=repo_url,
                 default_branch=repo_branch or "main",
+                repo_full_name=repo_full_name,
+                installation_id=repo_installation_id,
                 work_branch=paths.branch_name,
             )
             repo_seeded = True
@@ -167,7 +197,18 @@ async def ensure_run_workspace(
         )
         manifest_path = paths.context / "workspace.json"
         manifest_path.write_text(
-            json.dumps(_manifest(materialized_paths, run, source, repo_url, repo_branch), indent=2) + "\n",
+            json.dumps(
+                _manifest(
+                    materialized_paths,
+                    run,
+                    source,
+                    access.clean_repo_url if access else repo_url,
+                    repo_branch,
+                    access.auth_mode if access else None,
+                ),
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -200,6 +241,9 @@ async def build_run_context(
     repo_source_path: Path | None = None,
     repo_url: str | None = None,
     repo_branch: str | None = None,
+    repo_provider: str | None = None,
+    repo_full_name: str | None = None,
+    repo_installation_id: int | None = None,
 ) -> RunContext:
     settings = get_settings()
     paths = await ensure_run_workspace(
@@ -209,6 +253,9 @@ async def build_run_context(
         repo_source_path=repo_source_path,
         repo_url=repo_url,
         repo_branch=repo_branch,
+        repo_provider=repo_provider,
+        repo_full_name=repo_full_name,
+        repo_installation_id=repo_installation_id,
     )
     return RunContext(
         project_id=run.project_id,

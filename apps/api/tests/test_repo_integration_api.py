@@ -85,6 +85,7 @@ async def db_session(tmp_path, monkeypatch):
         workspace_repo_source=None,
         git_author_name="Agentic SDLC Tests",
         git_author_email="tests@example.com",
+        runtime_git_auth_mode="auto",
     )
     monkeypatch.setattr(workspace_supervisor, "get_settings", lambda: settings_stub)
     monkeypatch.setattr(repo_connector, "get_settings", lambda: settings_stub)
@@ -154,6 +155,47 @@ async def test_connect_repo_uses_provider_default_installation_id(db_session, mo
 
     assert create_resp.status_code == 200
     assert create_resp.json()["installation_id"] == 4242
+
+
+@pytest.mark.anyio
+async def test_github_connect_info_and_installation_repositories(db_session, monkeypatch):
+    _session, _tenant_id, _tmp_path = db_session
+
+    class DummyGitHubAdapter:
+        def list_installation_repositories(self, installation_id: int):
+            assert installation_id == 4242
+            return [
+                {
+                    "id": 1,
+                    "name": "agentic-sdlc-platform",
+                    "full_name": "sudo-programmer-official/agentic-sdlc-platform",
+                    "clone_url": "https://github.com/sudo-programmer-official/agentic-sdlc-platform.git",
+                    "ssh_url": "git@github.com:sudo-programmer-official/agentic-sdlc-platform.git",
+                    "html_url": "https://github.com/sudo-programmer-official/agentic-sdlc-platform",
+                    "default_branch": "main",
+                    "private": True,
+                    "owner_login": "sudo-programmer-official",
+                }
+            ]
+
+    monkeypatch.setattr(persistence, "github_adapter", DummyGitHubAdapter())
+    monkeypatch.setattr(persistence.settings, "github_app_slug", "agentic-sdlc")
+    monkeypatch.setattr(persistence.settings, "github_allowed_org", "sudo-programmer-official")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        connect_resp = await client.get("/api/v1/integrations/github/connect")
+        repos_resp = await client.get("/api/v1/integrations/github/installations/4242/repositories")
+
+    assert connect_resp.status_code == 200
+    assert connect_resp.json() == {
+        "enabled": True,
+        "app_slug": "agentic-sdlc",
+        "allowed_org": "sudo-programmer-official",
+        "install_url": "https://github.com/apps/agentic-sdlc/installations/new",
+        "runtime_git_auth_mode": "auto",
+    }
+    assert repos_resp.status_code == 200
+    assert repos_resp.json()[0]["full_name"] == "sudo-programmer-official/agentic-sdlc-platform"
 
 
 @pytest.mark.anyio
@@ -264,9 +306,21 @@ async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_s
 
     monkeypatch.setattr(pr_service, "get_vcs_adapter", lambda provider: DummyGitHubAdapter())
 
-    def _push_local_branch(repo_dir: Path, branch_name: str):
+    def _push_local_branch(
+        repo_dir: Path,
+        branch_name: str,
+        *,
+        provider: str,
+        repo_url: str,
+        repo_full_name: str | None = None,
+        installation_id: int | None = None,
+    ):
+        assert provider == "github"
+        assert repo_full_name == "example/repo"
+        assert installation_id is None
         origin_url = _run_git(["remote", "get-url", "origin"], cwd=repo_dir)
         assert origin_url == str(remote)
+        assert repo_url == str(remote)
         _run_git(["push", "-u", "origin", branch_name], cwd=repo_dir)
 
     monkeypatch.setattr(pr_service, "push_branch", _push_local_branch)

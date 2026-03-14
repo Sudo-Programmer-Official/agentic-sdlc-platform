@@ -35,6 +35,8 @@ from app.schemas.persistence import (
     RunCreate,
     ProjectRepositoryConnect,
     ProjectRepositoryOut,
+    GitHubConnectInfoOut,
+    GitHubInstallationRepositoryOut,
     PullRequestCreate,
     PullRequestOut,
     WorkItemOut,
@@ -44,6 +46,7 @@ from app.schemas.persistence import (
     WorkItemComplete,
     WorkItemFail,
 )
+from app.services import github_adapter
 from app.schemas.run_comparison import RunComparisonResponse
 from app.schemas.run_memory import RunMemoryResponse
 from app.schemas.run_narrative import RunNarrativeResponse
@@ -470,6 +473,44 @@ async def connect_project_repo(
         return _project_repo_out(repo)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/integrations/github/connect", response_model=GitHubConnectInfoOut)
+@public_router.get("/integrations/github/connect", response_model=GitHubConnectInfoOut)
+async def get_github_connect_info() -> GitHubConnectInfoOut:
+    slug = (settings.github_app_slug or "").strip() or None
+    enabled = bool(github_adapter and slug)
+    install_url = f"https://github.com/apps/{slug}/installations/new" if enabled and slug else None
+    return GitHubConnectInfoOut(
+        enabled=enabled,
+        app_slug=slug,
+        allowed_org=settings.github_allowed_org,
+        install_url=install_url,
+        runtime_git_auth_mode=settings.runtime_git_auth_mode,
+    )
+
+
+@router.get(
+    "/integrations/github/installations/{installation_id}/repositories",
+    response_model=List[GitHubInstallationRepositoryOut],
+)
+@public_router.get(
+    "/integrations/github/installations/{installation_id}/repositories",
+    response_model=List[GitHubInstallationRepositoryOut],
+)
+async def list_github_installation_repositories(installation_id: int) -> List[GitHubInstallationRepositoryOut]:
+    if github_adapter is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="GitHub App integration is not configured")
+    try:
+        repos = github_adapter.list_installation_repositories(installation_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to load repositories for this GitHub installation",
+        ) from exc
+    return [GitHubInstallationRepositoryOut.model_validate(repo) for repo in repos]
 
 
 @router.get("/projects/{project_id}/repo", response_model=ProjectRepositoryOut)

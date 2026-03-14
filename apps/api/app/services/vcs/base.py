@@ -22,3 +22,6 @@ class VCSAdapter(Protocol):
         installation_id: int | None = None,
     ) -> dict:
         ...
+
+    def list_installation_repositories(self, installation_id: int) -> List[dict]:
+        ...

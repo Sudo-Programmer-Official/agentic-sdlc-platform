@@ -124,8 +124,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
 import AppIcon from "../components/AppIcon.vue";
@@ -140,6 +140,7 @@ const DEFAULT_API_BASE = import.meta.env.DEV
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
 const router = useRouter();
+const route = useRoute();
 const projectIdInput = ref<any | null>(null);
 const projectNameInput = ref<any | null>(null);
 const createProjectSection = ref<HTMLElement | null>(null);
@@ -161,9 +162,17 @@ const systemStatusDetail = computed(() =>
 const envLabel = computed(() => environment.value || (uiTheme.mode === "dark" ? "production" : "local"));
 
 onMounted(() => {
+  void hydrateGitHubInstallRedirect();
   void refreshProjects();
   void hydrateEnvironment();
 });
+
+watch(
+  () => [route.query.installation_id, route.query.setup_action, route.query.state],
+  () => {
+    void hydrateGitHubInstallRedirect();
+  }
+);
 
 async function refreshProjects() {
   try {
@@ -187,6 +196,35 @@ async function hydrateEnvironment() {
   } catch {
     environment.value = "production";
   }
+}
+
+async function hydrateGitHubInstallRedirect() {
+  const rawInstallationId = Array.isArray(route.query.installation_id)
+    ? route.query.installation_id[0]
+    : route.query.installation_id;
+  const installationId = Number.parseInt(String(rawInstallationId || ""), 10);
+  if (!Number.isFinite(installationId) || installationId <= 0) return;
+
+  const rawState = Array.isArray(route.query.state) ? route.query.state[0] : route.query.state;
+  let targetProjectId = "";
+  if (rawState) {
+    try {
+      const parsed = JSON.parse(window.atob(String(rawState)));
+      targetProjectId = typeof parsed?.projectId === "string" ? parsed.projectId : "";
+    } catch {
+      targetProjectId = "";
+    }
+  }
+
+  if (!targetProjectId) return;
+
+  await router.replace({
+    path: `/projects/${targetProjectId}`,
+    query: {
+      installation_id: String(installationId),
+      setup_action: Array.isArray(route.query.setup_action) ? route.query.setup_action[0] : route.query.setup_action,
+    },
+  });
 }
 
 async function createProject() {

@@ -6,6 +6,7 @@ import json
 import os
 import time
 import urllib.request
+import base64
 from typing import Dict, List, Optional
 
 import jwt
@@ -126,6 +127,46 @@ class GitHubAppAdapter(VCSAdapter):
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
+
+    def list_installation_repositories(self, installation_id: int) -> List[dict]:
+        token = self.get_installation_token(installation_id)
+        req = urllib.request.Request(
+            "https://api.github.com/installation/repositories?per_page=100",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "agentic-sdlc",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode())
+            repos = payload.get("repositories") or []
+            normalized: List[dict] = []
+            for repo in repos:
+                owner = repo.get("owner") or {}
+                normalized.append(
+                    {
+                        "id": repo.get("id"),
+                        "name": repo.get("name"),
+                        "full_name": repo.get("full_name"),
+                        "clone_url": repo.get("clone_url"),
+                        "ssh_url": repo.get("ssh_url"),
+                        "html_url": repo.get("html_url"),
+                        "default_branch": repo.get("default_branch") or "main",
+                        "private": bool(repo.get("private")),
+                        "owner_login": owner.get("login"),
+                    }
+                )
+            return normalized
+
+    @staticmethod
+    def build_clone_url(repo_full_name: str) -> str:
+        return f"https://github.com/{repo_full_name.removesuffix('.git')}.git"
+
+    def build_git_http_config(self, installation_id: int, host: str = "https://github.com/") -> List[tuple[str, str]]:
+        token = self.get_installation_token(installation_id)
+        basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+        return [(f"http.{host}.extraheader", f"AUTHORIZATION: Basic {basic}")]
 
     # --- Helpers ----------------------------------------------------------------------
     def _token_for_installation(self, installation_id: int | None) -> str:

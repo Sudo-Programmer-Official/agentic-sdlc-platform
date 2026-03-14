@@ -1,3 +1,11 @@
+"""Best-effort staging validation harness for the knowledge hardening pass.
+
+This script is intentionally retained for reruns after shared-environment
+alignment. It is useful for staging verification, but it is not yet treated as
+a stable green-check gate because the shared environment still has unrelated
+schema drift and the full Postgres concurrency pass has not completed cleanly.
+"""
+
 from __future__ import annotations
 
 import asyncio

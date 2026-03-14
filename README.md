@@ -17,6 +17,7 @@ clear boundaries for future service extraction.
 - `docs/ai-routing-cost-control.md`: routing rules, budgets, retries, cache policy, and AI ops dashboard
 - `docs/architecture/knowledge-verification-subsystem.md`: engineering memory review/publish flow
 - `docs/knowledge-verification-subsystem.md`: developer guide for the knowledge subsystem
+- `docs/task-run-execution-flow.md`: explicit task-to-run binding for manually created tasks and operator run flow
 
 ## Status
 Foundation skeleton only. No business logic, no AWS integration.

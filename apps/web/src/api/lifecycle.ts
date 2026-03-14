@@ -287,11 +287,11 @@ export async function listRuns(projectId: string) {
   return parseApiResponse(resp);
 }
 
-export async function createRun(projectId: string, executor = "dummy") {
+export async function createRun(projectId: string, executor = "dummy", taskId?: string | null) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ executor }),
+    body: JSON.stringify({ executor, task_id: taskId || null }),
   });
   return parseApiResponse(resp);
 }

@@ -6,10 +6,16 @@ const DEFAULT_API_BASE = import.meta.env.DEV
 
 const API_BASE = import.meta.env.VITE_API_BASE || DEFAULT_API_BASE;
 
-export function createEmptyRequirementsGraph() {
+export function createEmptyRequirementsGraph(projectId = "") {
+  const timestamp = new Date().toISOString();
   return {
+    project_id: projectId,
     status: "DRAFT",
-    version: null,
+    version: 0,
+    created_at: timestamp,
+    updated_at: timestamp,
+    approved_at: null,
+    approved_by: null,
     nodes: [],
     edges: [],
   };
@@ -20,7 +26,7 @@ export async function fetchGraph(projectId: string) {
   try {
     return await parseApiResponse(resp);
   } catch (err) {
-    if (isApiErrorStatus(err, 404)) return createEmptyRequirementsGraph();
+    if (isApiErrorStatus(err, 404)) return createEmptyRequirementsGraph(projectId);
     throw err;
   }
 }

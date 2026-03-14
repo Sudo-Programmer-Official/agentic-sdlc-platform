@@ -6,13 +6,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
-from app.db.models import Agent, Artifact, Project, Run, RunEvent, Trace, WorkItem
+from app.db.models import Agent, Artifact, Project, Run, RunEvent, Task, Trace, WorkItem
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.runtime import orchestrator as orchestrator_module
 from app.runtime.orchestrator import RunOrchestrator
 from app.runtime import worker_service
 from app.runtime.worker_service import tick_worker
+from app.services.run_launch import launch_run_for_project
 
 
 @pytest.fixture(autouse=True)
@@ -228,6 +229,82 @@ async def test_external_mode_falls_back_to_embedded_when_no_workers_exist(monkey
             "effective_mode": "embedded",
             "reason": "no_active_workers",
         }
+
+
+@pytest.mark.anyio
+async def test_task_bound_run_generates_task_scoped_work_items(monkeypatch, runtime_db, tmp_path):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Task bound runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        task = Task(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            title="Add audit trail to mission control",
+            description="Generate planner work items and execute the task through the connected repo.",
+            source="manual",
+        )
+        session.add(task)
+        await session.commit()
+        task_id = task.id
+
+        run = await launch_run_for_project(
+            session,
+            tenant_id=tenant_id,
+            project_id=project.id,
+            executor_name="dummy",
+            task_id=task_id,
+            schedule=False,
+        )
+        run_id = run.id
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        task = await session.get(Task, task_id)
+        assert run is not None
+        assert task is not None
+        assert run.status == "COMPLETED"
+        assert task.run_id == run_id
+        assert isinstance(run.summary, dict)
+        assert run.summary["task_id"] == str(task_id)
+        assert run.summary["task_title"] == "Add audit trail to mission control"
+        assert run.summary["goal"] == (
+            "Add audit trail to mission control: Generate planner work items and execute the task through the connected repo."
+        )
+        assert run.summary["plan_snapshot"]["steps"][0]["title"] == "Add audit trail to mission control"
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.priority.desc(), WorkItem.created_at)
+            )
+        ).scalars().all()
+        assert len(work_items) == 7
+        assert all(item.payload.get("task_id") == str(task_id) for item in work_items)
+        assert work_items[0].payload["title"] == "Add audit trail to mission control"
+        assert work_items[1].payload["title"] == "Implement backend for Add audit trail to mission control"
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        run_created = next(event for event in events if event.event_type == "RUN_CREATED")
+        dag_created = next(event for event in events if event.event_type == "WORK_DAG_CREATED")
+        assert run_created.task_id == task_id
+        assert run_created.payload["task_id"] == str(task_id)
+        assert dag_created.task_id == task_id
+        assert dag_created.payload["task_id"] == str(task_id)
+        assert dag_created.payload["work_item_count"] == 7
 
 
 class ArtifactExecutor:

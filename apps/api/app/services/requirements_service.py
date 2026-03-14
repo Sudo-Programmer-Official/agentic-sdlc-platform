@@ -277,6 +277,21 @@ def build_edges(raw_edges: List[dict]) -> List[RequirementEdge]:
     return edges
 
 
+def empty_graph(project_id: str) -> RequirementGraph:
+    timestamp = datetime.utcnow()
+    return RequirementGraph(
+        project_id=project_id,
+        version=0,
+        nodes=[],
+        edges=[],
+        status=RequirementGraphStatus.DRAFT,
+        created_at=timestamp,
+        updated_at=timestamp,
+        approved_at=None,
+        approved_by=None,
+    )
+
+
 def graph_to_dict(graph: RequirementGraph) -> dict:
     return {
         "project_id": graph.project_id,

@@ -33,10 +33,4 @@ async def list_activity(
         .limit(50)
     )
     logs = result.scalars().all()
-    data = []
-    for l in logs:
-        obj = ActivityOut.model_validate(l)
-        if getattr(l, "extra_metadata", None):
-            obj.metadata = l.extra_metadata
-        data.append(obj)
-    return data
+    return [ActivityOut.model_validate(log) for log in logs]

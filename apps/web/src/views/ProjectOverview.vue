@@ -495,6 +495,19 @@
         <el-table-column prop="title" label="Title" />
         <el-table-column prop="status" label="Status" width="120" />
         <el-table-column prop="generated_from_document_version" label="Doc Ver" width="90" />
+        <el-table-column label="Action" width="140">
+          <template #default="scope">
+            <el-button
+              type="primary"
+              size="small"
+              text
+              :loading="taskRunLoadingId === scope.row.id"
+              @click="runTask(scope.row)"
+            >
+              Run This Task
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
       <div v-if="tasksError" class="mt-2 text-sm text-rose-600">{{ tasksError }}</div>
     </el-dialog>
@@ -669,6 +682,7 @@ const newDocument = ref({
 });
 const tasks = ref<any[]>([]);
 const tasksError = ref("");
+const taskRunLoadingId = ref("");
 const createTaskLoading = ref(false);
 const createTaskError = ref("");
 const newTask = ref({
@@ -853,6 +867,25 @@ async function loadTasks() {
     tasks.value = await listTasks(projectId.value);
   } catch (err: any) {
     tasksError.value = err?.message || "Failed to load tasks";
+  }
+}
+
+async function runTask(task: any) {
+  if (!projectId.value) return;
+  taskRunLoadingId.value = task.id;
+  tasksError.value = "";
+  runError.value = "";
+  try {
+    await createRun(projectId.value, selectedExecutor.value, task.id);
+    await loadTasks();
+    await loadRuns();
+    ElMessage.success(`Run queued for task: ${task.title}`);
+  } catch (err: any) {
+    const message = err?.message || "Failed to create run for task";
+    tasksError.value = message;
+    runError.value = message;
+  } finally {
+    taskRunLoadingId.value = "";
   }
 }
 

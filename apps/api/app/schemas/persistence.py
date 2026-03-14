@@ -105,6 +105,7 @@ class RunOut(BaseModel):
 
 class RunCreate(BaseModel):
     executor: str = "dummy"
+    task_id: Optional[uuid.UUID] = None
 
 
 class ProjectRepositoryConnect(BaseModel):

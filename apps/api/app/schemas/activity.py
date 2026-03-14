@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class ActivityOut(BaseModel):
@@ -13,10 +13,8 @@ class ActivityOut(BaseModel):
     entity_type: str
     entity_id: Optional[uuid.UUID] = None
     action_type: str
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = Field(default=None, validation_alias=AliasChoices("extra_metadata", "metadata"))
     actor: Optional[str] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-        populate_by_name = True
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)

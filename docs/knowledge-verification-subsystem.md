@@ -82,7 +82,7 @@ Rules:
 - approval compares that base against the live artifact before publication
 - stale proposals are blocked from publishing and are marked `superseded`
 - only one `knowledge_publications` row can exist per proposal
-- manual sync dedupes on project, repository, branch, commit, and source type so the same commit does not create duplicate events
+- repeated manual sync requests dedupe on project, repository, branch, and head commit so the same manual-sync target does not create duplicate events
 
 ## Local Testing
 
@@ -102,3 +102,25 @@ PYTHONPATH=apps/api python3 scripts/seed_knowledge_demo.py
 - `python3 -m pytest apps/api/tests/test_knowledge_api.py` covers scoping, reviewer identity, lifecycle validation, stale-publish blocking, manual-sync idempotency, and event status behavior, but local execution requires `aiosqlite`.
 - `python3 -m pytest apps/api/tests/test_github_webhook_signature.py` still passes after the webhook changes.
 - `npm run build` passes for the web app.
+
+## Validation Status
+
+Implemented and verified:
+
+- the hardening migration applied successfully to the shared staging/dev database and the DB now reports revision `20260314_0010`
+- existing non-knowledge project records remained readable after the migration
+- local regression coverage passed for service logic and webhook signature handling
+- the web build still passes
+- proposal/artifact approval now takes row locks in the publish path to reduce retry races on Postgres
+
+Implemented but not fully live-validated:
+
+- full live Postgres concurrency proof for repeated approve/reject/defer retries
+- full live end-to-end replay of webhook plus manual-sync lifecycle scenarios
+- stable repeatable execution of the live validation harness
+
+Known limitations and follow-up:
+
+- the shared staging/dev database has schema drift relative to the current ORM model on the `tenants` table (`system_reserved` is missing there), which blocked tenant-fixture setup during live validation
+- the new `scripts/validate_knowledge_hardening_live.py` harness is useful for reruns, but the first live pass stalled before the entire concurrency/state-machine suite completed
+- treat this hardening pass as implementation-complete and validation-partial until the staging schema drift is reconciled and the live validation harness is rerun cleanly

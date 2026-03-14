@@ -60,12 +60,16 @@ class RunOrchestrator:
             run = await session.get(Run, run_id)
             if run is None:
                 return
-            await generate_template_dag(
+            selected_task_id = None
+            if isinstance(run.summary, dict):
+                selected_task_id = run.summary.get("task_id")
+            work_item_count = await generate_template_dag(
                 session,
                 project_id=run.project_id,
                 run_id=run_id,
                 executor=self.executor.name,
                 tenant_id=run.tenant_id,
+                run_summary=run.summary,
             )
             snapshot = await persist_run_plan_snapshot(session, run)
             decomposition = await persist_run_task_decomposition(session, run)
@@ -76,6 +80,8 @@ class RunOrchestrator:
                 event_type="WORK_DAG_CREATED",
                 actor_type=actor_type,
                 tenant_id=run.tenant_id,
+                task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
+                payload={"work_item_count": work_item_count, "task_id": selected_task_id},
             )
             await record_event(
                 session,
@@ -85,7 +91,9 @@ class RunOrchestrator:
                 actor_type=actor_type,
                 actor_id=actor_id,
                 tenant_id=run.tenant_id,
+                task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
                 payload={
+                    "task_id": selected_task_id,
                     "goal": snapshot.get("goal"),
                     "step_count": len(snapshot.get("steps", [])),
                     "validation_steps": snapshot.get("validation_steps", []),
@@ -99,7 +107,9 @@ class RunOrchestrator:
                 actor_type=actor_type,
                 actor_id=actor_id,
                 tenant_id=run.tenant_id,
+                task_id=uuid.UUID(str(selected_task_id)) if selected_task_id else None,
                 payload={
+                    "task_id": selected_task_id,
                     "goal": decomposition.get("goal"),
                     "template_key": decomposition.get("template_key"),
                     "subtask_count": len(decomposition.get("subtasks", [])),

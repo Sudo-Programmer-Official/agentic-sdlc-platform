@@ -69,7 +69,7 @@ from app.services.errors import (
 from core.models import Project as LegacyProject, Stage, TaskStatus
 from app.db.models.project import Project as DBProject
 from app.db.session import get_session
-from app.services.requirements_service import graph_to_dict, build_edges, build_nodes
+from app.services.requirements_service import build_edges, build_nodes, empty_graph, graph_to_dict
 
 router = APIRouter()
 projects_router = APIRouter(prefix="/projects", tags=["projects"])
@@ -436,11 +436,11 @@ async def get_requirements_graph(
     try:
         await _ensure_legacy_project(project_id, session)
         graph = requirements_service.get_graph(project_id)
-        return RequirementGraphModel(**graph_to_dict(graph))
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except RequirementGraphNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RequirementGraphNotFoundError:
+        graph = empty_graph(project_id)
+    return RequirementGraphModel(**graph_to_dict(graph))
 
 
 @projects_router.post("/{project_id}/plan/regenerate", response_model=PlanRegenerateResponse)

@@ -62,3 +62,23 @@ async def test_db_backed_project_can_use_requirements_graph_routes(db_session):
         get_resp = await client.get(f"/api/v1/projects/{project_id}/requirements-graph")
         assert get_resp.status_code == 200
         assert get_resp.json()["project_id"] == project_id
+
+
+@pytest.mark.anyio
+async def test_db_backed_project_gets_empty_requirements_graph_before_creation(db_session):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        create_resp = await client.post("/api/v1/projects", json={"name": "Empty Req Bridge"})
+        assert create_resp.status_code == 201
+        project_id = create_resp.json()["id"]
+
+        get_resp = await client.get(f"/api/v1/projects/{project_id}/requirements-graph")
+        assert get_resp.status_code == 200
+
+        graph = get_resp.json()
+        assert graph["project_id"] == project_id
+        assert graph["status"] == "DRAFT"
+        assert graph["version"] == 0
+        assert graph["approved_at"] is None
+        assert graph["approved_by"] is None
+        assert graph["nodes"] == []
+        assert graph["edges"] == []

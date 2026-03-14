@@ -45,6 +45,25 @@ That keeps tenancy, auth, and repo integration aligned with the rest of the plat
 - Unapproved content remains draft-only in proposals.
 - Publication history preserves previous versions for future rollback tooling.
 
+## Validation Snapshot
+
+Verified:
+
+- the hardening schema upgrade reached `20260314_0010` on the shared staging/dev database
+- existing project data remained readable after the migration
+- local API/service regression coverage and the web build passed after the hardening changes
+
+Not fully verified yet:
+
+- full live Postgres concurrency proof for retry-heavy proposal actions
+- full live webhook plus manual-sync lifecycle replay without harness interruption
+
+Known limitations and follow-up:
+
+- the shared staging/dev environment has unrelated schema drift on `tenants.system_reserved`, which blocked part of the live fixture setup
+- the retained live validation harness in `scripts/validate_knowledge_hardening_live.py` is a rerun tool, not yet a stable gate
+- do not expand subsystem scope again until the shared environment is aligned and the live Postgres validation pass completes cleanly
+
 ## Future Extensions
 
 - policy-driven low-risk auto-approval

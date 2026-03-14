@@ -287,19 +287,21 @@ async def create_run(
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
     executor_name = (payload.executor if payload else "dummy").lower()
+    task_id = payload.task_id if payload else None
     try:
         run = await launch_run_for_project(
             session,
             tenant_id=tenant_id,
             project_id=project_id,
             executor_name=executor_name,
+            task_id=task_id,
             actor_type="USER",
             schedule=True,
         )
         return _run_out(run)
     except ValueError as exc:
         detail = str(exc)
-        if detail == "Project not found":
+        if detail in {"Project not found", "Task not found"}:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
 

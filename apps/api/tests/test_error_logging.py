@@ -26,8 +26,9 @@ def test_unhandled_exception_log_includes_type_and_message(caplog):
     caplog.set_level(logging.ERROR, logger="app")
     client = TestClient(app, raise_server_exceptions=False)
 
-    response = client.get("/boom")
+    response = client.get("/boom", headers={"Origin": "https://www.prompt2pr.com"})
 
     assert response.status_code == 500
+    assert response.headers["access-control-allow-origin"] == "https://www.prompt2pr.com"
     messages = [record.getMessage() for record in caplog.records]
     assert any("type=RuntimeError" in message and "error=boom" in message for message in messages)

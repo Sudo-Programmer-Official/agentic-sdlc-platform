@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 
 from fastapi import FastAPI
@@ -42,10 +43,11 @@ def create_app() -> FastAPI:
     # CORS (frontend at prompt2pr.com calls api.prompt2pr.com; localhost during dev)
     prompt2pr_origin_regex = r"https://(www\.)?prompt2pr\.com"
     local_origin_regex = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    allowed_origin_pattern = re.compile(f"{prompt2pr_origin_regex}|{local_origin_regex}")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
-        allow_origin_regex=f"{prompt2pr_origin_regex}|{local_origin_regex}",
+        allow_origin_regex=allowed_origin_pattern.pattern,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -64,6 +66,17 @@ def create_app() -> FastAPI:
         current = get_current_build_info()
         return {"current": current, "history": get_build_history()}
 
+    def _error_cors_headers(origin: str | None) -> dict[str, str]:
+        if not origin:
+            return {}
+        if origin in settings.allowed_origins or allowed_origin_pattern.fullmatch(origin):
+            return {
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Vary": "Origin",
+            }
+        return {}
+
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request, exc):
         """Log and surface a short error id for faster prod debugging."""
@@ -78,6 +91,7 @@ def create_app() -> FastAPI:
         )
         return JSONResponse(
             status_code=500,
+            headers=_error_cors_headers(request.headers.get("origin")),
             content={"error": "internal_server_error", "error_id": error_id},
         )
 

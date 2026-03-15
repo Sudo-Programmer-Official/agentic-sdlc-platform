@@ -14,6 +14,7 @@ from app.runtime.orchestrator import RunOrchestrator
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
 from app.services.repo_connector import get_project_repository
+from app.services.task_branching import clean_branch_value, resolve_task_branch_plan
 from app.services.workspace_supervisor import ensure_run_workspace
 
 log = logging.getLogger("app.run_launch")
@@ -29,6 +30,9 @@ def _build_task_run_summary(task: Task) -> dict[str, str | None]:
         "task_title": title,
         "task_description": description,
         "task_source": task.source,
+        "task_branch_strategy": task.branch_strategy,
+        "task_base_branch": clean_branch_value(task.base_branch),
+        "task_requested_branch_name": clean_branch_value(task.branch_name),
     }
 
 
@@ -69,6 +73,7 @@ async def launch_run_for_project(
         raise ValueError("Project not found")
     selected_task: Task | None = None
     run_summary: dict[str, str | None] | None = None
+    branch_plan = None
     if task_id is not None:
         selected_task = await session.scalar(
             select(Task).where(
@@ -95,12 +100,16 @@ async def launch_run_for_project(
         )
 
     project_repo = await get_project_repository(session, project_id=project_id, tenant_id=tenant_id)
+    default_repo_branch = project_repo.default_branch if project_repo else None
+    if selected_task is not None:
+        branch_plan = resolve_task_branch_plan(selected_task, default_repo_branch)
     run = Run(
         project_id=project_id,
         tenant_id=tenant_id,
         status="QUEUED",
         executor=executor_name.lower(),
         summary=run_summary,
+        branch_name=branch_plan.actual_branch_name if branch_plan else None,
     )
     session.add(run)
     await session.flush()
@@ -112,11 +121,21 @@ async def launch_run_for_project(
         run,
         require_repo=run.executor in {"codex", "test"},
         repo_url=project_repo.repo_url if project_repo else None,
-        repo_branch=project_repo.default_branch if project_repo else None,
+        repo_branch=branch_plan.base_branch if branch_plan else default_repo_branch,
         repo_provider=project_repo.provider if project_repo else None,
         repo_full_name=project_repo.repo_full_name if project_repo else None,
         repo_installation_id=project_repo.installation_id if project_repo else None,
     )
+    if isinstance(run.summary, dict):
+        run.summary = {
+            **run.summary,
+            "task_branch_strategy": branch_plan.strategy if branch_plan else "auto",
+            "task_base_branch": branch_plan.base_branch if branch_plan else default_repo_branch,
+            "task_requested_branch_name": branch_plan.requested_branch_name if branch_plan else None,
+            "resolved_branch_name": run.branch_name,
+        }
+        session.add(run)
+        await session.flush()
     await log_activity(
         session,
         project_id=project_id,
@@ -128,6 +147,9 @@ async def launch_run_for_project(
             "executor": run.executor,
             "task_id": str(selected_task.id) if selected_task else None,
             "task_title": selected_task.title if selected_task else None,
+            "branch_strategy": branch_plan.strategy if branch_plan else "auto",
+            "base_branch": branch_plan.base_branch if branch_plan else default_repo_branch,
+            "branch_name": run.branch_name,
         },
         actor=actor_id,
     )
@@ -138,7 +160,14 @@ async def launch_run_for_project(
             entity_type="task",
             entity_id=selected_task.id,
             action_type="task.run.created",
-            metadata={"run_id": str(run.id), "executor": run.executor, "status": run.status},
+            metadata={
+                "run_id": str(run.id),
+                "executor": run.executor,
+                "status": run.status,
+                "branch_strategy": branch_plan.strategy if branch_plan else "auto",
+                "base_branch": branch_plan.base_branch if branch_plan else default_repo_branch,
+                "branch_name": run.branch_name,
+            },
             actor=actor_id,
         )
     await record_event(
@@ -155,6 +184,9 @@ async def launch_run_for_project(
             "executor": run.executor,
             "task_id": str(selected_task.id) if selected_task else None,
             "task_title": selected_task.title if selected_task else None,
+            "branch_strategy": branch_plan.strategy if branch_plan else "auto",
+            "base_branch": branch_plan.base_branch if branch_plan else default_repo_branch,
+            "branch_name": run.branch_name,
         },
     )
     log.info(

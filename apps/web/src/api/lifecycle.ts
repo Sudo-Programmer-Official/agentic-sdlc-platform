@@ -62,6 +62,9 @@ export type CreateTaskPayload = {
   source?: string;
   document_id?: string | null;
   created_by?: string | null;
+  branch_strategy?: "auto" | "new" | "existing";
+  base_branch?: string | null;
+  branch_name?: string | null;
 };
 
 export type CreateDocumentPayload = {

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+
+
+TaskBranchStrategy = Literal["auto", "new", "existing"]
 
 
 class ProjectCreate(BaseModel):
@@ -59,6 +62,37 @@ class TaskCreate(BaseModel):
     source: str = "manual"
     document_id: Optional[uuid.UUID] = None
     created_by: Optional[str] = None
+    branch_strategy: TaskBranchStrategy = "auto"
+    base_branch: Optional[str] = None
+    branch_name: Optional[str] = None
+
+    @field_validator("branch_strategy", mode="before")
+    @classmethod
+    def normalize_branch_strategy(cls, value: str | None) -> str:
+        return (value or "auto").strip().lower()
+
+    @field_validator("base_branch", "branch_name", mode="before")
+    @classmethod
+    def normalize_branch_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def validate_branch_settings(self) -> "TaskCreate":
+        if self.branch_strategy == "auto":
+            self.base_branch = None
+            self.branch_name = None
+            return self
+
+        if not self.branch_name:
+            raise ValueError("branch_name is required when branch_strategy is 'new' or 'existing'")
+
+        if self.branch_strategy == "existing":
+            self.base_branch = None
+
+        return self
 
 
 class TaskOut(BaseModel):
@@ -75,6 +109,9 @@ class TaskOut(BaseModel):
     assignee: Optional[str]
     source: str
     created_by: Optional[str]
+    branch_strategy: TaskBranchStrategy = "auto"
+    base_branch: Optional[str]
+    branch_name: Optional[str]
     created_at: datetime
     updated_at: datetime
 

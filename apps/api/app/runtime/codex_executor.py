@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 import re
@@ -33,6 +34,8 @@ You must output ONLY a valid JSON object matching the provided schema.
 Prefer apply_patch with unified diff (git format) for edits; use write_file for new files or full replacements.
 Do not invent files outside the repo. Do not include explanations outside JSON."""
 
+log = logging.getLogger("app.runtime.codex_executor")
+
 
 class CodexExecutor(TaskExecutor):
     name = "codex"
@@ -56,6 +59,8 @@ class CodexExecutor(TaskExecutor):
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
         self.repo_root = repo_root
         repo = RepoTools(repo_root, logs_path=Path(context.logs_path) if context.logs_path else None)
+        payload = work_item.payload or {}
+        task_id = payload.get("task_id") if isinstance(payload.get("task_id"), str) else None
 
         context_bundle = self._build_context(repo, work_item)
         context_bundle.setdefault("meta", {})
@@ -140,6 +145,19 @@ class CodexExecutor(TaskExecutor):
             block_on_human_review=True,
         )
         if prepared.stop_reason:
+            log.warning(
+                "AI execution blocked run_id=%s work_item_id=%s task_id=%s ai_job_id=%s work_item_type=%s tier=%s model=%s provider=%s stop_reason=%s next_action=%s",
+                work_item.run_id,
+                work_item.id,
+                task_id,
+                prepared.job_id,
+                work_item.type,
+                prepared.policy.selected_model_tier,
+                prepared.model_name,
+                self.settings.llm_provider,
+                prepared.stop_reason,
+                prepared.next_action,
+            )
             return {
                 "status": "FAILED",
                 "message": prepared.stop_reason,
@@ -148,6 +166,13 @@ class CodexExecutor(TaskExecutor):
                     "next_action": prepared.next_action,
                     "estimated_cost_cents": prepared.estimated_cost_cents,
                     "context_size": prepared.context_size,
+                    "run_id": str(work_item.run_id),
+                    "work_item_id": str(work_item.id),
+                    "task_id": task_id,
+                    "provider": self.settings.llm_provider,
+                    "model_name": prepared.model_name,
+                    "selected_model_tier": prepared.policy.selected_model_tier,
+                    "policy": self._policy_payload(prepared.policy),
                 },
                 "warnings": ["ai_policy_stop"],
             }
@@ -157,10 +182,25 @@ class CodexExecutor(TaskExecutor):
         usage: dict[str, Any] = {}
         current_user_prompt = user_prompt
         parse_retry_used = False
+        client = self._get_client()
+        log.info(
+            "AI execution starting run_id=%s work_item_id=%s task_id=%s ai_job_id=%s work_item_type=%s tier=%s model=%s provider=%s client_method=%s openai_sdk_version=%s policy=%s",
+            work_item.run_id,
+            work_item.id,
+            task_id,
+            prepared.job_id,
+            work_item.type,
+            prepared.policy.selected_model_tier,
+            prepared.model_name,
+            self.settings.llm_provider,
+            client.method_name(),
+            client.sdk_version(),
+            self._policy_payload(prepared.policy),
+        )
         for attempt in range(prepared.policy.max_retries + 1):
             await self._job_manager.record_attempt(prepared.job_id)
             try:
-                raw, usage = await self._get_client().generate(
+                raw, usage = await client.generate(
                     SYSTEM_PROMPT,
                     current_user_prompt,
                     model=prepared.model_name or self.settings.codex_model,
@@ -180,8 +220,9 @@ class CodexExecutor(TaskExecutor):
                         f"{user_prompt}\nYour previous output was invalid. Respond with EXACTLY one JSON object matching the schema. No prose."
                     )
                     continue
+                error_kind = "structured_parser_failure" if parse_failure else retry_error_kind(exc)
                 if not parse_failure and attempt < prepared.policy.max_retries and is_retryable_error(exc):
-                    await self._job_manager.record_retry(prepared.job_id, retry_error_kind(exc))
+                    await self._job_manager.record_retry(prepared.job_id, error_kind)
                     await asyncio.sleep(min(2 ** attempt, 3))
                     continue
                 failure_reason = "output_contract_invalid" if parse_failure else "model_call_failed"
@@ -189,9 +230,39 @@ class CodexExecutor(TaskExecutor):
                     prepared.job_id,
                     reason=failure_reason,
                     next_action="Reduce scope, tighten context, or request human review before retrying.",
-                    error_kind="structured_parser_failure" if parse_failure else retry_error_kind(exc),
+                    error_kind=error_kind,
                     input_tokens=int(usage.get("input_tokens") or 0),
                     output_tokens=int(usage.get("output_tokens") or 0),
+                    details={
+                        "error_message": str(exc),
+                        "exception_type": exc.__class__.__name__,
+                        "provider": self.settings.llm_provider,
+                        "model_name": prepared.model_name or self.settings.codex_model,
+                        "client_method": client.method_name(),
+                        "openai_sdk_version": client.sdk_version(),
+                        "selected_model_tier": prepared.policy.selected_model_tier,
+                        "policy": self._policy_payload(prepared.policy),
+                        "run_id": str(work_item.run_id),
+                        "work_item_id": str(work_item.id),
+                        "task_id": task_id,
+                        "work_item_type": work_item.type,
+                    },
+                )
+                log.exception(
+                    "AI execution failed run_id=%s work_item_id=%s task_id=%s ai_job_id=%s work_item_type=%s tier=%s model=%s provider=%s client_method=%s openai_sdk_version=%s failure_reason=%s error_kind=%s",
+                    work_item.run_id,
+                    work_item.id,
+                    task_id,
+                    prepared.job_id,
+                    work_item.type,
+                    prepared.policy.selected_model_tier,
+                    prepared.model_name,
+                    self.settings.llm_provider,
+                    client.method_name(),
+                    client.sdk_version(),
+                    failure_reason,
+                    error_kind,
+                    exc_info=exc,
                 )
                 return {
                     "status": "FAILED",
@@ -200,6 +271,19 @@ class CodexExecutor(TaskExecutor):
                         "raw": raw,
                         "ai_job_id": str(prepared.job_id),
                         "next_action": "Reduce scope, tighten context, or request human review before retrying.",
+                        "error_message": str(exc),
+                        "exception_type": exc.__class__.__name__,
+                        "error_kind": error_kind,
+                        "run_id": str(work_item.run_id),
+                        "work_item_id": str(work_item.id),
+                        "task_id": task_id,
+                        "work_item_type": work_item.type,
+                        "provider": self.settings.llm_provider,
+                        "model_name": prepared.model_name or self.settings.codex_model,
+                        "client_method": client.method_name(),
+                        "openai_sdk_version": client.sdk_version(),
+                        "selected_model_tier": prepared.policy.selected_model_tier,
+                        "policy": self._policy_payload(prepared.policy),
                     },
                     "warnings": ["ai_policy_stop"],
                 }

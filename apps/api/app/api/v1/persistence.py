@@ -1315,6 +1315,9 @@ async def create_task(
         assignee=payload.assignee,
         source=payload.source,
         created_by=payload.created_by,
+        branch_strategy=payload.branch_strategy,
+        base_branch=payload.base_branch,
+        branch_name=payload.branch_name,
     )
     session.add(task)
     await session.flush()
@@ -1324,7 +1327,13 @@ async def create_task(
         entity_type="task",
         entity_id=task.id,
         action_type="task.created",
-        metadata={"title": payload.title, "status": payload.status},
+        metadata={
+            "title": payload.title,
+            "status": payload.status,
+            "branch_strategy": payload.branch_strategy,
+            "base_branch": payload.base_branch,
+            "branch_name": payload.branch_name,
+        },
     )
     await session.commit()
     await session.refresh(task)

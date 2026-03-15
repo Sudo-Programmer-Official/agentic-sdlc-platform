@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import logging
 import math
 import uuid
 from contextlib import asynccontextmanager
@@ -25,6 +26,8 @@ from app.db.models import (
     RunSummary,
 )
 from app.db.session import SessionLocal
+
+log = logging.getLogger("app.ai_policy")
 
 
 ModelTier = Literal["tier_premium", "tier_standard", "tier_economy", "tier_none"]
@@ -415,6 +418,7 @@ class AIJobManager:
         session: AsyncSession | None = None,
     ) -> PreparedAIExecution:
         policy = self.route_job(request)
+        model_name = self.resolve_model_name(policy.selected_model_tier)
         input_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
         context_size = estimate_tokens(user_prompt)
         output_tokens = completion_token_estimate if completion_token_estimate is not None else self.default_completion_tokens(
@@ -435,7 +439,7 @@ class AIJobManager:
             stop_reason = "budget_exceeded"
             next_action = "Shrink context, split the task, or request approval before retrying."
             status = "stopped"
-        elif policy.selected_model_tier != "tier_none" and self.resolve_model_name(policy.selected_model_tier) is None:
+        elif policy.selected_model_tier != "tier_none" and model_name is None:
             stop_reason = "model_tier_unconfigured"
             next_action = "Configure the tier model mapping before executing this job."
             status = "stopped"
@@ -476,15 +480,32 @@ class AIJobManager:
                 details_json={
                     "filters_used": filters_used,
                     "metadata": request.metadata,
+                    "provider": self._settings.llm_provider,
+                    "model_name": model_name,
                 },
                 completed_at=_now_utc() if status == "stopped" else None,
             )
             db.add(row)
             await db.flush()
+            log.info(
+                "AI job prepared job_id=%s run_id=%s work_item_id=%s role=%s task_type=%s tier=%s model=%s provider=%s stop_reason=%s context_size=%s budget_cents=%.4f estimated_cost_cents=%.4f",
+                row.id,
+                request.run_id,
+                request.work_item_id,
+                request.role,
+                policy.task_type,
+                policy.selected_model_tier,
+                model_name,
+                self._settings.llm_provider,
+                stop_reason,
+                context_size,
+                policy.budget_cents,
+                estimated_cost,
+            )
             return PreparedAIExecution(
                 job_id=row.id,
                 policy=policy,
-                model_name=self.resolve_model_name(policy.selected_model_tier),
+                model_name=model_name,
                 estimated_input_tokens=input_tokens,
                 estimated_output_tokens=output_tokens,
                 estimated_cost_cents=estimated_cost,

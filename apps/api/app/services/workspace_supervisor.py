@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ from app.services.workspace_commands import (
     get_workspace_allowed_command_prefixes,
     workspace_command_audit_path,
 )
+
+log = logging.getLogger("app.workspace_supervisor")
 
 
 @dataclass(frozen=True)
@@ -219,6 +222,16 @@ async def ensure_run_workspace(
         run.branch_name = paths.branch_name
         run.workspace_status = "ERROR"
         run.workspace_error = str(exc)
+        log.exception(
+            "Workspace prepare failed run_id=%s project_id=%s branch=%s repo_url=%s repo_branch=%s provider=%s",
+            run.id,
+            run.project_id,
+            paths.branch_name,
+            repo_url,
+            repo_branch,
+            repo_provider,
+            exc_info=exc,
+        )
         session.add(run)
         await session.flush()
         return WorkspacePaths(

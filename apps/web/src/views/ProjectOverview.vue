@@ -494,6 +494,12 @@
         <el-table-column prop="id" label="ID" width="240" />
         <el-table-column prop="title" label="Title" />
         <el-table-column prop="status" label="Status" width="120" />
+        <el-table-column label="Branch" width="200">
+          <template #default="scope">
+            <div class="text-sm text-slate-800">{{ taskBranchLabel(scope.row) }}</div>
+            <div class="text-xs text-slate-500">{{ taskBranchDetail(scope.row) }}</div>
+          </template>
+        </el-table-column>
         <el-table-column prop="generated_from_document_version" label="Doc Ver" width="90" />
         <el-table-column label="Action" width="140">
           <template #default="scope">
@@ -512,7 +518,7 @@
       <div v-if="tasksError" class="mt-2 text-sm text-rose-600">{{ tasksError }}</div>
     </el-dialog>
 
-    <el-dialog v-model="showCreateTaskDialog" title="Create Task" width="560px">
+    <el-dialog v-model="showCreateTaskDialog" title="Create Task" width="640px">
       <div class="space-y-3">
         <el-input v-model="newTask.title" placeholder="Task title" />
         <el-input v-model="newTask.description" type="textarea" :rows="3" placeholder="Description (optional)" />
@@ -537,6 +543,30 @@
             <el-option label="Ops" value="ops" />
           </el-select>
           <el-input v-model="newTask.assignee" placeholder="Assignee (optional)" />
+        </div>
+        <div class="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <div class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Branch strategy</div>
+          <el-select v-model="newTask.branch_strategy" placeholder="Select branch strategy" style="width: 100%">
+            <el-option label="Auto-generate isolated run branch" value="auto" />
+            <el-option label="Create new branch from base" value="new" />
+            <el-option label="Reuse existing branch" value="existing" />
+          </el-select>
+          <div v-if="newTask.branch_strategy === 'auto'" class="text-xs text-slate-500">
+            System will create an isolated run branch automatically for this task.
+          </div>
+          <template v-else-if="newTask.branch_strategy === 'new'">
+            <div class="grid gap-3 md:grid-cols-2">
+              <el-input v-model="newTask.base_branch" placeholder="Base branch" />
+              <el-input v-model="newTask.branch_name" placeholder="New branch name" />
+            </div>
+            <div class="text-xs text-slate-500">Suggested branch: {{ suggestedTaskBranchName }}</div>
+          </template>
+          <template v-else>
+            <el-input v-model="newTask.branch_name" placeholder="Target branch" />
+            <div class="text-xs text-slate-500">
+              Reuse a branch for follow-on work. Avoid overlapping active runs on the same branch.
+            </div>
+          </template>
         </div>
         <el-select
           v-model="newTask.document_id"
@@ -694,6 +724,9 @@ const newTask = ref({
   assignee: "",
   document_id: "",
   created_by: "ui-user",
+  branch_strategy: "auto",
+  base_branch: "main",
+  branch_name: "",
 });
 const explainTaskId = ref("");
 const explainResult = ref<any | null>(null);
@@ -734,6 +767,8 @@ const workItemError = ref("");
 const runEvents = ref<any[]>([]);
 const hasCompletedRun = computed(() => runs.value.some((run) => run.status === "COMPLETED"));
 const hasRunningRun = computed(() => runs.value.some((run) => ["RUNNING", "QUEUED"].includes(run.status)));
+const taskDefaultBaseBranch = computed(() => projectRepo.value?.default_branch || "main");
+const suggestedTaskBranchName = computed(() => suggestTaskBranchName(newTask.value.title));
 const riskClass = computed(() => {
   const risk = lifecycleScore.value?.risk_level || "UNKNOWN";
   if (risk === "HIGH") return "text-rose-600";
@@ -744,6 +779,34 @@ const riskClass = computed(() => {
 
 function goHome() {
   router.push("/");
+}
+
+function suggestTaskBranchName(title: string) {
+  const slug = title
+    .toLowerCase()
+    .replace(/['"]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return slug ? `task/${slug}` : "task/new-work";
+}
+
+function taskBranchLabel(task: any) {
+  const strategy = (task?.branch_strategy || "auto").toLowerCase();
+  if (strategy === "new") return "New branch";
+  if (strategy === "existing") return "Existing branch";
+  return "Auto run branch";
+}
+
+function taskBranchDetail(task: any) {
+  const strategy = (task?.branch_strategy || "auto").toLowerCase();
+  if (strategy === "new") {
+    return `${task?.branch_name || "task/new-work"} from ${task?.base_branch || taskDefaultBaseBranch.value}`;
+  }
+  if (strategy === "existing") {
+    return task?.branch_name || "Branch required";
+  }
+  return "System-generated isolated branch";
 }
 
 function goToRun() {
@@ -1070,6 +1133,9 @@ function resetCreateTaskForm() {
     assignee: "",
     document_id: "",
     created_by: "ui-user",
+    branch_strategy: "auto",
+    base_branch: taskDefaultBaseBranch.value,
+    branch_name: "",
   };
   createTaskError.value = "";
 }
@@ -1085,6 +1151,10 @@ async function submitCreateTask() {
     createTaskError.value = "Task title is required.";
     return;
   }
+  if (["new", "existing"].includes(newTask.value.branch_strategy) && !newTask.value.branch_name.trim()) {
+    createTaskError.value = "Branch name is required for new or existing branch strategies.";
+    return;
+  }
   createTaskLoading.value = true;
   createTaskError.value = "";
   try {
@@ -1097,6 +1167,13 @@ async function submitCreateTask() {
       assignee: newTask.value.assignee.trim() || null,
       document_id: newTask.value.document_id || null,
       created_by: newTask.value.created_by.trim() || null,
+      branch_strategy: newTask.value.branch_strategy,
+      base_branch:
+        newTask.value.branch_strategy === "new"
+          ? newTask.value.base_branch.trim() || taskDefaultBaseBranch.value
+          : null,
+      branch_name:
+        newTask.value.branch_strategy === "auto" ? null : newTask.value.branch_name.trim() || null,
       source: "manual",
     });
     showCreateTaskDialog.value = false;
@@ -1111,6 +1188,38 @@ async function submitCreateTask() {
     createTaskLoading.value = false;
   }
 }
+
+watch(
+  () => newTask.value.branch_strategy,
+  (strategy, previousStrategy) => {
+    if (strategy === "new" && previousStrategy !== "new") {
+      newTask.value.base_branch = newTask.value.base_branch.trim() || taskDefaultBaseBranch.value;
+      newTask.value.branch_name = newTask.value.branch_name.trim() || suggestedTaskBranchName.value;
+      return;
+    }
+    if (strategy === "existing") {
+      newTask.value.base_branch = taskDefaultBaseBranch.value;
+      if (previousStrategy === "auto") {
+        newTask.value.branch_name = "";
+      }
+      return;
+    }
+    newTask.value.base_branch = taskDefaultBaseBranch.value;
+    newTask.value.branch_name = "";
+  }
+);
+
+watch(
+  () => newTask.value.title,
+  (title, previousTitle) => {
+    if (newTask.value.branch_strategy !== "new") return;
+    const currentBranch = newTask.value.branch_name.trim();
+    const previousSuggestion = suggestTaskBranchName(previousTitle || "");
+    if (!currentBranch || currentBranch === previousSuggestion) {
+      newTask.value.branch_name = suggestTaskBranchName(title);
+    }
+  }
+);
 
 async function loadDocuments() {
   if (!projectId.value) return;

@@ -144,6 +144,7 @@ def test_resolve_repo_runtime_access_fails_closed_when_installation_is_present_b
         lambda: types.SimpleNamespace(runtime_git_auth_mode="auto"),
     )
     monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: None)
+    monkeypatch.setattr(repo_connector, "_lazy_github_adapter_from_env", lambda: None)
 
     with pytest.raises(RuntimeError, match="github_app_adapter_unconfigured"):
         repo_connector.resolve_repo_runtime_access(
@@ -171,6 +172,28 @@ def test_resolve_repo_runtime_access_fails_closed_when_installation_token_genera
             repo_full_name="acme/private-repo",
             installation_id=1234,
         )
+
+
+def test_resolve_repo_runtime_access_uses_lazy_env_adapter_when_provider_registry_is_empty(monkeypatch):
+    adapter = _github_adapter(monkeypatch)
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="auto"),
+    )
+    monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: None)
+    monkeypatch.setattr(repo_connector, "_lazy_github_adapter_from_env", lambda: adapter)
+
+    access = repo_connector.resolve_repo_runtime_access(
+        provider="github",
+        repo_url="https://github.com/acme/private-repo.git",
+        repo_full_name="acme/private-repo",
+        installation_id=1234,
+    )
+
+    assert access.auth_mode == "github_app_https"
+    assert access.token_generated is True
+    assert access.adapter_kind == "GitHubAppAdapter"
 
 
 def test_push_branch_passes_git_config_for_github_app_https(monkeypatch, tmp_path: Path):

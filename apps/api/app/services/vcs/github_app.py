@@ -22,13 +22,13 @@ class GitHubAppAdapter(VCSAdapter):
         self,
         app_id: str,
         private_key_pem: str,
-        webhook_secret: str,
+        webhook_secret: str | None,
         allowed_org: Optional[str],
         store: InMemoryGitHubIntegrationStore,
     ) -> None:
         self._app_id = app_id
         self._private_key_pem = private_key_pem
-        self._webhook_secret = webhook_secret
+        self._webhook_secret = webhook_secret or ""
         self._allowed_org = allowed_org
         self._store = store
 
@@ -197,6 +197,8 @@ class GitHubAppAdapter(VCSAdapter):
 
     # --- Webhook signature ------------------------------------------------------------
     def verify_signature(self, body: bytes, signature_header: str | None) -> bool:
+        if not self._webhook_secret:
+            return False
         if not signature_header or not signature_header.startswith("sha256="):
             return False
         given = signature_header.split("sha256=")[-1]
@@ -215,7 +217,7 @@ def build_github_adapter(store: InMemoryGitHubIntegrationStore) -> Optional[GitH
     private_key = os.getenv("GITHUB_PRIVATE_KEY")
     webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET")
     allowed_org = os.getenv("GITHUB_ALLOWED_ORG")
-    if not (app_id and private_key and webhook_secret):
+    if not (app_id and private_key):
         return None
     return GitHubAppAdapter(
         app_id=app_id,

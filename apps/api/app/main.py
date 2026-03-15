@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import uuid
@@ -112,6 +113,12 @@ def create_app() -> FastAPI:
             log.info("Runtime tool availability git=%s", git_binary)
         else:
             log.warning("Runtime tool availability git=missing repo-backed runs will fail until git is installed")
+        log.info(
+            "GitHub integration env app_id_present=%s private_key_present=%s webhook_secret_present=%s",
+            bool(os.getenv("GITHUB_APP_ID")),
+            bool(os.getenv("GITHUB_PRIVATE_KEY")),
+            bool(os.getenv("GITHUB_WEBHOOK_SECRET")),
+        )
         log.info("Startup phase=migrations begin")
         try:
             await run_startup_migrations()

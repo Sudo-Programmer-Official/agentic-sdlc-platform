@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.models import Project, ProjectRepository
-from app.services.vcs import get_default_installation_id, get_vcs_adapter
+from app.services.vcs import InMemoryGitHubIntegrationStore, build_github_adapter, get_default_installation_id, get_vcs_adapter
 from app.services.vcs.github_app import GitHubAppAdapter
 
 log = logging.getLogger("app.repo_connector")
@@ -32,6 +33,11 @@ class RepoRuntimeAccess:
     adapter_kind: str | None = None
     credential_strategy: str = "anonymous"
     selection_reason: str | None = None
+
+
+@lru_cache(maxsize=1)
+def _lazy_github_adapter_from_env() -> GitHubAppAdapter | None:
+    return build_github_adapter(InMemoryGitHubIntegrationStore())
 
 
 def _normalize_provider(provider: str) -> str:
@@ -206,6 +212,8 @@ def resolve_repo_runtime_access(
     full_name = _normalize_repo_full_name(cleaned_repo_url, repo_full_name)
     auth_mode = (get_settings().runtime_git_auth_mode or "auto").strip().lower()
     adapter = get_vcs_adapter(normalized_provider)
+    if adapter is None and normalized_provider == "github":
+        adapter = _lazy_github_adapter_from_env()
     adapter_kind = adapter.__class__.__name__ if adapter is not None else None
     resolved_installation_id = installation_id or get_default_installation_id(normalized_provider)
     selection_reason = "github_app_unavailable_or_not_applicable"

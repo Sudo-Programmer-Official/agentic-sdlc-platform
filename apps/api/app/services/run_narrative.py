@@ -113,6 +113,9 @@ def _event_message(event: RunEvent) -> str | None:
 
 
 def _next_best_step(run: Run, work_items: list[WorkItem], summary: RunTimelineSummary) -> str | None:
+    if run.workspace_status == "ERROR":
+        return "Resolve the workspace failure and rerun once repository access and persistence are healthy."
+
     active = next((item for item in work_items if item.status in {"RUNNING", "CLAIMED"}), None)
     if active:
         return f"Wait for {_work_item_label(active)} to finish."
@@ -137,7 +140,9 @@ def _next_best_step(run: Run, work_items: list[WorkItem], summary: RunTimelineSu
     return None
 
 
-def _validation_state(work_items: list[WorkItem]) -> str:
+def _validation_state(run: Run, work_items: list[WorkItem]) -> str:
+    if run.workspace_status == "ERROR":
+        return "BLOCKED"
     validation_items = [item for item in work_items if item.type in {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}]
     if not validation_items:
         return "NOT_STARTED"
@@ -151,6 +156,8 @@ def _validation_state(work_items: list[WorkItem]) -> str:
 
 
 def _review_state(run: Run, summary: RunTimelineSummary, work_items: list[WorkItem]) -> str:
+    if run.workspace_status == "ERROR":
+        return "BLOCKED"
     if summary.pull_request_url:
         return "PULL_REQUEST_READY"
     if isinstance(run.summary, dict):
@@ -435,7 +442,7 @@ async def build_run_narrative(
         next_best_step=_next_best_step(run, work_items, timeline_summary),
         files_touched=sorted(changed_files),
         latest_failure=latest_failure,
-        validation_state=_validation_state(work_items),
+        validation_state=_validation_state(run, work_items),
         review_state=_review_state(run, timeline_summary, work_items),
         recovery_count=timeline_summary.recovery_count,
         workspace_status=run.workspace_status,

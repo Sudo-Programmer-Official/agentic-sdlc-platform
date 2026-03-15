@@ -23,16 +23,20 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
     run = await session.get(Run, wi.run_id)
     if run is None:
         return
-    context = await build_run_context(session, run, require_repo=wi.executor in {"codex", "test"})
-    executor = build_executor(wi.executor, repo_root=None if not context.repo_path else Path(context.repo_path))
+    failure_stage = "workspace_context"
     try:
+        context = await build_run_context(session, run, require_repo=wi.executor in {"codex", "test"})
+        executor = build_executor(wi.executor, repo_root=None if not context.repo_path else Path(context.repo_path))
+        failure_stage = "executor_execute"
         result = await executor.execute(wi, context)
         wi.status = result.get("status", "DONE")
         wi.result = result.get("payload", {})
         wi.finished_at = datetime.now(timezone.utc)
         wi.last_error = None
         session.add(wi)
+        failure_stage = "artifact_persistence"
         await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
+        failure_stage = "event_recording"
         await record_event(
             session,
             project_id=wi.project_id,
@@ -44,24 +48,35 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
             payload={"work_item_id": str(wi.id), "status": wi.status},
         )
         await session.flush()
+        failure_stage = "recovery_policy"
         await maybe_apply_recovery(session, wi)
     except Exception as exc:
-        wi.status = "FAILED"
-        wi.finished_at = datetime.now(timezone.utc)
-        wi.last_error = str(exc)
-        session.add(wi)
+        await session.rollback()
+        failed_item = await session.get(WorkItem, wi.id)
+        if failed_item is None:
+            return
+        failed_item.status = "FAILED"
+        failed_item.finished_at = datetime.now(timezone.utc)
+        failed_item.last_error = str(exc)
+        session.add(failed_item)
         await record_event(
             session,
-            project_id=wi.project_id,
-            run_id=wi.run_id,
-            work_item_id=wi.id,
+            project_id=failed_item.project_id,
+            run_id=failed_item.run_id,
+            work_item_id=failed_item.id,
             event_type="WORK_ITEM_FAILED",
             actor_type="AGENT",
             actor_id=str(agent.id),
-            payload={"work_item_id": str(wi.id), "error": str(exc)},
+            tenant_id=failed_item.tenant_id,
+            payload={
+                "work_item_id": str(failed_item.id),
+                "error": str(exc),
+                "exception_class": exc.__class__.__name__,
+                "failure_stage": failure_stage,
+            },
         )
         await session.flush()
-        await maybe_apply_recovery(session, wi)
+        await maybe_apply_recovery(session, failed_item)
 
 
 async def tick_worker(agent_id: uuid.UUID):

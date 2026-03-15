@@ -63,7 +63,7 @@ def test_resolve_repo_runtime_access_requires_installation_for_explicit_github_a
             repo_full_name="acme/private-repo",
             installation_id=None,
         )
-    except ValueError as exc:
+    except RuntimeError as exc:
         assert "installation_id" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected explicit github_app_https auth mode to require installation_id")
@@ -135,6 +135,42 @@ def test_resolve_repo_runtime_access_falls_back_to_default_installation_id(monke
     assert access.token_generated is True
     assert access.git_config
     assert access.selection_reason == "github_app_installation_token"
+
+
+def test_resolve_repo_runtime_access_fails_closed_when_installation_is_present_but_adapter_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="auto"),
+    )
+    monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: None)
+
+    with pytest.raises(RuntimeError, match="github_app_adapter_unconfigured"):
+        repo_connector.resolve_repo_runtime_access(
+            provider="github",
+            repo_url="https://github.com/acme/private-repo.git",
+            repo_full_name="acme/private-repo",
+            installation_id=1234,
+        )
+
+
+def test_resolve_repo_runtime_access_fails_closed_when_installation_token_generation_fails(monkeypatch):
+    adapter = _github_adapter(monkeypatch)
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="auto"),
+    )
+    monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: adapter)
+    monkeypatch.setattr(adapter, "get_installation_token", lambda installation_id: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="github_app_token_generation_failed:RuntimeError"):
+        repo_connector.resolve_repo_runtime_access(
+            provider="github",
+            repo_url="https://github.com/acme/private-repo.git",
+            repo_full_name="acme/private-repo",
+            installation_id=1234,
+        )
 
 
 def test_push_branch_passes_git_config_for_github_app_https(monkeypatch, tmp_path: Path):

@@ -415,10 +415,16 @@ class RunOrchestrator:
         wi: WorkItem,
         run: Run,
     ) -> None:
+        work_item_id = wi.id
+        run_id = run.id
+        project_id = run.project_id
+        tenant_id = run.tenant_id
+        failure_stage = "startup"
         try:
             now = datetime.now(timezone.utc)
             wi.status = "RUNNING"
             wi.started_at = now
+            wi.last_error = None
             await record_event(
                 session,
                 project_id=run.project_id,
@@ -431,13 +437,18 @@ class RunOrchestrator:
             session.add(wi)
             await session.flush()
 
+            failure_stage = "workspace_context"
             context = await build_run_context(session, run, require_repo=wi.executor in {"codex", "test"})
             executor = build_executor(wi.executor, repo_root=None if not context.repo_path else Path(context.repo_path))
+            failure_stage = "executor_execute"
             result = await executor.execute(wi, context)
             wi.status = result.get("status", "DONE")
             wi.result = result.get("payload", {})
             wi.finished_at = datetime.now(timezone.utc)
+            wi.last_error = None
+            failure_stage = "artifact_persistence"
             await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
+            failure_stage = "event_recording"
             await record_event(
                 session,
                 project_id=run.project_id,
@@ -453,21 +464,39 @@ class RunOrchestrator:
             )
             session.add(wi)
             await session.flush()
+            failure_stage = "recovery_policy"
             await maybe_apply_recovery(session, wi)
         except Exception as exc:
-            wi.status = "FAILED"
-            wi.last_error = str(exc)
-            wi.finished_at = datetime.now(timezone.utc)
-            session.add(wi)
-            await session.flush()
+            log.exception(
+                "Work item execution failed run_id=%s work_item_id=%s type=%s stage=%s error=%s",
+                run_id,
+                work_item_id,
+                wi.type,
+                failure_stage,
+                exc,
+            )
+            await session.rollback()
+            failed_item = await session.get(WorkItem, work_item_id)
+            if failed_item is None:
+                return
+            failed_item.status = "FAILED"
+            failed_item.last_error = str(exc)
+            failed_item.finished_at = datetime.now(timezone.utc)
+            session.add(failed_item)
             await record_event(
                 session,
-                project_id=run.project_id,
-                run_id=run.id,
-                work_item_id=wi.id,
+                project_id=project_id,
+                run_id=run_id,
+                work_item_id=work_item_id,
                 event_type="WORK_ITEM_FAILED",
                 actor_type="SYSTEM",
-                payload={"error": str(exc)},
+                tenant_id=tenant_id,
+                payload={
+                    "error": str(exc),
+                    "exception_class": exc.__class__.__name__,
+                    "failure_stage": failure_stage,
+                    "work_item_id": str(work_item_id),
+                },
             )
             await session.flush()
-            await maybe_apply_recovery(session, wi)
+            await maybe_apply_recovery(session, failed_item)

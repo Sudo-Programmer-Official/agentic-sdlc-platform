@@ -73,7 +73,7 @@ def _changed_files_from_diff(diff: str) -> set[str]:
     return changed
 
 
-def _primary_error(work_items: list[WorkItem]) -> str | None:
+def _primary_error(run: Run, work_items: list[WorkItem]) -> str | None:
     ordered = sorted(
         work_items,
         key=lambda wi: (wi.finished_at or wi.updated_at or wi.created_at),
@@ -87,6 +87,8 @@ def _primary_error(work_items: list[WorkItem]) -> str | None:
             value = result.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+    if run.workspace_status == "ERROR" and run.workspace_error:
+        return run.workspace_error
     return None
 
 
@@ -162,7 +164,7 @@ async def upsert_run_summary(session: AsyncSession, run_id: uuid.UUID) -> RunSum
     summary.artifact_count = len(artifacts)
     summary.changed_files = sorted(changed_files)
     summary.artifact_types = sorted({artifact.type for artifact in artifacts})
-    summary.primary_error = _primary_error(work_items)
+    summary.primary_error = _primary_error(run, work_items)
     summary.approval_status = latest_approval_status
     summary.pr_created = bool(pr_url)
     summary.pr_url = pr_url

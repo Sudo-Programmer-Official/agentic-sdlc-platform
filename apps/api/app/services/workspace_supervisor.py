@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import Run
 from app.runtime.context import RunContext
+from app.services.event_log import record_event
 from app.services.repo_connector import (
     get_project_repository,
     prepare_workspace_repo,
@@ -60,6 +61,19 @@ def _workspace_branch(run: Run) -> str:
 
 def _workspace_uri(kind: str, filename: str) -> str:
     return f"workspace://{kind}/{filename}"
+
+
+def _workspace_failure_message(run: Run, exc: Exception, access) -> str:
+    base = str(exc).strip() or exc.__class__.__name__
+    if access is None:
+        return base
+    details = [
+        f"auth_mode={access.auth_mode}",
+        f"selection_reason={access.selection_reason}",
+        f"installation_id={access.installation_id}",
+        f"token_generated={access.token_generated}",
+    ]
+    return f"{base} [{' '.join(details)}]"
 
 
 def _manifest(
@@ -153,15 +167,15 @@ async def ensure_run_workspace(
     )
 
     access = None
-    if repo_url and repo_provider:
-        access = resolve_repo_runtime_access(
-            provider=repo_provider,
-            repo_url=repo_url,
-            repo_full_name=repo_full_name,
-            installation_id=repo_installation_id,
-        )
 
     try:
+        if repo_url and repo_provider:
+            access = resolve_repo_runtime_access(
+                provider=repo_provider,
+                repo_url=repo_url,
+                repo_full_name=repo_full_name,
+                installation_id=repo_installation_id,
+            )
         for directory in (paths.root, paths.repo, paths.artifacts, paths.logs, paths.patches, paths.context):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -221,18 +235,46 @@ async def ensure_run_workspace(
         run.repo_path = str(paths.repo)
         run.branch_name = paths.branch_name
         run.workspace_status = "ERROR"
-        run.workspace_error = str(exc)
+        run.workspace_error = _workspace_failure_message(run, exc, access)
         log.exception(
-            "Workspace prepare failed run_id=%s project_id=%s branch=%s repo_url=%s repo_branch=%s provider=%s",
+            "Workspace prepare failed run_id=%s project_id=%s branch=%s repo_url=%s repo_branch=%s provider=%s auth_mode=%s installation_id=%s token_generated=%s credential_strategy=%s selection_reason=%s transport_url=%s git_config_present=%s",
             run.id,
             run.project_id,
             paths.branch_name,
             repo_url,
             repo_branch,
             repo_provider,
+            access.auth_mode if access else None,
+            access.installation_id if access else None,
+            access.token_generated if access else None,
+            access.credential_strategy if access else None,
+            access.selection_reason if access else None,
+            access.clean_repo_url if access else None,
+            bool(access.git_config) if access else False,
             exc_info=exc,
         )
         session.add(run)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="WORKSPACE_PREPARE_FAILED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            message="Workspace preparation failed",
+            payload={
+                "error": str(exc),
+                "branch_name": paths.branch_name,
+                "repo_url": repo_url,
+                "repo_branch": repo_branch,
+                "provider": repo_provider,
+                "auth_mode": access.auth_mode if access else None,
+                "installation_id": access.installation_id if access else None,
+                "token_generated": access.token_generated if access else None,
+                "credential_strategy": access.credential_strategy if access else None,
+                "selection_reason": access.selection_reason if access else None,
+            },
+        )
         await session.flush()
         return WorkspacePaths(
             root=paths.root,
@@ -270,6 +312,12 @@ async def build_run_context(
         repo_full_name=repo_full_name,
         repo_installation_id=repo_installation_id,
     )
+    if require_repo:
+        if run.workspace_status == "ERROR":
+            raise RuntimeError(run.workspace_error or "Workspace preparation failed")
+        repo_path = Path(paths.repo)
+        if not (repo_path / ".git").exists():
+            raise RuntimeError("Workspace repository is unavailable for repo-backed execution")
     return RunContext(
         project_id=run.project_id,
         run_id=run.id,

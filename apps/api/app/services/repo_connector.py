@@ -209,6 +209,7 @@ def resolve_repo_runtime_access(
     adapter_kind = adapter.__class__.__name__ if adapter is not None else None
     resolved_installation_id = installation_id or get_default_installation_id(normalized_provider)
     selection_reason = "github_app_unavailable_or_not_applicable"
+    requires_authenticated_clone = auth_mode == "github_app_https" or resolved_installation_id is not None
 
     if normalized_provider == "github" and full_name and _looks_like_github_remote(cleaned_repo_url):
         if auth_mode == "ssh":
@@ -228,15 +229,21 @@ def resolve_repo_runtime_access(
                     token = str(adapter.get_installation_token(resolved_installation_id) or "").strip()
                 except Exception as exc:
                     selection_reason = f"github_app_token_generation_failed:{exc.__class__.__name__}"
-                    if auth_mode == "github_app_https":
+                    if requires_authenticated_clone:
                         raise RuntimeError(
-                            f"GitHub App installation token generation failed: {exc.__class__.__name__}: {exc}"
+                            "GitHub runtime clone auth could not generate an installation token "
+                            f"(selection_reason={selection_reason}, installation_id={resolved_installation_id}, "
+                            f"adapter={adapter_kind}): {exc.__class__.__name__}: {exc}"
                         ) from exc
                 else:
                     if not token:
                         selection_reason = "github_app_token_generation_returned_empty"
-                        if auth_mode == "github_app_https":
-                            raise RuntimeError("GitHub App installation token generation returned an empty token")
+                        if requires_authenticated_clone:
+                            raise RuntimeError(
+                                "GitHub runtime clone auth returned an empty installation token "
+                                f"(selection_reason={selection_reason}, installation_id={resolved_installation_id}, "
+                                f"adapter={adapter_kind})"
+                            )
                     else:
                         return RepoRuntimeAccess(
                             auth_mode="github_app_https",
@@ -253,8 +260,11 @@ def resolve_repo_runtime_access(
                 selection_reason = "github_app_installation_id_missing"
         elif auth_mode in {"auto", "github_app_https"}:
             selection_reason = "github_app_adapter_unconfigured"
-        if auth_mode == "github_app_https":
-            raise ValueError("GitHub App HTTPS runtime auth requires a valid installation_id and configured GitHub App")
+        if auth_mode == "github_app_https" or requires_authenticated_clone:
+            raise RuntimeError(
+                "GitHub runtime clone auth is unavailable "
+                f"(selection_reason={selection_reason}, installation_id={resolved_installation_id}, adapter={adapter_kind})"
+            )
 
     return RepoRuntimeAccess(
         auth_mode="plain",

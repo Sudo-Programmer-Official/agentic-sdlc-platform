@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
-import shutil
 import uuid
 
 from fastapi import FastAPI
@@ -27,6 +25,7 @@ from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.ai_ops import router as ai_ops_router
 from app.core.config import DEFAULT_DATABASE_URL, get_settings
 from app.services.build_info import get_build_history, get_current_build_info
+from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.startup import run_startup_migrations
 
 
@@ -100,24 +99,24 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def on_startup() -> None:
         build = get_current_build_info()
+        diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode)
         log.info(
             "Starting API build=%s sha=%s env=%s prefix=%s runtime_mode=%s",
             build.get("version"),
             build.get("short_sha"),
             settings.env,
             settings.api_prefix,
-            settings.runtime_mode,
+            diagnostics.runtime_mode,
         )
-        git_binary = shutil.which("git")
-        if git_binary:
-            log.info("Runtime tool availability git=%s", git_binary)
+        if diagnostics.git_binary:
+            log.info("Runtime tool availability git=%s", diagnostics.git_binary)
         else:
             log.warning("Runtime tool availability git=missing repo-backed runs will fail until git is installed")
         log.info(
             "GitHub integration env app_id_present=%s private_key_present=%s webhook_secret_present=%s",
-            bool(os.getenv("GITHUB_APP_ID")),
-            bool(os.getenv("GITHUB_PRIVATE_KEY")),
-            bool(os.getenv("GITHUB_WEBHOOK_SECRET")),
+            diagnostics.github_app_id_present,
+            diagnostics.github_private_key_present,
+            diagnostics.github_webhook_secret_present,
         )
         log.info("Startup phase=migrations begin")
         try:

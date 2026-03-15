@@ -1,0 +1,44 @@
+{
+  "api": {
+    "environment": [
+      { "name": "ENV", "value": "production" },
+      { "name": "RUNTIME_MODE", "value": "external" },
+      { "name": "RUNTIME_GIT_AUTH_MODE", "value": "github_app_https" },
+      { "name": "RUN_MIGRATIONS_ON_STARTUP", "value": "1" },
+      { "name": "GITHUB_APP_ID", "value": "2904464" },
+      { "name": "GITHUB_APP_SLUG", "value": "prompt-to-pr" }
+    ],
+    "secrets": [
+      { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/database-url" },
+      { "name": "OPENAI_API_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/openai-api-key" },
+      { "name": "GITHUB_PRIVATE_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/github-private-key" },
+      { "name": "GITHUB_WEBHOOK_SECRET", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/github-webhook-secret" }
+    ]
+  },
+  "worker": {
+    "environment": [
+      { "name": "ENV", "value": "production" },
+      { "name": "RUNTIME_MODE", "value": "external" },
+      { "name": "RUNTIME_GIT_AUTH_MODE", "value": "github_app_https" },
+      { "name": "RUN_MIGRATIONS_ON_STARTUP", "value": "0" },
+      { "name": "GITHUB_APP_ID", "value": "2904464" },
+      { "name": "GITHUB_APP_SLUG", "value": "prompt-to-pr" }
+    ],
+    "secrets": [
+      { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/database-url" },
+      { "name": "OPENAI_API_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/openai-api-key" },
+      { "name": "GITHUB_PRIVATE_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/github-private-key" },
+      { "name": "GITHUB_WEBHOOK_SECRET", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/github-webhook-secret" }
+    ]
+  },
+  "scheduler": {
+    "environment": [
+      { "name": "ENV", "value": "production" },
+      { "name": "RUNTIME_MODE", "value": "external" },
+      { "name": "RUN_MIGRATIONS_ON_STARTUP", "value": "0" }
+    ],
+    "secrets": [
+      { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:agentic/database-url" }
+    ]
+  }
+}

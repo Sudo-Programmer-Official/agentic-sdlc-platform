@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -14,9 +15,11 @@ from app.runtime.registry import build_executor
 from app.runtime.recovery_policy import maybe_apply_recovery
 from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
+from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.services.workspace_supervisor import build_run_context
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
+log = logging.getLogger("app.runtime.worker")
 
 
 async def execute_item(session, wi: WorkItem, agent: Agent):
@@ -154,6 +157,23 @@ async def tick_worker(agent_id: uuid.UUID):
 async def main():
     settings = get_settings()
     agent_id = uuid.uuid4()
+    diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode)
+    log.info(
+        "Starting worker build=%s sha=%s runtime_mode=%s",
+        diagnostics.build_version,
+        diagnostics.build_sha,
+        diagnostics.runtime_mode,
+    )
+    if diagnostics.git_binary:
+        log.info("Worker runtime tool availability git=%s", diagnostics.git_binary)
+    else:
+        log.warning("Worker runtime tool availability git=missing repo-backed runs will fail until git is installed")
+    log.info(
+        "Worker GitHub integration env app_id_present=%s private_key_present=%s webhook_secret_present=%s",
+        diagnostics.github_app_id_present,
+        diagnostics.github_private_key_present,
+        diagnostics.github_webhook_secret_present,
+    )
     # Register ephemeral worker agent record
     async with SessionLocal() as session:
         agent = Agent(
@@ -173,7 +193,7 @@ async def main():
         try:
             await tick_worker(agent_id)
         except Exception:
-            pass
+            log.exception("Worker tick failed agent_id=%s", agent_id)
         await asyncio.sleep(0.5)
 
 

@@ -15,7 +15,16 @@ This keeps runtime credentials short-lived and scoped to the installation attach
 
 ## Required Backend Env Vars
 
-Set these for the API service:
+Set these for every repo-executing runtime service:
+
+- API service
+- worker service, only if you actually deploy one
+
+The scheduler does not need GitHub App secrets because it does not clone or push repositories.
+
+If your production shape is only `web + api`, the API service is the runtime container that must have the GitHub App env vars.
+
+Shared repo-backed runtime env:
 
 - `DATABASE_URL`
 - `OPENAI_API_KEY`
@@ -30,6 +39,13 @@ Set these for the API service:
 - `GITHUB_WEBHOOK_SECRET`
 - `GITHUB_APP_SLUG`
 - `GITHUB_ALLOWED_ORG` optional
+
+For scheduler-only containers:
+
+- `DATABASE_URL`
+- `ENV=production`
+- `RUNTIME_MODE=external`
+- `RUN_MIGRATIONS_ON_STARTUP=0`
 
 Useful optional settings:
 
@@ -53,7 +69,7 @@ Recommended production values:
 
 ## Required ECS Secrets / Runtime Inputs
 
-Inject these into the API task securely:
+Inject these into the API task securely, and into the worker task as well if you deploy a separate worker service:
 
 - `DATABASE_URL`
 - `OPENAI_API_KEY`
@@ -69,11 +85,31 @@ Recommended ECS task-definition mapping:
 - `GITHUB_PRIVATE_KEY` from AWS Secrets Manager or SSM Parameter Store
 - `GITHUB_WEBHOOK_SECRET` from AWS Secrets Manager or SSM Parameter Store
 
+Use [ecs-runtime-container-env.example.json](/Users/abhishekkumarjha/Documents/sudo-programmer-official/agentic-sdlc-platform/infra/deploy/ecs-runtime-container-env.example.json) as the source-controlled template for the ECS container `environment` and `secrets` arrays.
+
 Notes:
 
 - `GITHUB_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET` are true secrets.
 - `GITHUB_APP_ID` and `GITHUB_APP_SLUG` are not sensitive, but you can still inject them through ECS secrets or SSM for consistency.
 - These values belong on the API task, not the static web task.
+- These values also belong on the worker task when you deploy one. Repo-backed runs can prepare workspaces in the API bootstrap path and later execute repo mutations in the worker path, but API-only deployment is also supported through embedded fallback when no worker heartbeats exist.
+
+## Private Key Format
+
+`GITHUB_PRIVATE_KEY` must be the raw GitHub App PEM with the header/footer intact:
+
+```pem
+-----BEGIN RSA PRIVATE KEY-----
+...
+-----END RSA PRIVATE KEY-----
+```
+
+Rules:
+
+- preserve real newlines
+- do not strip the header/footer
+- do not store the value with literal `\n` unless your secret-injection layer converts them back to actual newlines before the process reads the env var
+- prefer Secrets Manager or SSM over plaintext task-definition values
 
 If you run SSH mode instead of GitHub App HTTPS, you also need:
 
@@ -201,6 +237,34 @@ Use this exact checklist after deployment.
     - GitHub PR creation
 14. Confirm the PR opens against the expected base branch in the connected private repo.
 
+## Deployment Verification
+
+After updating ECS task definitions:
+
+1. Deploy the new API task revision.
+2. If you run a separate worker service, deploy the new worker task revision.
+3. Wait for the old tasks to drain.
+4. Confirm API startup logs:
+   - `Starting API build=... sha=...`
+   - `Runtime tool availability git=/usr/bin/git`
+   - `GitHub integration env app_id_present=True private_key_present=True webhook_secret_present=...`
+5. Confirm worker startup logs, if a worker service exists:
+   - `Starting worker build=... sha=...`
+   - `Worker runtime tool availability git=/usr/bin/git`
+   - `Worker GitHub integration env app_id_present=True private_key_present=True webhook_secret_present=...`
+6. Start a smoke run and confirm workspace prep logs:
+   - `adapter=GitHubAppAdapter`
+   - `auth_mode=github_app_https`
+   - `token_generated=True`
+
+If `app_id_present=True` and `private_key_present=True` but clone still fails, the next likely causes are:
+
+- malformed PEM private key
+- wrong GitHub App ID or private key pair
+- app installation missing access to the target repo
+- wrong installation id attached to the project
+- GitHub API/network failure while minting the installation token
+
 ## Final Production Checklist
 
 1. GitHub App slug is `prompt-to-pr`.
@@ -223,7 +287,8 @@ Use this exact checklist after deployment.
    - `GITHUB_APP_SLUG=prompt-to-pr`
    - `GITHUB_PRIVATE_KEY`
    - `GITHUB_WEBHOOK_SECRET`
-10. API runtime mode is `RUNTIME_GIT_AUTH_MODE=github_app_https`.
+10. If a worker service exists, it has the same GitHub App env vars as the API task.
+11. API runtime mode is `RUNTIME_GIT_AUTH_MODE=github_app_https`.
 
 ## Runtime Verification Commands
 

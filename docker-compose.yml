@@ -12,6 +12,42 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/agentic_sdlc}
+      - RUNTIME_MODE=${RUNTIME_MODE:-external}
+      - RUNTIME_GIT_AUTH_MODE=${RUNTIME_GIT_AUTH_MODE:-github_app_https}
+    restart: unless-stopped
+    depends_on:
+      - db
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    command: ["python", "-m", "app.runtime.scheduler_service"]
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/agentic_sdlc}
+      - RUNTIME_MODE=${RUNTIME_MODE:-external}
+      - RUNTIME_GIT_AUTH_MODE=${RUNTIME_GIT_AUTH_MODE:-github_app_https}
+      - RUN_MIGRATIONS_ON_STARTUP=0
+    restart: unless-stopped
+    depends_on:
+      - db
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    command: ["python", "-m", "app.runtime.worker_service"]
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/agentic_sdlc}
+      - RUNTIME_MODE=${RUNTIME_MODE:-external}
+      - RUNTIME_GIT_AUTH_MODE=${RUNTIME_GIT_AUTH_MODE:-github_app_https}
+      - RUN_MIGRATIONS_ON_STARTUP=0
     restart: unless-stopped
     depends_on:
       - db

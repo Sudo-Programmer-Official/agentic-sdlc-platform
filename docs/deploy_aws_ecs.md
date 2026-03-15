@@ -49,16 +49,22 @@ docker push $ECR_WEB:latest && docker push $ECR_WEB:v1 && docker push $ECR_WEB:$
 - Create a Fargate cluster (e.g., `agentic-sdlc-cluster`).
 - Define task definitions:
   - **API task**: container `agentic-sdlc-api`, image `$ECR_API:<tag>`, port 8000, CPU/Memory per your load, health check path `/health`.
+  - **Scheduler task**: container based on the API image, command `python -m app.runtime.scheduler_service`.
+  - **Worker task**: container based on the API image, command `python -m app.runtime.worker_service`.
   - **Web task**: container `agentic-sdlc-web`, image `$ECR_WEB:<tag>`, port 80.
+- Minimum supported deployment shape today is `web + api`. Scheduler and worker are optional if you accept the API handling runtime work through embedded fallback.
 - Set environment variables via task definition or SSM:
   - API runtime: `DATABASE_URL`, `OPENAI_API_KEY`, `ENV=production`, `RUN_MIGRATIONS_ON_STARTUP=1` as needed for your rollout strategy.
-  - GitHub integration: `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_ALLOWED_ORG`, `RUNTIME_GIT_AUTH_MODE=github_app_https`.
+  - Worker runtime: `DATABASE_URL`, `OPENAI_API_KEY`, `ENV=production`, `RUN_MIGRATIONS_ON_STARTUP=0`.
+  - Scheduler runtime: `DATABASE_URL`, `ENV=production`, `RUN_MIGRATIONS_ON_STARTUP=0`.
+  - GitHub integration for the API container, and for the worker container if you deploy one: `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_ALLOWED_ORG`, `RUNTIME_GIT_AUTH_MODE=github_app_https`.
   - Web build only: `VITE_API_BASE` (only used at build time; not required at runtime for the static web).
   - Prefer AWS Secrets Manager or SSM Parameter Store for secrets such as `OPENAI_API_KEY` and database credentials instead of baking them into images or committing `.env` files.
   - Current production GitHub App values:
     - `GITHUB_APP_ID=2904464`
     - `GITHUB_APP_SLUG=prompt-to-pr`
     - keep `GITHUB_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET` in Secrets Manager or SSM
+  - If you deploy a separate worker service, the API and worker task definitions must both receive the GitHub App env/secrets. If you only deploy `web + api`, the API task alone is the runtime container that matters.
 - Create an Application Load Balancer:
   - Target group for API (HTTP 8000) with health check path `/health`, matcher 200.
   - (Optional) Target group for Web if you want to front it with ALB instead of CloudFront/S3.
@@ -78,10 +84,28 @@ docker compose up --build
 
 ## 7) Troubleshooting
 - A local `.env` file is not shipped to ECS automatically. Set runtime secrets on the ECS task definition or inject them from Secrets Manager/SSM.
+- If your deployment only has `web + api`, update the API task with `GITHUB_APP_ID` and `GITHUB_PRIVATE_KEY` and force a new deployment.
+- If you also deploy a separate worker service, it must receive the same GitHub App env/secrets as the API task.
 - `POST /api/v1/store/projects` is database-backed. A `500` on that route usually points to DB connectivity, migrations, or task env configuration, not to a missing `OPENAI_API_KEY`.
 - Use `GET /api/v1/health/detail` to confirm whether the running task can reach the database before debugging OpenAI-related flows.
+- Use [ecs-runtime-container-env.example.json](/Users/abhishekkumarjha/Documents/sudo-programmer-official/agentic-sdlc-platform/infra/deploy/ecs-runtime-container-env.example.json) as the copy source for the API/worker/scheduler task-definition env blocks.
 
-## 8) Image Tagging Strategy
+## 8) GitHub App Runtime Verification
+After deploying new task revisions, check the logs for whichever runtime services you actually run.
+
+- API should log:
+  - `Starting API build=... sha=... env=production prefix=/api/v1 runtime_mode=external`
+  - `Runtime tool availability git=/usr/bin/git`
+  - `GitHub integration env app_id_present=True private_key_present=True webhook_secret_present=...`
+- Worker, if deployed, should log:
+  - `Starting worker build=... sha=... runtime_mode=external`
+  - `Worker runtime tool availability git=/usr/bin/git`
+  - `Worker GitHub integration env app_id_present=True private_key_present=True webhook_secret_present=...`
+- A healthy repo-backed run should then log:
+  - `Preparing workspace repository ... adapter=GitHubAppAdapter auth_mode=github_app_https token_generated=True ...`
+  - `Executing git command ...`
+
+## 9) Image Tagging Strategy
 - `:latest` — mutable dev/staging tag
 - `:v1` — stable major line for pinned ECS services
 - `:<git-sha>` — immutable for rollbacks/audits

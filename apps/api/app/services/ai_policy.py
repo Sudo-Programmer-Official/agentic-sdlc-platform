@@ -488,19 +488,25 @@ class AIJobManager:
             db.add(row)
             await db.flush()
             log.info(
-                "AI job prepared job_id=%s run_id=%s work_item_id=%s role=%s task_type=%s tier=%s model=%s provider=%s stop_reason=%s context_size=%s budget_cents=%.4f estimated_cost_cents=%.4f",
+                "AI job prepared job_id=%s run_id=%s work_item_id=%s role=%s task_type=%s outcome=%s selected_tier=%s max_tier=%s model=%s provider=%s approval_state=%s stop_reason=%s next_action=%s context_size=%s max_context_tokens=%s budget_cents=%.4f estimated_cost_cents=%.4f max_retries=%s",
                 row.id,
                 request.run_id,
                 request.work_item_id,
                 request.role,
                 policy.task_type,
+                status,
                 policy.selected_model_tier,
+                policy.max_model_tier,
                 model_name,
                 self._settings.llm_provider,
+                approval_state,
                 stop_reason,
+                next_action,
                 context_size,
+                policy.max_context_tokens,
                 policy.budget_cents,
                 estimated_cost,
+                policy.max_retries,
             )
             return PreparedAIExecution(
                 job_id=row.id,

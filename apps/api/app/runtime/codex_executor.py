@@ -832,6 +832,7 @@ class CodexExecutor(TaskExecutor):
             "ambiguity_level": policy.ambiguity_level,
             "risk_level": policy.risk_level,
             "max_model_tier": policy.max_model_tier,
+            "selected_model_tier": policy.selected_model_tier,
             "max_retries": policy.max_retries,
             "max_context_tokens": policy.max_context_tokens,
             "budget_cents": policy.budget_cents,

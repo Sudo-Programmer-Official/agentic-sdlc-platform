@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import List
 
@@ -10,9 +11,10 @@ from app.db.models import WorkItem, WorkItemEdge
 from app.services.runtime_lineage import link_run_to_work_item
 
 log = logging.getLogger("app.runtime")
+PATH_HINT_PATTERN = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+[\w.-]+)(?![\w./-])")
 
 
-def _task_payload_from_summary(run_summary: dict | None) -> dict[str, str]:
+def _task_payload_from_summary(run_summary: dict | None) -> dict[str, str | list[str]]:
     if not isinstance(run_summary, dict):
         return {}
     task_id = run_summary.get("task_id")
@@ -31,10 +33,27 @@ def _task_payload_from_summary(run_summary: dict | None) -> dict[str, str]:
     source = (run_summary.get("task_source") or "").strip()
     if source:
         payload["task_source"] = source
+    expected_files = _expected_files_from_text(task_title, payload["goal"], description)
+    if expected_files:
+        payload["expected_files"] = expected_files
     return payload
 
 
-def _payload_for_stage(stage_name: str, task_payload: dict[str, str]) -> dict:
+def _expected_files_from_text(*values: str | None) -> list[str]:
+    paths: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        for match in PATH_HINT_PATTERN.findall(value):
+            candidate = match.strip().strip("`'\".,:;()[]{}")
+            candidate = candidate.lstrip("./")
+            if "/" not in candidate or candidate.startswith(("http://", "https://")):
+                continue
+            paths.append(candidate)
+    return list(dict.fromkeys(path for path in paths if path))
+
+
+def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]) -> dict:
     if not task_payload:
         return {}
 

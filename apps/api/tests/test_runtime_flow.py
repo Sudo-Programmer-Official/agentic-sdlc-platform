@@ -349,6 +349,58 @@ async def test_task_bound_run_generates_task_scoped_work_items(monkeypatch, runt
         assert dag_created.payload["work_item_count"] == 7
 
 
+@pytest.mark.anyio
+async def test_task_bound_run_extracts_expected_file_hints_from_goal(monkeypatch, runtime_db, tmp_path):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Scoped smoke runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        task = Task(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            title="GitHub smoke commit test",
+            description="Create docs/pipeline-smoke-test.md and add exactly: Prompt2PR pipeline test via codex executor.",
+            source="manual",
+        )
+        session.add(task)
+        await session.commit()
+        task_id = task.id
+
+        run = await launch_run_for_project(
+            session,
+            tenant_id=tenant_id,
+            project_id=project.id,
+            executor_name="dummy",
+            task_id=task_id,
+            schedule=False,
+        )
+        run_id = run.id
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert isinstance(run.summary, dict)
+        assert run.summary["plan_snapshot"]["expected_files"] == ["docs/pipeline-smoke-test.md"]
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.priority.desc(), WorkItem.created_at)
+            )
+        ).scalars().all()
+        assert work_items
+        assert work_items[0].payload["expected_files"] == ["docs/pipeline-smoke-test.md"]
+
+
 class ArtifactExecutor:
     name = "dummy"
 

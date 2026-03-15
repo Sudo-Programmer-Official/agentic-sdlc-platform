@@ -3,6 +3,8 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import pytest
+
 from app.services import repo_connector
 from app.services.vcs.github_app import GitHubAppAdapter
 from app.services.vcs.github_store import InMemoryGitHubIntegrationStore
@@ -140,3 +142,10 @@ def test_push_branch_passes_git_config_for_github_app_https(monkeypatch, tmp_pat
     assert calls[0][1]
     assert calls[0][1][0][0] == "http.https://github.com/.extraheader"
     assert calls[0][1][0][1].startswith("AUTHORIZATION: Basic ")
+
+
+def test_run_git_requires_runtime_git_binary(monkeypatch):
+    monkeypatch.setattr(repo_connector.shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="git binary is unavailable in the API runtime"):
+        repo_connector._run_git(["status"])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import uuid
 
 from fastapi import FastAPI
@@ -106,6 +107,11 @@ def create_app() -> FastAPI:
             settings.api_prefix,
             settings.runtime_mode,
         )
+        git_binary = shutil.which("git")
+        if git_binary:
+            log.info("Runtime tool availability git=%s", git_binary)
+        else:
+            log.warning("Runtime tool availability git=missing repo-backed runs will fail until git is installed")
         log.info("Startup phase=migrations begin")
         try:
             await run_startup_migrations()

@@ -51,8 +51,11 @@ ENV BUILD_RUN_URL=${BUILD_RUN_URL}
 ENV BUILD_TITLE=${BUILD_TITLE}
 WORKDIR /app
 
-# Runtime libs for crypto
-RUN apt-get update && apt-get install -y \
+# Runtime libs for crypto + repo execution tooling
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    openssh-client \
     libssl3 \
     libffi8 \
     && rm -rf /var/lib/apt/lists/*

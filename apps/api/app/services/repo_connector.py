@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +16,8 @@ from app.core.config import get_settings
 from app.db.models import Project, ProjectRepository
 from app.services.vcs import get_default_installation_id, get_vcs_adapter
 from app.services.vcs.github_app import GitHubAppAdapter
+
+log = logging.getLogger("app.repo_connector")
 
 
 @dataclass(frozen=True)
@@ -58,25 +62,44 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+def git_binary_path() -> str | None:
+    return shutil.which("git")
+
+
+def ensure_git_available() -> str:
+    git_binary = git_binary_path()
+    if git_binary:
+        return git_binary
+    raise RuntimeError(
+        "git binary is unavailable in the API runtime. Install git in the runtime image before running repo-backed tasks."
+    )
+
+
 def _run_git(
     args: list[str],
     cwd: Path | None = None,
     *,
     git_config: tuple[tuple[str, str], ...] | None = None,
 ) -> str:
-    command = ["git"]
+    git_binary = ensure_git_available()
+    command = [git_binary]
     for key, value in git_config or ():
         command.extend(["-c", f"{key}={value}"])
     command.extend(args)
-    result = subprocess.run(
-        command,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        env=_git_env(),
-        check=False,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            env=_git_env(),
+            check=False,
+            timeout=30,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "git binary is unavailable in the API runtime. Install git in the runtime image before running repo-backed tasks."
+        ) from exc
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout).strip()
         raise RuntimeError(stderr or f"git {' '.join(args)} failed")
@@ -219,6 +242,18 @@ def prepare_workspace_repo(
     )
     repo_dir = repo_dir.resolve()
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    base_branch = (default_branch or "main").strip() or "main"
+    target_branch = (work_branch or base_branch).strip() or base_branch
+    log.info(
+        "Preparing workspace repository repo_dir=%s provider=%s auth_mode=%s repo_url=%s base_branch=%s target_branch=%s git_binary=%s",
+        repo_dir,
+        provider,
+        access.auth_mode,
+        access.clean_repo_url,
+        base_branch,
+        target_branch,
+        git_binary_path() or "missing",
+    )
 
     if (repo_dir / ".git").exists():
         try:
@@ -228,9 +263,6 @@ def prepare_workspace_repo(
         _run_git(["fetch", "origin", "--prune"], cwd=repo_dir, git_config=access.git_config)
     else:
         _run_git(["clone", access.transport_url, str(repo_dir)], git_config=access.git_config)
-
-    base_branch = (default_branch or "main").strip() or "main"
-    target_branch = (work_branch or base_branch).strip() or base_branch
 
     try:
         _run_git(["checkout", base_branch], cwd=repo_dir)

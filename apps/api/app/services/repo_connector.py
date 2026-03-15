@@ -40,6 +40,14 @@ def _lazy_github_adapter_from_env() -> GitHubAppAdapter | None:
     return build_github_adapter(InMemoryGitHubIntegrationStore())
 
 
+def _github_app_env_presence() -> dict[str, bool]:
+    return {
+        "app_id_present": bool(os.getenv("GITHUB_APP_ID")),
+        "private_key_present": bool(os.getenv("GITHUB_PRIVATE_KEY")),
+        "webhook_secret_present": bool(os.getenv("GITHUB_WEBHOOK_SECRET")),
+    }
+
+
 def _normalize_provider(provider: str) -> str:
     value = (provider or "github").strip().lower()
     if value != "github":
@@ -269,9 +277,13 @@ def resolve_repo_runtime_access(
         elif auth_mode in {"auto", "github_app_https"}:
             selection_reason = "github_app_adapter_unconfigured"
         if auth_mode == "github_app_https" or requires_authenticated_clone:
+            env_presence = _github_app_env_presence() if normalized_provider == "github" else {}
             raise RuntimeError(
                 "GitHub runtime clone auth is unavailable "
-                f"(selection_reason={selection_reason}, installation_id={resolved_installation_id}, adapter={adapter_kind})"
+                f"(selection_reason={selection_reason}, installation_id={resolved_installation_id}, adapter={adapter_kind}, "
+                f"app_id_present={env_presence.get('app_id_present')}, "
+                f"private_key_present={env_presence.get('private_key_present')}, "
+                f"webhook_secret_present={env_presence.get('webhook_secret_present')})"
             )
 
     return RepoRuntimeAccess(

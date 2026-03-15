@@ -145,6 +145,9 @@ def test_resolve_repo_runtime_access_fails_closed_when_installation_is_present_b
     )
     monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: None)
     monkeypatch.setattr(repo_connector, "_lazy_github_adapter_from_env", lambda: None)
+    monkeypatch.delenv("GITHUB_APP_ID", raising=False)
+    monkeypatch.delenv("GITHUB_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
 
     with pytest.raises(RuntimeError, match="github_app_adapter_unconfigured"):
         repo_connector.resolve_repo_runtime_access(

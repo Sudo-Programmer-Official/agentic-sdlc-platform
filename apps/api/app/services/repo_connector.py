@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
@@ -26,6 +27,11 @@ class RepoRuntimeAccess:
     clean_repo_url: str
     transport_url: str
     git_config: tuple[tuple[str, str], ...] = ()
+    installation_id: int | None = None
+    token_generated: bool = False
+    adapter_kind: str | None = None
+    credential_strategy: str = "anonymous"
+    selection_reason: str | None = None
 
 
 def _normalize_provider(provider: str) -> str:
@@ -59,6 +65,7 @@ def _git_env() -> dict[str, str]:
     env.setdefault("GIT_AUTHOR_EMAIL", settings.git_author_email)
     env.setdefault("GIT_COMMITTER_NAME", settings.git_author_name)
     env.setdefault("GIT_COMMITTER_EMAIL", settings.git_author_email)
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
     return env
 
 
@@ -75,6 +82,52 @@ def ensure_git_available() -> str:
     )
 
 
+def _build_github_http_git_config(token: str, host: str = "https://github.com/") -> tuple[tuple[str, str], ...]:
+    basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    return ((f"http.{host}.extraheader", f"AUTHORIZATION: Basic {basic}"),)
+
+
+def _redact_transport_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    if "@" not in parsed.netloc:
+        return url
+    _, host = parsed.netloc.rsplit("@", 1)
+    return parsed._replace(netloc=f"[redacted]@{host}").geturl()
+
+
+def _redact_git_config_value(key: str, value: str) -> str:
+    lowered_key = key.lower()
+    if "extraheader" in lowered_key and "authorization" in value.lower():
+        prefix = value.split(":", 1)[0] if ":" in value else "AUTHORIZATION"
+        scheme = value.split(None, 2)[1] if len(value.split(None, 2)) > 1 else "Basic"
+        return f"{prefix}: {scheme} [redacted]"
+    if any(token in lowered_key for token in ("token", "authorization", "password")):
+        return "[redacted]"
+    return value
+
+
+def _redacted_git_config(git_config: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+    return tuple((key, _redact_git_config_value(key, value)) for key, value in git_config)
+
+
+def _redacted_git_command(
+    args: list[str],
+    *,
+    git_config: tuple[tuple[str, str], ...] | None = None,
+) -> list[str]:
+    command = ["git"]
+    for key, value in _redacted_git_config(tuple(git_config or ())):
+        command.extend(["-c", f"{key}={value}"])
+    for arg in args:
+        if isinstance(arg, str) and "://" in arg:
+            command.append(_redact_transport_url(arg))
+        else:
+            command.append(arg)
+    return command
+
+
 def _run_git(
     args: list[str],
     cwd: Path | None = None,
@@ -86,6 +139,11 @@ def _run_git(
     for key, value in git_config or ():
         command.extend(["-c", f"{key}={value}"])
     command.extend(args)
+    log.info(
+        "Executing git command cwd=%s command=%s",
+        str(cwd) if cwd else None,
+        _redacted_git_command(args, git_config=tuple(git_config or ())),
+    )
     try:
         result = subprocess.run(
             command,
@@ -147,6 +205,10 @@ def resolve_repo_runtime_access(
     cleaned_repo_url = repo_url.strip()
     full_name = _normalize_repo_full_name(cleaned_repo_url, repo_full_name)
     auth_mode = (get_settings().runtime_git_auth_mode or "auto").strip().lower()
+    adapter = get_vcs_adapter(normalized_provider)
+    adapter_kind = adapter.__class__.__name__ if adapter is not None else None
+    resolved_installation_id = installation_id or get_default_installation_id(normalized_provider)
+    selection_reason = "github_app_unavailable_or_not_applicable"
 
     if normalized_provider == "github" and full_name and _looks_like_github_remote(cleaned_repo_url):
         if auth_mode == "ssh":
@@ -154,16 +216,43 @@ def resolve_repo_runtime_access(
                 auth_mode="ssh",
                 clean_repo_url=cleaned_repo_url,
                 transport_url=f"git@github.com:{full_name}.git",
+                installation_id=resolved_installation_id,
+                adapter_kind=adapter_kind,
+                credential_strategy="ssh",
+                selection_reason="explicit_ssh_mode",
             )
 
-        adapter = get_vcs_adapter(normalized_provider)
-        if auth_mode in {"auto", "github_app_https"} and installation_id and isinstance(adapter, GitHubAppAdapter):
-            return RepoRuntimeAccess(
-                auth_mode="github_app_https",
-                clean_repo_url=cleaned_repo_url,
-                transport_url=adapter.build_clone_url(full_name),
-                git_config=tuple(adapter.build_git_http_config(installation_id)),
-            )
+        if auth_mode in {"auto", "github_app_https"} and isinstance(adapter, GitHubAppAdapter):
+            if resolved_installation_id:
+                try:
+                    token = str(adapter.get_installation_token(resolved_installation_id) or "").strip()
+                except Exception as exc:
+                    selection_reason = f"github_app_token_generation_failed:{exc.__class__.__name__}"
+                    if auth_mode == "github_app_https":
+                        raise RuntimeError(
+                            f"GitHub App installation token generation failed: {exc.__class__.__name__}: {exc}"
+                        ) from exc
+                else:
+                    if not token:
+                        selection_reason = "github_app_token_generation_returned_empty"
+                        if auth_mode == "github_app_https":
+                            raise RuntimeError("GitHub App installation token generation returned an empty token")
+                    else:
+                        return RepoRuntimeAccess(
+                            auth_mode="github_app_https",
+                            clean_repo_url=cleaned_repo_url,
+                            transport_url=adapter.build_clone_url(full_name),
+                            git_config=_build_github_http_git_config(token),
+                            installation_id=resolved_installation_id,
+                            token_generated=True,
+                            adapter_kind=adapter_kind,
+                            credential_strategy="http.extraheader",
+                            selection_reason="github_app_installation_token",
+                        )
+            else:
+                selection_reason = "github_app_installation_id_missing"
+        elif auth_mode in {"auto", "github_app_https"}:
+            selection_reason = "github_app_adapter_unconfigured"
         if auth_mode == "github_app_https":
             raise ValueError("GitHub App HTTPS runtime auth requires a valid installation_id and configured GitHub App")
 
@@ -171,6 +260,11 @@ def resolve_repo_runtime_access(
         auth_mode="plain",
         clean_repo_url=cleaned_repo_url,
         transport_url=cleaned_repo_url,
+        installation_id=resolved_installation_id,
+        token_generated=False,
+        adapter_kind=adapter_kind,
+        credential_strategy="anonymous_https",
+        selection_reason=selection_reason,
     )
 
 
@@ -245,14 +339,23 @@ def prepare_workspace_repo(
     base_branch = (default_branch or "main").strip() or "main"
     target_branch = (work_branch or base_branch).strip() or base_branch
     log.info(
-        "Preparing workspace repository repo_dir=%s provider=%s auth_mode=%s repo_url=%s base_branch=%s target_branch=%s git_binary=%s",
+        "Preparing workspace repository repo_dir=%s provider=%s auth_mode=%s adapter=%s installation_id=%s token_generated=%s credential_strategy=%s transport_url=%s git_config_present=%s git_config=%s clone_command=%s repo_url=%s base_branch=%s target_branch=%s git_binary=%s selection_reason=%s",
         repo_dir,
         provider,
         access.auth_mode,
+        access.adapter_kind,
+        access.installation_id,
+        access.token_generated,
+        access.credential_strategy,
+        _redact_transport_url(access.transport_url),
+        bool(access.git_config),
+        _redacted_git_config(access.git_config),
+        _redacted_git_command(["clone", access.transport_url, str(repo_dir)], git_config=access.git_config),
         access.clean_repo_url,
         base_branch,
         target_branch,
         git_binary_path() or "missing",
+        access.selection_reason,
     )
 
     if (repo_dir / ".git").exists():

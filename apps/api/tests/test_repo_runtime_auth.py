@@ -44,6 +44,8 @@ def test_resolve_repo_runtime_access_uses_github_app_https(monkeypatch):
     key, value = access.git_config[0]
     assert key == "http.https://github.com/.extraheader"
     assert value.startswith("AUTHORIZATION: Basic ")
+    assert access.token_generated is True
+    assert access.credential_strategy == "http.extraheader"
 
 
 def test_resolve_repo_runtime_access_requires_installation_for_explicit_github_app_https(monkeypatch):
@@ -111,6 +113,30 @@ def test_prepare_workspace_repo_passes_git_config_for_clone(monkeypatch, tmp_pat
     assert clone_call[1]
 
 
+def test_resolve_repo_runtime_access_falls_back_to_default_installation_id(monkeypatch):
+    adapter = _github_adapter(monkeypatch)
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="auto"),
+    )
+    monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: adapter)
+    monkeypatch.setattr(repo_connector, "get_default_installation_id", lambda provider: 9876)
+
+    access = repo_connector.resolve_repo_runtime_access(
+        provider="github",
+        repo_url="https://github.com/acme/private-repo.git",
+        repo_full_name="acme/private-repo",
+        installation_id=None,
+    )
+
+    assert access.auth_mode == "github_app_https"
+    assert access.installation_id == 9876
+    assert access.token_generated is True
+    assert access.git_config
+    assert access.selection_reason == "github_app_installation_token"
+
+
 def test_push_branch_passes_git_config_for_github_app_https(monkeypatch, tmp_path: Path):
     adapter = _github_adapter(monkeypatch)
     monkeypatch.setattr(
@@ -149,3 +175,37 @@ def test_run_git_requires_runtime_git_binary(monkeypatch):
 
     with pytest.raises(RuntimeError, match="git binary is unavailable in the API runtime"):
         repo_connector._run_git(["status"])
+
+
+def test_prepare_workspace_repo_logs_redacted_clone_auth(monkeypatch, tmp_path: Path, caplog):
+    adapter = _github_adapter(monkeypatch)
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="github_app_https"),
+    )
+    monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: adapter)
+
+    def fake_run_git(args, cwd=None, *, git_config=None):
+        if args[:1] == ["clone"]:
+            target = Path(args[-1])
+            (target / ".git").mkdir(parents=True, exist_ok=True)
+        return ""
+
+    monkeypatch.setattr(repo_connector, "_run_git", fake_run_git)
+
+    with caplog.at_level("INFO", logger="app.repo_connector"):
+        repo_connector.prepare_workspace_repo(
+            repo_dir=tmp_path / "repo",
+            provider="github",
+            repo_url="https://github.com/acme/private-repo.git",
+            default_branch="main",
+            repo_full_name="acme/private-repo",
+            installation_id=1234,
+            work_branch="run/test",
+        )
+
+    assert "token_generated=True" in caplog.text
+    assert "git_config_present=True" in caplog.text
+    assert "AUTHORIZATION: Basic [redacted]" in caplog.text
+    assert "ghs_test_token" not in caplog.text

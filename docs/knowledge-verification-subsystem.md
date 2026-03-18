@@ -1,5 +1,7 @@
 # Knowledge Verification Developer Guide
 
+See also: `docs/engineering-memory-system-spec.md`. The knowledge subsystem remains the reviewed publication layer; the Engineering Memory System builds on it to provide structured retrieval, context packs, and runtime rule application.
+
 ## What Was Added
 
 The subsystem spans database, backend workflow, and frontend review surfaces.

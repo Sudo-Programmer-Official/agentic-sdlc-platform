@@ -75,10 +75,14 @@ def test_workspace_command_runner_audits_and_blocks(tmp_path, monkeypatch):
 
     audit_path = log_dir / COMMAND_AUDIT_LOG_NAME
     records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
-    assert len(records) == 2
-    assert records[0]["status"] == "SUCCEEDED"
-    assert records[1]["status"] == "BLOCKED"
-    assert records[1]["blocked_reason"] is not None
+    assert len(records) == 3
+    assert records[0]["status"] == "RUNNING"
+    assert records[0]["phase"] == "started"
+    assert records[1]["status"] == "SUCCEEDED"
+    assert records[1]["phase"] == "finished"
+    assert records[1]["command_id"] == records[0]["command_id"]
+    assert records[2]["status"] == "BLOCKED"
+    assert records[2]["blocked_reason"] is not None
 
 
 @pytest.mark.anyio

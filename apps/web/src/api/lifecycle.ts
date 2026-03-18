@@ -455,6 +455,11 @@ export async function fetchRunNarrative(runId: string) {
   return parseApiResponse(resp);
 }
 
+export async function fetchRunExecutionConsole(runId: string) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/execution-console`);
+  return parseApiResponse(resp);
+}
+
 export function hasRunMemorySearchContext(payload: {
   goal?: string;
   error?: string;

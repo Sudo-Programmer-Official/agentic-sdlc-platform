@@ -39,6 +39,7 @@ DEFAULT_WORKSPACE_COMMAND_OUTPUT_MAX_BYTES = 200_000
 
 @dataclass(frozen=True)
 class WorkspaceCommandResult:
+    command_id: str
     command: list[str]
     cwd: str
     status: str
@@ -147,6 +148,7 @@ def run_workspace_command(
     started_monotonic = time.monotonic()
     log_path = _command_log_path(log_dir, label)
     command_list = [str(part) for part in command]
+    command_id = uuid.uuid4().hex
     status = "BLOCKED"
     exit_code: int | None = None
     stdout = ""
@@ -161,6 +163,23 @@ def run_workspace_command(
         merged_env = dict(os.environ)
         if env:
             merged_env.update(env)
+        _append_audit(
+            audit_path,
+            {
+                "command_id": command_id,
+                "phase": "started",
+                "started_at": started_at.isoformat(),
+                "label": label,
+                "command": command_list,
+                "cwd": str(cwd),
+                "status": "RUNNING",
+                "exit_code": None,
+                "timed_out": False,
+                "blocked_reason": None,
+                "allowed_prefixes": allowed,
+                "log_path": str(log_path) if log_path is not None else None,
+            },
+        )
         try:
             completed = subprocess.run(
                 command_list,
@@ -188,7 +207,10 @@ def run_workspace_command(
     _write_log(log_path, stdout, stderr)
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
     record = {
+        "command_id": command_id,
+        "phase": "finished",
         "started_at": started_at.isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
         "label": label,
         "command": command_list,
         "cwd": str(cwd),
@@ -202,6 +224,7 @@ def run_workspace_command(
     }
     _append_audit(audit_path, record)
     return WorkspaceCommandResult(
+        command_id=command_id,
         command=command_list,
         cwd=str(cwd),
         status=status,

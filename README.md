@@ -15,6 +15,13 @@ clear boundaries for future service extraction.
 ## Docs
 - `docs/ARCHITECTURE.md`: architecture overview, module boundaries, and run lifecycle diagram
 - `docs/agent-runtime-vision-roadmap.md`: north-star roadmap for durable runs, Mission Control truthfulness, and the GitHub proof loop
+- `docs/human-in-the-loop-runtime-roadmap.md`: operator-facing roadmap for visible execution, intervention, reconciliation, and recovery UX
+- `docs/run-console-product-spec.md`: concrete Run Console, Environment Inspector, Validation Matrix, and steering UX spec for Mission Control
+- `docs/network-and-recovery-architecture.md`: connectivity classes, worker leases, checkpoints, reconnect UX, and side-effect-safe recovery rules
+- `docs/software-execution-cockpit-blueprint.md`: Architecture Profile, Task Router, Run Console, and Approval plus Verification blueprint for the full multi-agent workflow
+- `docs/software-execution-cockpit-implementation-epics.md`: concrete delivery epics, dependencies, release gates, and rollout order for the cockpit blueprint
+- `docs/architecture-profile-engineering-spec.md`: Epic 1 engineering spec covering schema, APIs, UI sections, derived maps, and migration plan for Architecture Profile
+- `docs/engineering-memory-system-spec.md`: structured engineering memory, retrieval context packs, promotion workflow, and runtime integration on top of the knowledge subsystem
 - `docs/ai-routing-cost-control.md`: routing rules, budgets, retries, cache policy, and AI ops dashboard
 - `docs/architecture/knowledge-verification-subsystem.md`: engineering memory review/publish flow
 - `docs/knowledge-verification-subsystem.md`: developer guide for the knowledge subsystem

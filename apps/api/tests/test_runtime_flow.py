@@ -13,6 +13,7 @@ from app.runtime import orchestrator as orchestrator_module
 from app.runtime.orchestrator import RunOrchestrator
 from app.runtime import worker_service
 from app.runtime.worker_service import tick_worker
+from app.services import run_launch as run_launch_module
 from app.services.run_launch import launch_run_for_project
 
 
@@ -271,6 +272,114 @@ async def test_launch_run_bootstraps_work_items_before_background_execution(monk
         assert any(event.event_type == "RUN_BOOTSTRAP_STARTED" for event in events)
         assert any(event.event_type == "RUN_RUNNING" for event in events)
         assert any(event.event_type == "WORK_DAG_CREATED" for event in events)
+
+
+@pytest.mark.anyio
+async def test_launch_run_fails_closed_when_workspace_prepare_errors(monkeypatch, runtime_db, tmp_path):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async def fake_ensure_run_workspace(session, run, **kwargs):
+        run.workspace_root = str(tmp_path / "workspaces" / str(run.id))
+        run.repo_path = str(tmp_path / "workspaces" / str(run.id) / "repo")
+        run.workspace_status = "ERROR"
+        run.workspace_error = "clone auth failed"
+        session.add(run)
+        await session.flush()
+
+    async def fail_if_bootstrap_called(*args, **kwargs):
+        raise AssertionError("bootstrap should not run after a workspace preparation failure")
+
+    monkeypatch.setattr(run_launch_module, "ensure_run_workspace", fake_ensure_run_workspace)
+    monkeypatch.setattr(RunOrchestrator, "bootstrap_in_session", fail_if_bootstrap_called)
+
+    async with runtime_db() as session:
+        project = Project(name="Repo failure launch project", tenant_id=tenant_id)
+        session.add(project)
+        await session.commit()
+
+        run = await launch_run_for_project(
+            session,
+            tenant_id=tenant_id,
+            project_id=project.id,
+            executor_name="codex",
+            schedule=True,
+        )
+        run_id = run.id
+
+        assert run.status == "FAILED"
+        assert run.workspace_status == "ERROR"
+        assert run.workspace_error == "clone auth failed"
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_CREATED" in event_types
+        assert "WORKSPACE_PREPARE_FAILED" not in event_types
+        assert "RUN_FAILED" in event_types
+
+        work_items = (
+            await session.execute(select(WorkItem).where(WorkItem.run_id == run_id))
+        ).scalars().all()
+        assert work_items == []
+
+
+@pytest.mark.anyio
+async def test_bootstrap_marks_repo_run_failed_when_workspace_prepare_errors(monkeypatch, runtime_db, tmp_path):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+    require_repo_calls: list[bool] = []
+
+    async def fake_ensure_run_workspace(session, run, **kwargs):
+        require_repo_calls.append(bool(kwargs.get("require_repo")))
+        run.workspace_root = str(tmp_path / "workspaces" / str(run.id))
+        run.repo_path = str(tmp_path / "workspaces" / str(run.id) / "repo")
+        run.workspace_status = "ERROR"
+        run.workspace_error = "clone auth failed"
+        session.add(run)
+        await session.flush()
+
+    async def fail_if_dag_called(*args, **kwargs):
+        raise AssertionError("bootstrap should not seed work items after a workspace preparation failure")
+
+    monkeypatch.setattr(orchestrator_module, "ensure_run_workspace", fake_ensure_run_workspace)
+    monkeypatch.setattr(orchestrator_module, "generate_template_dag", fail_if_dag_called)
+
+    async with runtime_db() as session:
+        project = Project(name="Repo failure bootstrap project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="codex")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="codex")
+    bootstrapped = await orchestrator.bootstrap(run_id)
+    assert bootstrapped is False
+    assert require_repo_calls == [True]
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "FAILED"
+        assert run.workspace_status == "ERROR"
+        assert run.workspace_error == "clone auth failed"
+
+        work_items = (
+            await session.execute(select(WorkItem).where(WorkItem.run_id == run_id))
+        ).scalars().all()
+        assert work_items == []
 
 
 @pytest.mark.anyio

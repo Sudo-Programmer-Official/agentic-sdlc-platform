@@ -498,6 +498,11 @@
     <section v-if="project" class="mission-workbench-grid">
       <TaskQueuePanel :tasks="workbenchTasks" />
 
+      <ExecutionConsolePanel
+        :console-data="executionConsole"
+        :run-status="latestRun?.status || 'IDLE'"
+      />
+
       <ReviewSurfacePanel
         :patch-artifact="latestPatchArtifact"
         :files="reviewSurfaceFiles"
@@ -514,7 +519,9 @@
         @request-modification="requestPatchModification"
         @create-pr="openWorkbenchPrFlow"
       />
+    </section>
 
+    <section v-if="project" class="grid gap-4">
       <OperatorConsole
         variant="panel"
         title="AI Operator Workbench"
@@ -1723,6 +1730,7 @@ import ExecutionTimeline from "../components/ExecutionTimeline.vue";
 import MetricCard from "../components/MetricCard.vue";
 import StageBadge from "../components/StageBadge.vue";
 import OperatorConsole from "../components/operator/OperatorConsole.vue";
+import ExecutionConsolePanel from "../components/workbench/ExecutionConsolePanel.vue";
 import ReviewSurfacePanel from "../components/workbench/ReviewSurfacePanel.vue";
 import TaskQueuePanel from "../components/workbench/TaskQueuePanel.vue";
 import {
@@ -1734,6 +1742,7 @@ import {
   deleteRunPreview,
   explainArtifact,
   fetchArtifactDiff,
+  fetchRunExecutionConsole,
   fetchMissionControlOverview,
   fetchRunNarrative,
   fetchRunStrategies,
@@ -1775,6 +1784,7 @@ const runs = ref<any[]>([]);
 const workItems = ref<any[]>([]);
 const runEvents = ref<any[]>([]);
 const artifacts = ref<any[]>([]);
+const executionConsole = ref<any | null>(null);
 const loading = ref(false);
 const error = ref("");
 const overviewError = ref("");
@@ -2147,6 +2157,7 @@ function resetState() {
   workItems.value = [];
   runEvents.value = [];
   artifacts.value = [];
+  executionConsole.value = null;
   error.value = "";
   overviewError.value = "";
   artifactError.value = "";
@@ -2323,6 +2334,7 @@ async function loadRunRuntime() {
     workItems.value = [];
     runEvents.value = [];
     artifacts.value = [];
+    executionConsole.value = null;
     runNarrative.value = null;
     runNarrativeError.value = "";
     runNarrativeLoading.value = false;
@@ -2332,10 +2344,11 @@ async function loadRunRuntime() {
   runNarrativeError.value = "";
   runNarrativeLoading.value = true;
   try {
-    const [items, events, projectArtifacts, narrativeResult] = await Promise.all([
+    const [items, events, projectArtifacts, consoleResult, narrativeResult] = await Promise.all([
       listWorkItems(projectId.value, latestRun.value.id),
       listRunEvents(latestRun.value.id),
       listArtifacts(projectId.value),
+      fetchRunExecutionConsole(latestRun.value.id).catch(() => null),
       fetchRunNarrative(latestRun.value.id).catch((err: any) => {
         runNarrativeError.value = err?.message || "Failed to load run narrative.";
         return null;
@@ -2344,6 +2357,7 @@ async function loadRunRuntime() {
     workItems.value = items;
     runEvents.value = events;
     artifacts.value = Array.isArray(projectArtifacts) ? projectArtifacts : [];
+    executionConsole.value = consoleResult;
     runNarrative.value = narrativeResult;
   } finally {
     runNarrativeLoading.value = false;

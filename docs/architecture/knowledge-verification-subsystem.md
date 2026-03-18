@@ -1,5 +1,7 @@
 # Knowledge Verification Subsystem
 
+See also: `docs/engineering-memory-system-spec.md`. This subsystem is the reviewed publication foundation for engineering memory; the companion spec defines the structured record model, retrieval logic, and runtime integration layer built on top of it.
+
 ## Purpose
 
 The knowledge verification subsystem is the platform's engineering memory layer.

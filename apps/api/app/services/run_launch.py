@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +56,42 @@ def _schedule_orchestrator_start(
                 log.exception("Run orchestration failed run_id=%s", run_id, exc_info=exc)
 
     task.add_done_callback(_log_result)
+
+
+async def _fail_run_for_workspace_error(
+    session: AsyncSession,
+    *,
+    run: Run,
+    actor_type: str,
+    actor_id: str | None,
+) -> None:
+    previous = run.status
+    run.status = "FAILED"
+    run.finished_at = run.finished_at or datetime.now(timezone.utc)
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_FAILED",
+        actor_type=actor_type,
+        actor_id=actor_id,
+        tenant_id=run.tenant_id,
+        payload={
+            "previous": previous,
+            "new": "FAILED",
+            "workspace_status": run.workspace_status,
+            "workspace_error": run.workspace_error,
+        },
+    )
+    log.warning(
+        "Run failed during launch due to workspace preparation error run_id=%s project_id=%s executor=%s workspace_status=%s workspace_error=%s",
+        run.id,
+        run.project_id,
+        run.executor,
+        run.workspace_status,
+        run.workspace_error,
+    )
 
 
 async def launch_run_for_project(
@@ -196,6 +233,18 @@ async def launch_run_for_project(
         run.executor,
         selected_task.id if selected_task else None,
     )
+
+    if run.workspace_status == "ERROR":
+        await _fail_run_for_workspace_error(
+            session,
+            run=run,
+            actor_type=actor_type,
+            actor_id=actor_id,
+        )
+        await session.commit()
+        await session.refresh(run)
+        return run
+
     await session.commit()
     await session.refresh(run)
 

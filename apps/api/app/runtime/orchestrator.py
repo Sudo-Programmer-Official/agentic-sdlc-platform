@@ -50,6 +50,42 @@ class RunOrchestrator:
                 executor_name=executor_name,
             )
 
+    async def _fail_run_for_workspace_error(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        actor_type: str,
+        actor_id: str | None,
+    ) -> None:
+        previous = run.status
+        run.status = "FAILED"
+        run.finished_at = run.finished_at or datetime.now(timezone.utc)
+        session.add(run)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="RUN_FAILED",
+            actor_type=actor_type,
+            actor_id=actor_id,
+            tenant_id=run.tenant_id,
+            payload={
+                "previous": previous,
+                "new": "FAILED",
+                "workspace_status": run.workspace_status,
+                "workspace_error": run.workspace_error,
+            },
+        )
+        log.warning(
+            "Run bootstrap failed due to workspace preparation error run_id=%s project_id=%s executor=%s workspace_status=%s workspace_error=%s",
+            run.id,
+            run.project_id,
+            run.executor,
+            run.workspace_status,
+            run.workspace_error,
+        )
+
     async def bootstrap_in_session(
         self,
         session: AsyncSession,
@@ -65,8 +101,19 @@ class RunOrchestrator:
         if run is None or run.status in {"COMPLETED", "FAILED", "CANCELED"}:
             return False
 
+        require_repo = run.executor in {"codex", "test"}
+
         if run.status == "QUEUED":
-            await ensure_run_workspace(session, run)
+            await ensure_run_workspace(session, run, require_repo=require_repo)
+            if run.workspace_status == "ERROR":
+                await self._fail_run_for_workspace_error(
+                    session,
+                    run=run,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                )
+                await session.commit()
+                return False
             now = datetime.now(timezone.utc)
             previous = run.status
             run.status = "RUNNING"
@@ -82,7 +129,16 @@ class RunOrchestrator:
             )
             await session.commit()
         else:
-            await ensure_run_workspace(session, run)
+            await ensure_run_workspace(session, run, require_repo=require_repo)
+            if run.workspace_status == "ERROR":
+                await self._fail_run_for_workspace_error(
+                    session,
+                    run=run,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                )
+                await session.commit()
+                return False
             await session.commit()
 
         existing_work_item_id = await session.scalar(select(WorkItem.id).where(WorkItem.run_id == run_id).limit(1))

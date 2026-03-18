@@ -1,5 +1,7 @@
 # Agent Runtime Vision Roadmap
 
+See also: `docs/human-in-the-loop-runtime-roadmap.md`, `docs/run-console-product-spec.md`, `docs/network-and-recovery-architecture.md`, and `docs/software-execution-cockpit-blueprint.md`. These companion documents focus on operator steering, intervention points, UI reconciliation, visible run reasoning, concrete Mission Control surfaces, the lease-safe recovery model, and the higher-level software execution cockpit that sit on top of the durable runtime foundation described here.
+
 ## Objective
 
 Build a durable, real-time developer agent platform that behaves like an active software operator. The system should plan, execute, retry, report live progress, and produce real development outcomes such as branches, commits, pull requests, artifacts, and reviewable traces.

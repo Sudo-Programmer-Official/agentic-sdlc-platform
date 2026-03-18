@@ -109,6 +109,71 @@ class MissionControlSystemInsights(BaseModel):
     most_impacted_files: list[MissionControlNamedCount] = Field(default_factory=list)
 
 
+class MissionControlExecutionEnvironment(BaseModel):
+    workspace_root: str | None = None
+    repo_path: str | None = None
+    artifacts_path: str | None = None
+    logs_path: str | None = None
+    patches_path: str | None = None
+    branch_name: str | None = None
+    workspace_status: str | None = None
+    repo_seeded: bool = False
+    repo_url: str | None = None
+    repo_branch: str | None = None
+    repo_auth_mode: str | None = None
+    simulation_mode: str | None = None
+    cleanup_policy: str | None = None
+    command_audit_log: str | None = None
+    workspace_manifest_path: str | None = None
+    allowed_command_prefixes: list[str] = Field(default_factory=list)
+
+
+class MissionControlExecutionCommand(BaseModel):
+    command_id: str
+    label: str
+    status: str
+    command: list[str] = Field(default_factory=list)
+    cwd: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    exit_code: int | None = None
+    timed_out: bool = False
+    blocked_reason: str | None = None
+    log_path: str | None = None
+    stdout_tail: str | None = None
+    stderr_tail: str | None = None
+
+
+class MissionControlExecutionStep(BaseModel):
+    work_item_id: uuid.UUID
+    title: str
+    type: str
+    executor: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    attempt: int = 0
+    summary: str | None = None
+
+
+class MissionControlExecutionSummary(BaseModel):
+    run_id: uuid.UUID
+    run_status: str
+    workspace_status: str
+    current_step: str | None = None
+    current_executor: str | None = None
+    active_command_count: int = 0
+    last_updated_at: datetime | None = None
+
+
+class MissionControlExecutionConsoleResponse(BaseModel):
+    summary: MissionControlExecutionSummary
+    environment: MissionControlExecutionEnvironment
+    commands: list[MissionControlExecutionCommand] = Field(default_factory=list)
+    steps: list[MissionControlExecutionStep] = Field(default_factory=list)
+
+
 class MissionControlOverviewResponse(BaseModel):
     work_intake: list[MissionControlWorkIntakeItem] = Field(default_factory=list)
     recent_runs: list[MissionControlRunCard] = Field(default_factory=list)

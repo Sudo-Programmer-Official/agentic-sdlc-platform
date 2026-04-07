@@ -125,6 +125,7 @@ class Settings(BaseSettings):
         "git,pytest,python,python3,npm,pnpm,yarn,node,npx,uv,bash,sh,make,go,cargo,eslint,ruff"
     )
     workspace_command_output_max_bytes: int = 200_000
+    run_auto_push_branch_on_completion: bool = True
     preview_host: str = "127.0.0.1"
     preview_default_ttl_hours: int = 24
     preview_max_per_project: int = 5

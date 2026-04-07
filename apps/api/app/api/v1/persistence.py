@@ -82,11 +82,14 @@ from app.services.run_launch import launch_run_for_project
 from app.services.strategy_selection import create_strategy_group, get_strategy_group
 from app.services.run_timeline import build_run_timeline
 from app.services.workspace_supervisor import ensure_run_workspace
+from app.services.requirements_bridge import ensure_legacy_project, load_requirements_plan_state
+from app.services.run_summary_builder import ensure_project_run_summaries
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
     TaskCounts,
     ProjectMetricsResponse,
     PlanHistoryResponse,
+    RunSummary,
 )
 from app.core.config import get_settings
 from app.api.deps import get_tenant_context, get_tenant_id, ZERO_TENANT
@@ -132,6 +135,16 @@ def _run_out(run: Run) -> RunOut:
     data = RunOut.model_validate(run)
     data.allowed_transitions = sorted(RUN_ALLOWED.get(run.status, set()))
     return data
+
+
+def _delivery_summary_value(summary: dict | None, key: str) -> str | None:
+    if not isinstance(summary, dict):
+        return None
+    value = summary.get(key)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return None
 
 
 def _wi_out(wi: WorkItem) -> WorkItemOut:
@@ -1365,25 +1378,84 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    legacy_project = await ensure_legacy_project(session, project.id)
+    req_plan_state = load_requirements_plan_state(str(project.id))
+    graph = req_plan_state["graph"]
+    plan_status = req_plan_state["plan_status"]
     task_counts = await _task_counts(session, project_id)
-    # No plan/requirements/run data in persistence layer yet; return safe defaults.
+    latest_summary_rows = await ensure_project_run_summaries(
+        session,
+        tenant_id=project.tenant_id,
+        project_id=project.id,
+        limit=1,
+    )
+    latest_run_row = await session.scalar(
+        select(Run)
+        .where(Run.project_id == project_id, Run.tenant_id == project.tenant_id)
+        .order_by(Run.created_at.desc(), Run.id.desc())
+        .limit(1)
+    )
+    latest_run = None
+    if latest_run_row is not None:
+        latest_summary = latest_summary_rows[0] if latest_summary_rows else None
+        run_summary_meta = latest_run_row.summary if isinstance(latest_run_row.summary, dict) else {}
+        delivery_commit_sha = (
+            _delivery_summary_value(run_summary_meta, "pull_request_commit_sha")
+            or _delivery_summary_value(run_summary_meta, "remote_branch_commit_sha")
+        )
+        pull_request_number = run_summary_meta.get("pull_request_number") if isinstance(run_summary_meta, dict) else None
+        if isinstance(pull_request_number, str) and pull_request_number.isdigit():
+            pull_request_number = int(pull_request_number)
+        latest_pr_number = latest_summary.pull_request_number if latest_summary is not None else pull_request_number
+        latest_run = RunSummary(
+            run_id=str(latest_run_row.id),
+            status=latest_summary.status if latest_summary is not None else latest_run_row.status,
+            stage=project.status,
+            started_at=latest_run_row.started_at,
+            finished_at=latest_summary.finished_at if latest_summary is not None else latest_run_row.finished_at,
+            executor=latest_summary.executor if latest_summary is not None else latest_run_row.executor,
+            goal_text=(
+                latest_summary.goal_text
+                if latest_summary is not None
+                else _delivery_summary_value(run_summary_meta, "goal")
+                or _delivery_summary_value(run_summary_meta, "title")
+            ),
+            branch_name=latest_summary.branch_name if latest_summary is not None else latest_run_row.branch_name,
+            workspace_status=(
+                latest_summary.workspace_status if latest_summary is not None else latest_run_row.workspace_status
+            ),
+            recovery_count=latest_summary.recovery_count if latest_summary is not None else 0,
+            artifact_count=latest_summary.artifact_count if latest_summary is not None else 0,
+            files_changed=list(latest_summary.changed_files) if latest_summary is not None else [],
+            primary_error=latest_summary.primary_error if latest_summary is not None else latest_run_row.workspace_error,
+            approval_status=latest_summary.approval_status if latest_summary is not None else None,
+            pull_request_url=latest_summary.pr_url if latest_summary is not None else _delivery_summary_value(run_summary_meta, "pull_request_url"),
+            pull_request_number=latest_pr_number if isinstance(latest_pr_number, int) else None,
+            delivery_pushed=bool(run_summary_meta.get("remote_branch_pushed")),
+            delivery_branch_name=(
+                _delivery_summary_value(run_summary_meta, "remote_branch_name")
+                or (latest_summary.branch_name if latest_summary is not None else latest_run_row.branch_name)
+            ),
+            delivery_commit_sha=delivery_commit_sha,
+            delivery_pushed_at=_delivery_summary_value(run_summary_meta, "remote_branch_pushed_at"),
+        )
     return ProjectSummaryResponse(
         project_id=str(project.id),
         name=project.name,
         current_stage=project.status,
-        latest_run=None,
+        latest_run=latest_run,
         task_counts=task_counts,
-        architecture_refresh_needed=getattr(project, "architecture_refresh_needed", False),
-        plan_refresh_needed=getattr(project, "plan_refresh_needed", False),
-        test_refresh_needed=getattr(project, "test_refresh_needed", False),
-        requirements_status=None,
-        requirements_version=None,
-        requirements_sha=None,
-        plan_exists=False,
-        plan_fresh=False,
-        plan_id=None,
-        plan_requirements_sha=None,
-        plan_created_at=None,
+        architecture_refresh_needed=legacy_project.architecture_refresh_needed,
+        plan_refresh_needed=legacy_project.plan_refresh_needed,
+        test_refresh_needed=legacy_project.test_refresh_needed,
+        requirements_status=graph.status.value if graph else None,
+        requirements_version=graph.version if graph else None,
+        requirements_sha=req_plan_state["requirements_sha"],
+        plan_exists=plan_status["exists"],
+        plan_fresh=plan_status["fresh"],
+        plan_id=plan_status["plan_id"],
+        plan_requirements_sha=plan_status["requirements_sha"],
+        plan_created_at=plan_status["created_at"],
     )
 
 
@@ -1409,5 +1481,6 @@ async def plan_history(project_id: uuid.UUID, session: AsyncSession = Depends(ge
     project = await session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    # Persistence layer does not yet store plan history; return empty list to keep UI happy.
-    return PlanHistoryResponse(project_id=str(project.id), entries=[])
+    await ensure_legacy_project(session, project.id)
+    plan_history_entries = load_requirements_plan_state(str(project.id))["plan_history"]
+    return PlanHistoryResponse(project_id=str(project.id), entries=plan_history_entries)

@@ -408,16 +408,44 @@ def prepare_workspace_repo(
         pass
 
     if target_branch == base_branch:
+        _run_git(["reset", "--hard", "HEAD"], cwd=repo_dir)
+        _run_git(["clean", "-fd"], cwd=repo_dir)
         return
 
-    try:
-        _run_git(["checkout", "-B", target_branch, f"origin/{base_branch}"], cwd=repo_dir)
-    except RuntimeError:
-        _run_git(["checkout", "-B", target_branch, base_branch], cwd=repo_dir)
+    if remote_branch_exists(repo_dir, target_branch):
+        _run_git(["checkout", "-B", target_branch, f"origin/{target_branch}"], cwd=repo_dir)
+    else:
+        try:
+            _run_git(["checkout", "-B", target_branch, f"origin/{base_branch}"], cwd=repo_dir)
+        except RuntimeError:
+            _run_git(["checkout", "-B", target_branch, base_branch], cwd=repo_dir)
+
+    _run_git(["reset", "--hard", "HEAD"], cwd=repo_dir)
+    _run_git(["clean", "-fd"], cwd=repo_dir)
 
 
 def repo_has_changes(repo_dir: Path) -> bool:
     return bool(_run_git(["status", "--porcelain"], cwd=repo_dir))
+
+
+def current_head_sha(repo_dir: Path) -> str:
+    return _run_git(["rev-parse", "HEAD"], cwd=repo_dir)
+
+
+def remote_branch_exists(repo_dir: Path, branch_name: str) -> bool:
+    try:
+        _run_git(["rev-parse", "--verify", f"origin/{branch_name}"], cwd=repo_dir)
+    except RuntimeError:
+        return False
+    return True
+
+
+def branch_has_commits_ahead(repo_dir: Path, base_branch: str) -> bool:
+    try:
+        ahead = _run_git(["rev-list", "--count", f"origin/{base_branch}..HEAD"], cwd=repo_dir)
+    except RuntimeError:
+        return False
+    return ahead.strip().isdigit() and int(ahead.strip()) > 0
 
 
 def commit_all(repo_dir: Path, message: str) -> str:

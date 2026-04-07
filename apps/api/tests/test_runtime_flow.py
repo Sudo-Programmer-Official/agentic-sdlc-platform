@@ -129,6 +129,49 @@ async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db
 
 
 @pytest.mark.anyio
+async def test_embedded_runtime_marks_run_failed_when_branch_publish_fails(monkeypatch, runtime_db, tmp_path):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("RUN_AUTO_PUSH_BRANCH_ON_COMPLETION", "true")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async def _fail_publish(*_args, **_kwargs):
+        raise RuntimeError("push failed")
+
+    monkeypatch.setattr(orchestrator_module, "publish_run_branch_if_ready", _fail_publish)
+
+    async with runtime_db() as session:
+        project = Project(name="Publish failure runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "FAILED"
+        assert run.summary["remote_branch_push_error"] == "push failed"
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_BRANCH_PUSH_FAILED" in event_types
+        assert "RUN_FAILED" in event_types
+
+
+@pytest.mark.anyio
 async def test_external_worker_claims_and_executes_dummy_work_item(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("OPENAI_API_KEY", "")

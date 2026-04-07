@@ -58,13 +58,41 @@
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div class="text-xs uppercase tracking-wide text-slate-400">Requirements</div>
-        <div class="mt-2 text-sm font-semibold">Version: {{ planMeta?.requirements_version ?? '—' }}</div>
+        <div class="mt-2 text-sm font-semibold">
+          Status: {{ planMeta?.requirements_status || '—' }} · Version: {{ planMeta?.requirements_version ?? '—' }}
+        </div>
         <div class="text-xs text-slate-500 break-all">Req SHA: {{ shortSha(planMeta?.requirements_sha) }}</div>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div class="text-xs uppercase tracking-wide text-slate-400">Plan Metadata</div>
         <div class="mt-2 text-sm font-semibold">Plan ID: {{ planMeta?.plan_id || '—' }}</div>
         <div class="text-xs text-slate-500">Created: {{ planMeta?.plan_created_at || '—' }}</div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Latest Delivery</div>
+        <div class="mt-2 text-sm font-semibold" :class="latestDeliveryTone">
+          {{ latestDeliveryStatus }}
+        </div>
+        <div class="text-xs text-slate-500">
+          Branch: {{ latestDelivery?.delivery_branch_name || latestDelivery?.branch_name || '—' }}
+        </div>
+        <div class="text-xs text-slate-500">Commit: {{ shortSha(latestDelivery?.delivery_commit_sha) }}</div>
+        <div class="text-xs text-slate-500">
+          Files changed: {{ latestDelivery?.files_changed?.length ?? 0 }} · Artifacts: {{ latestDelivery?.artifact_count ?? 0 }}
+        </div>
+        <div v-if="latestDelivery?.pull_request_url" class="mt-2 text-xs">
+          <a
+            :href="latestDelivery.pull_request_url"
+            target="_blank"
+            rel="noreferrer"
+            class="font-medium text-sky-600 hover:text-sky-700"
+          >
+            Open PR{{ latestDelivery.pull_request_number ? ` #${latestDelivery.pull_request_number}` : "" }}
+          </a>
+        </div>
+        <div v-else-if="latestDelivery?.primary_error" class="mt-2 text-xs text-rose-600">
+          {{ latestDelivery.primary_error }}
+        </div>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div class="flex items-center justify-between">
@@ -364,7 +392,7 @@
           />
         </el-select>
         <div v-if="!documents.length" class="text-xs text-amber-700">
-          Add a document first before regenerating tasks.
+          Approve a requirements graph or add a document first before regenerating tasks.
         </div>
         <el-checkbox v-model="regenForce">Force (override existing tasks for this version)</el-checkbox>
         <el-button type="success" :disabled="!documents.length" :loading="regenLoading" @click="doRegenerate">
@@ -484,7 +512,7 @@
     <el-dialog v-model="showTasksDialog" title="Tasks" width="640px">
       <div class="mb-3 flex items-center justify-between gap-3">
         <div class="text-xs text-slate-500">
-          Create a task manually, or create a document and use Regenerate Tasks.
+          Create a task manually, or approve requirements/create a document and use Regenerate Tasks.
         </div>
         <el-button type="primary" size="small" plain @click="openCreateTaskDialog">
           Create Task
@@ -666,6 +694,7 @@ const architectureRefreshNeeded = computed(() => projectContext.architectureRefr
 const planRefreshNeeded = computed(() => projectContext.planRefreshNeeded);
 const testRefreshNeeded = computed(() => projectContext.testRefreshNeeded);
 const planMeta = ref<any | null>(null);
+const latestDelivery = ref<any | null>(null);
 const planHistory = ref<any[]>([]);
 const health = ref<any | null>(null);
 const healthError = ref("");
@@ -775,6 +804,23 @@ const riskClass = computed(() => {
   if (risk === "MEDIUM") return "text-amber-600";
   if (risk === "LOW") return "text-emerald-600";
   return "text-slate-500";
+});
+const latestDeliveryStatus = computed(() => {
+  if (!latestDelivery.value) return "No delivery yet";
+  if (latestDelivery.value.pull_request_url) {
+    return latestDelivery.value.pull_request_number
+      ? `PR #${latestDelivery.value.pull_request_number} ready`
+      : "Pull request ready";
+  }
+  if (latestDelivery.value.delivery_pushed) return "Branch pushed";
+  if (latestDelivery.value.status === "COMPLETED") return "Completed locally";
+  return latestDelivery.value.status || "Unknown";
+});
+const latestDeliveryTone = computed(() => {
+  if (!latestDelivery.value) return "text-slate-500";
+  if (latestDelivery.value.status === "FAILED" || latestDelivery.value.primary_error) return "text-rose-600";
+  if (latestDelivery.value.pull_request_url || latestDelivery.value.delivery_pushed) return "text-emerald-600";
+  return "text-slate-700";
 });
 
 function goHome() {
@@ -1251,6 +1297,37 @@ async function loadProjectMeta() {
   }
 }
 
+async function loadProjectSummary() {
+  if (!projectId.value) return;
+  try {
+    const data = await fetchProjectSummary(projectId.value);
+    planMeta.value = {
+      plan_id: data.plan_id,
+      plan_fresh: data.plan_fresh,
+      requirements_status: data.requirements_status,
+      requirements_sha: data.requirements_sha,
+      plan_requirements_sha: data.plan_requirements_sha,
+      plan_created_at: data.plan_created_at,
+      requirements_version: data.requirements_version,
+    };
+    latestDelivery.value = data.latest_run || null;
+    updateProjectContext({
+      projectId: data.project_id,
+      projectName: data.name,
+      stage: data.current_stage,
+      latestRunId: data.latest_run?.run_id || "",
+      runStatus: data.latest_run?.status || "IDLE",
+      architectureRefreshNeeded: data.architecture_refresh_needed ?? false,
+      planRefreshNeeded: data.plan_refresh_needed ?? false,
+      testRefreshNeeded: data.test_refresh_needed ?? false,
+      updatedAt: new Date().toISOString(),
+      hasActiveRun: Boolean(data.latest_run?.run_id),
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 async function loadRuns() {
   if (!projectId.value) return;
   runsLoading.value = true;
@@ -1263,6 +1340,7 @@ async function loadRuns() {
       hasActiveRun: Boolean(runs.value.length),
       updatedAt: new Date().toISOString(),
     });
+    await loadProjectSummary();
     await loadWorkItems();
     await loadRunEvents();
   } catch (err: any) {
@@ -1417,28 +1495,8 @@ function shortSha(val?: string | null) {
 onMounted(async () => {
   if (!projectId.value) return;
   error.value = "";
+  await loadProjectSummary();
   try {
-    const data = await fetchProjectSummary(projectId.value);
-    planMeta.value = {
-      plan_id: data.plan_id,
-      plan_fresh: data.plan_fresh,
-      requirements_sha: data.requirements_sha,
-      plan_requirements_sha: data.plan_requirements_sha,
-      plan_created_at: data.plan_created_at,
-      requirements_version: data.requirements_version,
-    };
-    updateProjectContext({
-      projectId: data.project_id,
-      projectName: data.name,
-      stage: data.current_stage,
-      latestRunId: data.latest_run?.run_id || "",
-      runStatus: data.latest_run?.status || "IDLE",
-      architectureRefreshNeeded: data.architecture_refresh_needed ?? false,
-      planRefreshNeeded: data.plan_refresh_needed ?? false,
-      testRefreshNeeded: data.test_refresh_needed ?? false,
-      updatedAt: new Date().toISOString(),
-      hasActiveRun: Boolean(data.latest_run?.run_id),
-    });
     const history = await fetchPlanHistory(projectId.value);
     planHistory.value = history.entries || [];
   } catch {

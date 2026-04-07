@@ -19,7 +19,7 @@ from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
 from app.main import app
-from app.services import pr_service, repo_connector, workspace_supervisor
+from app.services import pr_service, repo_connector, run_delivery, workspace_supervisor
 
 
 def _git_env() -> dict[str, str]:
@@ -181,6 +181,7 @@ async def test_github_connect_info_and_installation_repositories(db_session, mon
     monkeypatch.setattr(persistence, "github_adapter", DummyGitHubAdapter())
     monkeypatch.setattr(persistence.settings, "github_app_slug", "agentic-sdlc")
     monkeypatch.setattr(persistence.settings, "github_allowed_org", "sudo-programmer-official")
+    monkeypatch.setattr(persistence.settings, "runtime_git_auth_mode", "auto")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         connect_resp = await client.get("/api/v1/integrations/github/connect")
@@ -238,6 +239,119 @@ async def test_create_run_seeds_workspace_from_connected_repo(db_session, monkey
     data = response.json()
     assert data["workspace_status"] == "SEEDED"
     assert Path(data["repo_path"]).joinpath(".git").exists()
+
+
+@pytest.mark.anyio
+async def test_publish_run_branch_if_ready_commits_and_pushes_workspace_changes(db_session):
+    session, tenant_id, tmp_path = db_session
+    remote = _seed_remote_repo(tmp_path)
+
+    workspace_root = tmp_path / "workspaces" / "proj" / "publish-run"
+    repo_path = workspace_root / "repo"
+    _run_git(["clone", str(remote), str(repo_path)])
+    _run_git(["checkout", "-b", "run/publish-test"], cwd=repo_path)
+    (repo_path / "docs").mkdir(parents=True, exist_ok=True)
+    (repo_path / "docs" / "publish-test.md").write_text("hello publish\n", encoding="utf-8")
+
+    project = Project(name="Publish project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url=str(remote),
+            repo_full_name="example/repo",
+            default_branch="main",
+        )
+    )
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_path),
+        branch_name="run/publish-test",
+        workspace_status="SEEDED",
+        summary={"goal": "Publish docs smoke file"},
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    result = await run_delivery.publish_run_branch_if_ready(session, run=run)
+
+    assert result is not None
+    assert result["branch_name"] == "run/publish-test"
+    assert result["created_commit"] is True
+    assert _run_git(["status", "--short"], cwd=repo_path) == ""
+
+    updated_run = await session.get(Run, run.id)
+    assert updated_run is not None
+    await session.refresh(updated_run)
+    assert updated_run.summary["remote_branch_pushed"] is True
+    assert updated_run.summary["remote_branch_created_commit"] is True
+
+    show_ref = _run_git(["--git-dir", str(remote), "show-ref", "--verify", "refs/heads/run/publish-test"])
+    assert show_ref
+
+
+@pytest.mark.anyio
+async def test_publish_run_branch_if_ready_pushes_clean_branch_without_new_commit(db_session):
+    session, tenant_id, tmp_path = db_session
+    remote = _seed_remote_repo(tmp_path)
+
+    workspace_root = tmp_path / "workspaces" / "proj" / "publish-clean-run"
+    repo_path = workspace_root / "repo"
+    _run_git(["clone", str(remote), str(repo_path)])
+    _run_git(["checkout", "-b", "run/publish-clean"], cwd=repo_path)
+    head_before = _run_git(["rev-parse", "HEAD"], cwd=repo_path)
+
+    project = Project(name="Publish clean branch project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url=str(remote),
+            repo_full_name="example/repo",
+            default_branch="main",
+        )
+    )
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_path),
+        branch_name="run/publish-clean",
+        workspace_status="SEEDED",
+        summary={"goal": "Publish clean branch"},
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    result = await run_delivery.publish_run_branch_if_ready(session, run=run)
+
+    assert result is not None
+    assert result["branch_name"] == "run/publish-clean"
+    assert result["created_commit"] is False
+    assert result["commit_sha"] == head_before
+
+    updated_run = await session.get(Run, run.id)
+    assert updated_run is not None
+    await session.refresh(updated_run)
+    assert updated_run.summary["remote_branch_pushed"] is True
+    assert updated_run.summary["remote_branch_created_commit"] is False
+
+    show_ref = _run_git(["--git-dir", str(remote), "show-ref", "--verify", "refs/heads/run/publish-clean"])
+    assert show_ref.endswith("refs/heads/run/publish-clean")
 
 
 @pytest.mark.anyio
@@ -388,3 +502,107 @@ async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_s
 
     show_ref = _run_git(["--git-dir", str(remote), "show-ref", "--verify", "refs/heads/run/fix-auth"])
     assert show_ref
+
+
+@pytest.mark.anyio
+async def test_create_pr_from_artifact_uses_already_published_branch(db_session, monkeypatch):
+    session, tenant_id, tmp_path = db_session
+    remote = _seed_remote_repo(tmp_path)
+
+    workspace_root = tmp_path / "workspaces" / "proj" / "published-run"
+    repo_path = workspace_root / "repo"
+    _run_git(["clone", str(remote), str(repo_path)])
+    _run_git(["checkout", "-b", "run/already-pushed"], cwd=repo_path)
+    readme = repo_path / "README.md"
+    readme.write_text("hello\nalready pushed\n", encoding="utf-8")
+    diff = _run_git(["diff"], cwd=repo_path)
+    _run_git(["add", "README.md"], cwd=repo_path)
+    _run_git(["commit", "-m", "already pushed"], cwd=repo_path)
+    pushed_sha = _run_git(["rev-parse", "HEAD"], cwd=repo_path)
+    _run_git(["push", "-u", "origin", "run/already-pushed"], cwd=repo_path)
+
+    project = Project(name="Already pushed PR project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url=str(remote),
+            repo_full_name="example/repo",
+            default_branch="main",
+        )
+    )
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_path),
+        branch_name="run/already-pushed",
+        workspace_status="SEEDED",
+        summary={
+            "remote_branch_pushed": True,
+            "remote_branch_name": "run/already-pushed",
+            "remote_branch_commit_sha": pushed_sha,
+        },
+    )
+    session.add(run)
+    await session.flush()
+    artifact = Artifact(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="git_diff",
+        uri="workspace://patches/already-pushed.patch",
+        version=1,
+        extra_metadata={"content": diff},
+    )
+    session.add(artifact)
+    await session.commit()
+    await session.refresh(run)
+    await session.refresh(artifact)
+
+    class DummyGitHubAdapter:
+        def create_pull_request(self, repo: str, title: str, body: str, head: str, base: str, installation_id=None):
+            return {
+                "html_url": f"https://github.com/{repo}/pull/34",
+                "number": 34,
+            }
+
+    monkeypatch.setattr(pr_service, "get_vcs_adapter", lambda provider: DummyGitHubAdapter())
+
+    def _unexpected_push(*_args, **_kwargs):
+        raise AssertionError("push_branch should not be called for an already published branch")
+
+    monkeypatch.setattr(pr_service, "push_branch", _unexpected_push)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        approval_resp = await client.post(
+            f"/api/v1/projects/{project.id}/approvals",
+            json={
+                "target_type": "artifact",
+                "target_id": str(artifact.id),
+                "status": "APPROVED",
+                "decided_by": "ui-user",
+                "comment": "Reviewed patch artifact",
+            },
+        )
+        assert approval_resp.status_code == 201, approval_resp.text
+
+        response = await client.post(
+            f"/api/v1/runs/{run.id}/create-pr",
+            json={
+                "artifact_id": str(artifact.id),
+                "title": "Already pushed README",
+                "body": "Automated fix",
+                "branch_name": "run/already-pushed",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["pull_request_url"] == "https://github.com/example/repo/pull/34"
+    assert data["commit_sha"] == pushed_sha

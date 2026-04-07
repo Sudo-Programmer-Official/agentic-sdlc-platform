@@ -78,6 +78,21 @@ class RunSummary(BaseModel):
     stage: str
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    executor: Optional[str] = None
+    goal_text: Optional[str] = None
+    branch_name: Optional[str] = None
+    workspace_status: Optional[str] = None
+    recovery_count: int = 0
+    artifact_count: int = 0
+    files_changed: List[str] = Field(default_factory=list)
+    primary_error: Optional[str] = None
+    approval_status: Optional[str] = None
+    pull_request_url: Optional[str] = None
+    pull_request_number: Optional[int] = None
+    delivery_pushed: bool = False
+    delivery_branch_name: Optional[str] = None
+    delivery_commit_sha: Optional[str] = None
+    delivery_pushed_at: Optional[str] = None
 
 
 class CreateRunRequest(BaseModel):

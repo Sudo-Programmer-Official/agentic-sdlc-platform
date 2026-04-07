@@ -80,6 +80,17 @@ def _work_item_label(work_item: WorkItem) -> str:
         return work_item.key
     return _humanize_token(work_item.type)
 
+
+def _summary_str(summary: dict | None, key: str) -> str | None:
+    if not isinstance(summary, dict):
+        return None
+    value = summary.get(key)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return None
+
+
 def _review_metrics(work_items: list[WorkItem]) -> tuple[float | None, float | None]:
     risk_scores: list[float] = []
     confidence_scores: list[float] = []
@@ -479,6 +490,13 @@ async def build_run_narrative(
     )
     settings = get_settings()
     runtime_diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode, settings.runtime_git_auth_mode)
+    summary_payload = run.summary if isinstance(run.summary, dict) else {}
+    delivery_commit_sha = _summary_str(summary_payload, "pull_request_commit_sha") or _summary_str(
+        summary_payload, "remote_branch_commit_sha"
+    )
+    pull_request_number = summary_payload.get("pull_request_number") if isinstance(summary_payload, dict) else None
+    if isinstance(pull_request_number, str) and pull_request_number.isdigit():
+        pull_request_number = int(pull_request_number)
 
     working_context = RunWorkingContextSummary(
         goal=goal,
@@ -497,6 +515,11 @@ async def build_run_narrative(
         confidence_score=confidence_score,
         risk_level=risk_level,
         pull_request_url=timeline_summary.pull_request_url,
+        pull_request_number=pull_request_number if isinstance(pull_request_number, int) else None,
+        delivery_pushed=bool(summary_payload.get("remote_branch_pushed")),
+        delivery_branch_name=_summary_str(summary_payload, "remote_branch_name") or run.branch_name,
+        delivery_commit_sha=delivery_commit_sha,
+        delivery_pushed_at=_summary_str(summary_payload, "remote_branch_pushed_at"),
         runtime_mode=runtime_diagnostics.runtime_mode,
         runtime_git_auth_mode=runtime_diagnostics.runtime_git_auth_mode,
         runtime_git_auth_status=runtime_diagnostics.runtime_git_auth_status,

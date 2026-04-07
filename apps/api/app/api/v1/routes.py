@@ -66,10 +66,14 @@ from app.services.errors import (
     RequirementGraphNotApprovedError,
     RequirementGraphStaleError,
 )
-from core.models import Project as LegacyProject, Stage, TaskStatus
-from app.db.models.project import Project as DBProject
+from core.models import Stage, TaskStatus
 from app.db.session import get_session
 from app.services.requirements_service import build_edges, build_nodes, empty_graph, graph_to_dict
+from app.services.requirements_bridge import (
+    ensure_legacy_project as _ensure_legacy_project,
+    persist_prd_document,
+    sync_requirements_document,
+)
 
 router = APIRouter()
 projects_router = APIRouter(prefix="/projects", tags=["projects"])
@@ -77,44 +81,6 @@ approvals_router = APIRouter(prefix="/approvals", tags=["approvals"])
 agents_router = APIRouter(prefix="/agents", tags=["agents"])
 runs_router = APIRouter(prefix="/runs", tags=["runs"])
 changes_router = APIRouter(prefix="/changes", tags=["changes"])
-
-
-def _map_db_status_to_legacy_stage(status_value: str | None) -> Stage:
-    mapping = {
-        "INTAKE": Stage.INTAKE,
-        "PLAN": Stage.PLAN_READY,
-        "RUN": Stage.IMPLEMENTING,
-        "EVALUATE": Stage.READY_FOR_REVIEW,
-    }
-    return mapping.get((status_value or "").upper(), Stage.INTAKE)
-
-
-async def _ensure_legacy_project(project_id: str, session: AsyncSession) -> None:
-    try:
-        project_service.get_project(project_id)
-        return
-    except ProjectNotFoundError:
-        pass
-
-    try:
-        db_project_id = uuid.UUID(project_id)
-    except ValueError as exc:
-        raise ProjectNotFoundError(f"Project {project_id} not found") from exc
-
-    db_project = await session.get(DBProject, db_project_id)
-    if db_project is None or db_project.deleted_at is not None:
-        raise ProjectNotFoundError(f"Project {project_id} not found")
-
-    legacy_project = LegacyProject(
-        id=project_id,
-        name=db_project.name,
-        description=db_project.description,
-        current_stage=_map_db_status_to_legacy_stage(db_project.status),
-        created_at=db_project.created_at,
-    )
-    project_service._project_store.add(legacy_project)
-    project_service._state_store.set_stage(project_id, legacy_project.current_stage)
-
 
 def _project_response(project) -> ProjectResponse:
     return ProjectResponse(
@@ -423,6 +389,14 @@ async def ingest_prd(
             source=payload.source,
             fmt=payload.format,
         )
+        await persist_prd_document(
+            session,
+            project_id,
+            payload.text,
+            source=payload.source,
+            created_by="requirements-ui",
+        )
+        await session.commit()
         return RequirementGraphModel(**graph_to_dict(graph))
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -510,6 +484,12 @@ async def approve_requirements_graph(
             project_id=project_id, approved_by=payload.approved_by
         )
         graph = requirements_service.get_graph(project_id)
+        await sync_requirements_document(
+            session,
+            project_id,
+            approved_by=payload.approved_by,
+        )
+        await session.commit()
         return RequirementGraphApproveResponse(
             project_id=project_id,
             version=graph.version,

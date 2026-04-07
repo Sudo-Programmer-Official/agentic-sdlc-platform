@@ -35,7 +35,7 @@ def _event_status(event_type: str) -> str:
         return "failed"
     if upper.endswith("SKIPPED"):
         return "warning"
-    if upper.endswith("DONE") or upper.endswith("COMPLETED") or upper == "RUN_PULL_REQUEST_CREATED":
+    if upper.endswith("DONE") or upper.endswith("COMPLETED") or upper.endswith("PUSHED") or upper == "RUN_PULL_REQUEST_CREATED":
         return "success"
     if "RECOVERY" in upper or "RETRIED" in upper:
         return "recovery"
@@ -58,6 +58,8 @@ def _event_title(event: RunEvent, work_item: WorkItem | None) -> str:
         "RUN_COMPLETED": "Run completed",
         "RUN_FAILED": "Run failed",
         "RUN_CANCELED": "Run canceled",
+        "RUN_BRANCH_PUSHED": "Remote branch pushed",
+        "RUN_BRANCH_PUSH_FAILED": "Remote branch push failed",
         "RUN_APPROVAL_RECORDED": "Approval recorded",
         "RUN_PULL_REQUEST_CREATED": "Pull request created",
         "RUN_FORKED": "Run forked",

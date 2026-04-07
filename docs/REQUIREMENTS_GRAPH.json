@@ -1,90 +1,117 @@
 {
   "project_id": "f7096fa5-8c0c-47cb-8309-821283fae2da",
-  "version": 1,
+  "version": 2,
   "status": "APPROVED",
-  "created_at": "2026-04-07T02:07:26.066165",
-  "updated_at": "2026-04-07T02:07:43.286301",
-  "approved_at": "2026-04-07T02:07:43.286301",
+  "created_at": "2026-04-07T05:12:06.511393",
+  "updated_at": "2026-04-07T05:12:26.141690",
+  "approved_at": "2026-04-07T05:12:26.141690",
   "approved_by": "ui-user",
   "nodes": [
     {
-      "id": "FR1 \u2014 Homepage",
+      "id": "FR-001",
       "type": "FR",
-      "text": "\t\u2022\tCreate index.html\n\t\u2022\tInclude:\n\t\u2022\tName (e.g., \u201cAbhishek\u201d)\n\t\u2022\tTagline: \u201cAI Engineer & Builder\u201d\n\t\u2022\tCTA button: \u201cView Projects\u201d",
-      "confidence": 0.7,
+      "text": "Create a homepage file index.html",
+      "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
       "tags": []
     },
     {
-      "id": "FR2 \u2014 About Section",
+      "id": "FR-002",
       "type": "FR",
-      "text": "\tShort paragraph about:\n\t\u2022\tAI + Full-stack focus\n\t\u2022\tStartup mindset",
-      "confidence": 0.7,
-      "source": "HUMAN_EDITED",
-      "quality_type": null,
-      "tags": []
-    },
-    {
-      "id": "FR3 \u2014 Projects Section",
-      "type": "FR",
-      "text": "\t\u2022\t2\u20133 dummy projects:\n\t\u2022\tAI SaaS App\n\t\u2022\tSystem Design Tool\n\t\u2022\tFrontend Dashboard\n\nEach project:\n\t\u2022\tTitle\n\t\u2022\tShort description\n",
-      "confidence": 0.7,
-      "source": "HUMAN_EDITED",
-      "quality_type": null,
-      "tags": []
-    },
-    {
-      "id": "FR4 \u2014 Contact Section",
-      "type": "FR",
-      "text": "\t\u2022\tEmail placeholder\n\t\u2022\tGitHub / LinkedIn placeholders",
-      "confidence": 0.7,
-      "source": "HUMAN_EDITED",
-      "quality_type": null,
-      "tags": []
-    },
-    {
-      "id": "FR5 \u2014 Styling",
-      "type": "FR",
-      "text": "\t\u2022\tClean layout\n\t\u2022\tCentered content\n\t\u2022\tUse:\n\t\u2022\tsimple CSS OR inline styles (preferred for reliability)\n\t\u2022\tMobile responsive (basic)",
-      "confidence": 0.7,
-      "source": "HUMAN_EDITED",
-      "quality_type": null,
-      "tags": []
-    },
-    {
-      "id": "QR1 \u2014 No Build Step",
-      "type": "QR",
-      "text": "\tPure HTML/CSS (no React, no bundler)",
-      "confidence": 0.9,
+      "text": "Add a hero section with name \"Abhishek\" and tagline \"AI Engineer & Builder\"",
+      "confidence": 0.95,
       "source": "AI_EXTRACTED",
-      "quality_type": "reliability",
-      "tags": []
-    },
-    {
-      "id": "QR2 \u2014 Deterministic Output",
-      "type": "QR",
-      "text": "\t\u2022\tSame input \u2192 same file",
-      "confidence": 0.9,
-      "source": "AI_EXTRACTED",
-      "quality_type": "scalability",
-      "tags": []
-    },
-    {
-      "id": "QR3 \u2014 Previewable",
-      "type": "QR",
-      "text": "\tMust open directly in browser OR via local server\n",
-      "confidence": 0.7,
-      "source": "HUMAN_EDITED",
       "quality_type": null,
       "tags": []
     },
     {
-      "id": "QR4 \u2014 No External Dependencies",
+      "id": "FR-003",
+      "type": "FR",
+      "text": "Add an about section describing experience in AI and full-stack development",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-004",
+      "type": "FR",
+      "text": "Add a projects section with at least 3 sample projects",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-005",
+      "type": "FR",
+      "text": "Add a contact section with email and GitHub/LinkedIn placeholders",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-006",
+      "type": "FR",
+      "text": "Add a navigation bar to jump between sections",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-007",
+      "type": "FR",
+      "text": "Make the layout responsive for mobile screens",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-001",
       "type": "QR",
-      "text": "\tNo CDN required (keep it safe)",
-      "confidence": 0.7,
-      "source": "HUMAN_EDITED",
+      "text": "The website should run without any build step",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-002",
+      "type": "QR",
+      "text": "The page should load without errors in a browser",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-003",
+      "type": "QR",
+      "text": "Use simple HTML and CSS only",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-004",
+      "type": "QR",
+      "text": "Avoid external dependencies like CDNs",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-005",
+      "type": "QR",
+      "text": "Code should be clean and readable",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
       "quality_type": null,
       "tags": []
     }
@@ -105,7 +132,271 @@
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
+    },
+    {
+      "id": "EDGE-003",
+      "from_id": "FR-001",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-004",
+      "from_id": "FR-001",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-005",
+      "from_id": "FR-001",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-006",
+      "from_id": "FR-002",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-007",
+      "from_id": "FR-002",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-008",
+      "from_id": "FR-002",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-009",
+      "from_id": "FR-002",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-010",
+      "from_id": "FR-002",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-011",
+      "from_id": "FR-003",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-012",
+      "from_id": "FR-003",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-013",
+      "from_id": "FR-003",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-014",
+      "from_id": "FR-003",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-015",
+      "from_id": "FR-003",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-016",
+      "from_id": "FR-004",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-017",
+      "from_id": "FR-004",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-018",
+      "from_id": "FR-004",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-019",
+      "from_id": "FR-004",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-020",
+      "from_id": "FR-004",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-021",
+      "from_id": "FR-005",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-022",
+      "from_id": "FR-005",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-023",
+      "from_id": "FR-005",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-024",
+      "from_id": "FR-005",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-025",
+      "from_id": "FR-005",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-026",
+      "from_id": "FR-006",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-027",
+      "from_id": "FR-006",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-028",
+      "from_id": "FR-006",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-029",
+      "from_id": "FR-006",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-030",
+      "from_id": "FR-006",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-031",
+      "from_id": "FR-007",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-032",
+      "from_id": "FR-007",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-033",
+      "from_id": "FR-007",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-034",
+      "from_id": "FR-007",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-035",
+      "from_id": "FR-007",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
     }
   ],
-  "sha256": "110ed4a7c1ba854c93015ff487b84a8a3615f6b025146cb1daf3ccf9c6b73813"
+  "sha256": "6ba74675abd9ce59bc3a3a344fe70206ab90f92cd79430036f44d4078b9ef42b"
 }

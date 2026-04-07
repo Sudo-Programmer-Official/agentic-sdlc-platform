@@ -37,6 +37,16 @@ TASK_SCHEMA = {
 }
 
 
+def _task_response_format() -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "task_generation",
+            "schema": TASK_SCHEMA,
+        },
+    }
+
+
 class LLMTaskGenerator:
     def __init__(
         self,
@@ -150,7 +160,7 @@ class LLMTaskGenerator:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": current_user_prompt},
                     ],
-                    response_format={"type": "json_schema", "json_schema": TASK_SCHEMA},
+                    response_format=_task_response_format(),
                 )
                 raw_json = completion.choices[0].message.content or "{}"
                 data = json.loads(raw_json)

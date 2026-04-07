@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -7,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Project, Run, WorkItem, WorkItemEdge, Trace
+from app.db.models import Artifact, Project, Run, WorkItem, WorkItemEdge, Trace
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -68,6 +69,77 @@ async def test_public_project_routes_resolve_to_db_backed_handlers(db_session):
 
     assert summary_resp.status_code == 200
     assert summary_resp.json()["name"] == "Router order"
+
+
+@pytest.mark.anyio
+async def test_public_project_summary_exposes_latest_delivery_state(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Delivery summary", tenant_id=tenant_id, description="db-backed")
+    session.add(project)
+    await session.flush()
+
+    started = datetime.now(timezone.utc) - timedelta(minutes=4)
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/delivery-1234",
+        workspace_status="SEEDED",
+        started_at=started,
+        finished_at=started + timedelta(seconds=54),
+        summary={
+            "goal": "Ship delivery summary",
+            "remote_branch_pushed": True,
+            "remote_branch_name": "run/delivery-1234",
+            "remote_branch_commit_sha": "abcdef1234567890",
+            "remote_branch_pushed_at": "2026-04-06T02:35:00Z",
+            "pull_request_url": "https://github.com/acme/example/pull/42",
+            "pull_request_number": 42,
+        },
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        Artifact(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            run_id=run.id,
+            type="git_diff",
+            uri="workspace://patches/delivery.patch",
+            version=1,
+            extra_metadata={
+                "content": (
+                    "diff --git a/docs/delivery.md b/docs/delivery.md\n"
+                    "--- a/docs/delivery.md\n"
+                    "+++ b/docs/delivery.md\n"
+                    "@@ -0,0 +1 @@\n"
+                    "+delivery summary\n"
+                )
+            },
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/summary")
+
+    assert response.status_code == 200
+    data = response.json()
+    latest_run = data["latest_run"]
+    assert latest_run["status"] == "COMPLETED"
+    assert latest_run["executor"] == "codex"
+    assert latest_run["goal_text"] == "Ship delivery summary"
+    assert latest_run["branch_name"] == "run/delivery-1234"
+    assert latest_run["workspace_status"] == "SEEDED"
+    assert latest_run["artifact_count"] == 1
+    assert latest_run["files_changed"] == ["docs/delivery.md"]
+    assert latest_run["pull_request_url"] == "https://github.com/acme/example/pull/42"
+    assert latest_run["pull_request_number"] == 42
+    assert latest_run["delivery_pushed"] is True
+    assert latest_run["delivery_branch_name"] == "run/delivery-1234"
+    assert latest_run["delivery_commit_sha"] == "abcdef1234567890"
+    assert latest_run["delivery_pushed_at"] == "2026-04-06T02:35:00Z"
 
 
 @pytest.mark.anyio

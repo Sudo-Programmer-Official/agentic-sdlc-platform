@@ -22,7 +22,7 @@ from app.runtime.llm.openai_client import OpenAIClient
 from app.runtime.tools.repo_tools import RepoTools
 from app.core.config import get_settings
 from app.runtime.tools.redaction import SECRET_PATTERNS
-from app.schemas.run_narrative import RunPatchVerificationSummary
+from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
 from app.services.patch_verification import build_run_patch_plan_and_verification
 from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_context, compact_graph_context
 from app.services.workspace_supervisor import workspace_uri
@@ -35,6 +35,46 @@ Prefer apply_patch with unified diff (git format) for edits; use write_file for 
 Do not invent files outside the repo. Do not include explanations outside JSON."""
 
 log = logging.getLogger("app.runtime.codex_executor")
+
+
+def _verification_from_action_scope(
+    verification: RunPatchVerificationSummary | None,
+    touched_files: list[str],
+) -> RunPatchVerificationSummary | None:
+    if verification is None:
+        return None
+
+    normalized_files = [path.strip() for path in touched_files if isinstance(path, str) and path.strip()]
+    if verification.status != "NO_SCOPE" or not normalized_files:
+        return verification
+
+    requires_confirmation = contains_sensitive_paths(normalized_files) or len(normalized_files) > verification.max_files
+    findings = [finding for finding in verification.findings if finding.code != "no_scope"]
+    findings.append(
+        RunPatchVerificationFinding(
+            code="scope_from_actions",
+            severity="info",
+            title="Patch scope derived from planned actions",
+            detail="The planner produced a bounded file list, so execution can continue using the action paths as the verified scope.",
+            files=normalized_files[: verification.max_files],
+        )
+    )
+    return verification.model_copy(
+        update={
+            "status": "REQUIRES_CONFIRMATION" if requires_confirmation else "READY",
+            "requires_confirmation": requires_confirmation,
+            "file_count": len(normalized_files),
+            "verified_files": normalized_files[: verification.max_files],
+            "actual_files": normalized_files[: verification.max_files],
+            "scope_match": True,
+            "findings": findings,
+            "suggested_next_action": (
+                "Require operator confirmation before patch execution."
+                if requires_confirmation
+                else "Proceed with the bounded patch and validation sequence."
+            ),
+        }
+    )
 
 
 class CodexExecutor(TaskExecutor):
@@ -323,6 +363,7 @@ class CodexExecutor(TaskExecutor):
 
         patch_guard = evaluate_patch_guard(actions=plan.actions, allowed_files=allowed_files)
         verification = await self._load_patch_verification(work_item, context)
+        verification = _verification_from_action_scope(verification, patch_guard.touched_files)
         if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):
             await self._job_manager.fail_job(
                 prepared.job_id,

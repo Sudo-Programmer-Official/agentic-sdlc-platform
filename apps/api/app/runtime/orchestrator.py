@@ -20,6 +20,7 @@ from app.runtime.recovery_policy import maybe_apply_recovery
 from app.runtime.dag import generate_template_dag
 from app.runtime.plan_snapshot import persist_run_plan_snapshot
 from app.core.config import get_settings
+from app.services.run_delivery import publish_run_branch_if_ready
 from app.services.task_decomposition import persist_run_task_decomposition
 from app.services.work_item_state import is_blocking_failure
 from app.services.workspace_supervisor import build_run_context, ensure_run_workspace
@@ -407,6 +408,33 @@ class RunOrchestrator:
             )
             locked = updated.scalar_one_or_none()
             if locked:
+                if final_status == "COMPLETED" and self.settings.run_auto_push_branch_on_completion:
+                    try:
+                        await publish_run_branch_if_ready(
+                            session,
+                            run=locked,
+                            actor_type=actor_type,
+                            actor_id=actor_id,
+                        )
+                    except Exception as exc:
+                        final_status = "FAILED"
+                        summary = dict(locked.summary or {})
+                        summary["remote_branch_push_error"] = str(exc)
+                        locked.summary = summary
+                        await record_event(
+                            session,
+                            project_id=locked.project_id,
+                            run_id=locked.id,
+                            event_type="RUN_BRANCH_PUSH_FAILED",
+                            actor_type=actor_type,
+                            actor_id=actor_id,
+                            tenant_id=locked.tenant_id,
+                            message=str(exc),
+                            payload={
+                                "branch_name": locked.branch_name,
+                                "workspace_status": locked.workspace_status,
+                            },
+                        )
                 locked.status = final_status
                 locked.finished_at = now
                 await record_event(

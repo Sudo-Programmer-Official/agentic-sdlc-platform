@@ -134,6 +134,11 @@ class RunWorkingContextSummary(BaseModel):
     confidence_score: float | None = None
     risk_level: str = "LOW"
     pull_request_url: str | None = None
+    pull_request_number: int | None = None
+    delivery_pushed: bool = False
+    delivery_branch_name: str | None = None
+    delivery_commit_sha: str | None = None
+    delivery_pushed_at: str | None = None
     runtime_mode: str | None = None
     runtime_git_auth_mode: str | None = None
     runtime_git_auth_status: str | None = None

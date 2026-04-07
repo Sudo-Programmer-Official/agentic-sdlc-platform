@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import List
 
 from core.models import (
@@ -28,6 +29,26 @@ KEYWORD_TO_QUALITY = {
     "maintain": QualityType.MAINTAINABILITY,
 }
 
+_STRUCTURED_REQ_RE = re.compile(
+    r"^(?P<prefix>FR|QR)\s*[-_ ]?(?P<index>[A-Za-z0-9_-]+)?\s*(?::|-|\.)\s*(?P<text>.+)$",
+    re.IGNORECASE,
+)
+_LEADING_BULLET_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
+
+
+def _clean_requirement_line(line: str) -> str:
+    return _LEADING_BULLET_RE.sub("", line.strip())
+
+
+def _normalize_requirement_id(prefix: str, raw_index: str | None, fallback_index: int) -> str:
+    normalized_prefix = prefix.upper()
+    if raw_index:
+        cleaned = raw_index.strip().upper().replace("_", "-")
+        if cleaned.isdigit():
+            return f"{normalized_prefix}-{int(cleaned):03d}"
+        return f"{normalized_prefix}-{cleaned}"
+    return f"{normalized_prefix}-{fallback_index:03d}"
+
 
 def extract_graph_from_prd(text: str) -> RequirementGraph:
     """
@@ -36,7 +57,7 @@ def extract_graph_from_prd(text: str) -> RequirementGraph:
     - Lines containing quality keywords -> QR
     - Edges connect each FR to each QR for demo visibility
     """
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [_clean_requirement_line(line) for line in text.splitlines() if line.strip()]
     fr_nodes: List[RequirementNode] = []
     qr_nodes: List[RequirementNode] = []
 
@@ -44,6 +65,38 @@ def extract_graph_from_prd(text: str) -> RequirementGraph:
     qr_count = 0
 
     for line in lines:
+        structured_match = _STRUCTURED_REQ_RE.match(line)
+        if structured_match:
+            prefix = structured_match.group("prefix").upper()
+            raw_index = structured_match.group("index")
+            requirement_text = structured_match.group("text").strip()
+            if not requirement_text:
+                continue
+            if prefix == "FR":
+                fr_count += 1
+                fr_nodes.append(
+                    RequirementNode(
+                        id=_normalize_requirement_id(prefix, raw_index, fr_count),
+                        type=RequirementType.FR,
+                        text=requirement_text,
+                        confidence=0.95,
+                        source="AI_EXTRACTED",
+                    )
+                )
+            else:
+                qr_count += 1
+                qr_nodes.append(
+                    RequirementNode(
+                        id=_normalize_requirement_id(prefix, raw_index, qr_count),
+                        type=RequirementType.QR,
+                        text=requirement_text,
+                        confidence=0.95,
+                        source="AI_EXTRACTED",
+                        quality_type=_match_quality(requirement_text.lower()),
+                    )
+                )
+            continue
+
         lower = line.lower()
         quality_type = _match_quality(lower)
         if line.startswith(("Must", "Should", "Allow", "must", "should", "allow")):
@@ -70,8 +123,8 @@ def extract_graph_from_prd(text: str) -> RequirementGraph:
                 )
             )
 
-    # Fallback defaults so UI has content
-    if not fr_nodes:
+    # Fallback defaults only when the input produced no usable requirements at all.
+    if not fr_nodes and not qr_nodes:
         fr_nodes.append(
             RequirementNode(
                 id="FR-001",
@@ -81,7 +134,6 @@ def extract_graph_from_prd(text: str) -> RequirementGraph:
                 source="AI_EXTRACTED",
             )
         )
-    if not qr_nodes:
         qr_nodes.append(
             RequirementNode(
                 id="QR-001",

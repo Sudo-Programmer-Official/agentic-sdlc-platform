@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -235,6 +235,68 @@ async def test_run_narrative_returns_plan_reflections_and_working_context(db_ses
     assert context["review_state"] == "PENDING_REVIEW"
     assert context["next_best_step"] == "Queue Review generated patch next."
     assert "app/auth.py" in context["files_touched"]
+
+
+@pytest.mark.anyio
+async def test_run_narrative_includes_delivery_metadata_in_working_context(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Delivery narrative", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    started = datetime.now(timezone.utc) - timedelta(minutes=1)
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/delivery-1234",
+        workspace_status="SEEDED",
+        started_at=started,
+        finished_at=started + timedelta(seconds=42),
+        summary={
+            "goal": "Create hello world delivery",
+            "remote_branch_pushed": True,
+            "remote_branch_name": "run/delivery-1234",
+            "remote_branch_commit_sha": "abcdef1234567890",
+            "remote_branch_pushed_at": "2026-04-06T03:45:00Z",
+            "pull_request_url": "https://github.com/acme/example/pull/11",
+            "pull_request_number": 11,
+            "pull_request_commit_sha": "1234567890abcdef",
+        },
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG",
+            status="DONE",
+            priority=0,
+            executor="dummy",
+            payload={"title": "Plan hello world delivery"},
+            result={},
+            started_at=started,
+            finished_at=started + timedelta(seconds=3),
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/runs/{run.id}/narrative")
+
+    assert response.status_code == 200
+    data = response.json()
+    context = data["working_context"]
+    assert context["pull_request_url"] == "https://github.com/acme/example/pull/11"
+    assert context["pull_request_number"] == 11
+    assert context["delivery_pushed"] is True
+    assert context["delivery_branch_name"] == "run/delivery-1234"
+    assert context["delivery_commit_sha"] == "1234567890abcdef"
+    assert context["delivery_pushed_at"] == "2026-04-06T03:45:00Z"
 
 
 @pytest.mark.anyio

@@ -1,4 +1,5 @@
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -14,6 +15,8 @@ from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
 from app.main import app
 from app.schemas.generation import GeneratedTask
+from app.services.ai_policy import AICacheContext, AIJobPolicy, PreparedAIExecution
+from app.services.llm_generator import LLMTaskGenerator, TASK_SCHEMA
 
 
 @pytest.fixture
@@ -101,3 +104,77 @@ async def test_public_generate_tasks_route_creates_tenant_scoped_tasks_and_trace
     ).scalars().all()
     assert traces
     assert all(trace.tenant_id == tenant_id for trace in traces)
+
+
+@pytest.mark.anyio
+async def test_llm_task_generator_uses_named_json_schema_response_format(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"tasks":[{"title":"Build homepage","confidence":0.9}]}'))],
+                usage=SimpleNamespace(prompt_tokens=19, completion_tokens=11),
+            )
+
+    class FakeJobManager:
+        async def load_cached_context_fragments(self, *args, **kwargs):
+            return AICacheContext(fragments={}, cache_hits=0, cache_keys=[])
+
+        def route_job(self, request):
+            return AIJobPolicy(
+                task_type="planning",
+                ambiguity_level="high",
+                risk_level="medium",
+                max_model_tier="tier_premium",
+                selected_model_tier="tier_premium",
+                max_retries=0,
+                max_context_tokens=2048,
+                budget_cents=5.0,
+                requires_human_review=False,
+            )
+
+        async def prepare_job(self, *args, **kwargs):
+            return PreparedAIExecution(
+                job_id=uuid.uuid4(),
+                policy=self.route_job(None),
+                model_name="gpt-test",
+                estimated_input_tokens=0,
+                estimated_output_tokens=0,
+                estimated_cost_cents=0,
+                context_size=0,
+                cache_hit_count=0,
+                blocked=False,
+                stop_reason=None,
+                next_action=None,
+            )
+
+        async def record_attempt(self, *args, **kwargs):
+            return None
+
+        async def complete_job(self, *args, **kwargs):
+            return None
+
+    generator = LLMTaskGenerator()
+    generator.client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    generator._job_manager = FakeJobManager()
+
+    tasks, provenance = await generator.generate(
+        "Approved requirements graph v2",
+        "FR1: Create homepage\nQR1: Load without browser errors",
+        generation_module.TaskGenInput(),
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0].title == "Build homepage"
+    assert provenance["ai_model_name"] == "gpt-test"
+    assert captured["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "task_generation",
+            "schema": TASK_SCHEMA,
+        },
+    }

@@ -10,7 +10,16 @@ from app.db.models import Approval, Artifact, Run, Trace
 from app.runtime.tools.repo_tools import RepoTools
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
-from app.services.repo_connector import commit_all, get_project_repository, prepare_workspace_repo, push_branch, repo_has_changes
+from app.services.repo_connector import (
+    branch_has_commits_ahead,
+    commit_all,
+    current_head_sha,
+    get_project_repository,
+    prepare_workspace_repo,
+    push_branch,
+    remote_branch_exists,
+    repo_has_changes,
+)
 from app.services.vcs import get_vcs_adapter
 from app.services.workspace_supervisor import ensure_run_workspace
 
@@ -105,26 +114,40 @@ async def create_pr_from_artifact(
     if latest_approval is None or latest_approval.status != "APPROVED":
         raise ValueError("Patch artifact must be approved before creating a PR")
 
-    if not repo_has_changes(repo_path):
+    summary = run.summary or {}
+    remote_branch_present = remote_branch_exists(repo_path, working_branch)
+    branch_was_published = (
+        bool(summary.get("remote_branch_pushed")) and summary.get("remote_branch_name") == working_branch
+    )
+    branch_ready_for_pr = remote_branch_present and (
+        branch_was_published or branch_has_commits_ahead(repo_path, project_repo.default_branch)
+    )
+    has_repo_changes = repo_has_changes(repo_path)
+
+    if not has_repo_changes and not branch_ready_for_pr:
         diff = _resolve_patch_content(run, artifact)
         if not diff:
             raise ValueError("Selected artifact does not contain patch content")
         log_dir = Path(run.workspace_root) / "logs" if run.workspace_root else None
         RepoTools(repo_path, logs_path=log_dir).apply_patch(diff)
+        has_repo_changes = repo_has_changes(repo_path)
 
-    if not repo_has_changes(repo_path):
+    if not has_repo_changes and not branch_ready_for_pr:
         raise ValueError("No repository changes available to create a PR")
 
     commit_message = title or f"Agentic SDLC run {run.id}"
-    commit_sha = commit_all(repo_path, commit_message)
-    push_branch(
-        repo_path,
-        working_branch,
-        provider=project_repo.provider,
-        repo_url=project_repo.repo_url,
-        repo_full_name=project_repo.repo_full_name,
-        installation_id=project_repo.installation_id,
-    )
+    if has_repo_changes:
+        commit_sha = commit_all(repo_path, commit_message)
+        push_branch(
+            repo_path,
+            working_branch,
+            provider=project_repo.provider,
+            repo_url=project_repo.repo_url,
+            repo_full_name=project_repo.repo_full_name,
+            installation_id=project_repo.installation_id,
+        )
+    else:
+        commit_sha = str(summary.get("remote_branch_commit_sha") or "").strip() or current_head_sha(repo_path)
 
     pr_payload = adapter.create_pull_request(
         project_repo.repo_full_name,

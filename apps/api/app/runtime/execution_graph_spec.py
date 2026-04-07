@@ -10,6 +10,7 @@ class ExecutionNodeSpec:
     lane: str
     current_state: str
     current_work_item_types: tuple[str, ...]
+    failure_mode: str
     description: str
 
 
@@ -50,6 +51,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="planning",
         current_state="implemented",
         current_work_item_types=("PLAN_DAG",),
+        failure_mode="blocking",
         description="Capture the bounded run plan and task decomposition before any code changes begin.",
     ),
     ExecutionNodeSpec(
@@ -58,6 +60,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="planning",
         current_state="approximated",
         current_work_item_types=("REVIEW_DIFF",),
+        failure_mode="blocking",
         description="Advisory verification pass over planned scope, dependent files, and risk before patching.",
     ),
     ExecutionNodeSpec(
@@ -66,6 +69,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="mutating",
         current_state="implemented",
         current_work_item_types=("CODE_BACKEND", "CODE_FRONTEND"),
+        failure_mode="blocking",
         description="The single mutating lane. Backend and frontend patch steps must serialize through one run workspace.",
     ),
     ExecutionNodeSpec(
@@ -74,6 +78,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="verification",
         current_state="planned",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Static lint and style validation for the changed surface.",
     ),
     ExecutionNodeSpec(
@@ -82,6 +87,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="verification",
         current_state="implemented",
         current_work_item_types=("WRITE_TESTS", "RUN_TESTS", "FIX_TEST_FAILURE"),
+        failure_mode="blocking",
         description="Execute the relevant validation path and bounded recovery loop for test failures.",
     ),
     ExecutionNodeSpec(
@@ -90,6 +96,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="verification",
         current_state="planned",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Build the frontend surface when frontend code changed.",
     ),
     ExecutionNodeSpec(
@@ -98,6 +105,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="verification",
         current_state="planned",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Build the backend surface when backend code changed.",
     ),
     ExecutionNodeSpec(
@@ -106,7 +114,8 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="verification",
         current_state="approximated",
         current_work_item_types=("REVIEW_INTEGRATION",),
-        description="Join verification outputs into one reviewable validation state before preview or PR.",
+        failure_mode="warning_allowed",
+        description="Join verification outputs into one reviewable validation state before preview or PR. Optional integration review failures may surface as warnings when the work item is explicitly marked non-blocking.",
     ),
     ExecutionNodeSpec(
         id="CREATE_FRONTEND_PREVIEW",
@@ -114,6 +123,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="provisioning",
         current_state="planned",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Provision a frontend preview only when the run changed frontend code and validation passed.",
     ),
     ExecutionNodeSpec(
@@ -122,6 +132,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="provisioning",
         current_state="planned",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Provision a backend preview only when the run changed backend code and validation passed.",
     ),
     ExecutionNodeSpec(
@@ -130,6 +141,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="provisioning",
         current_state="planned",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Perform a lightweight health check against preview surfaces before human review.",
     ),
     ExecutionNodeSpec(
@@ -138,6 +150,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="governance",
         current_state="implemented_control_plane",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Human review and approval gate driven by approvals and Mission Control surfaces.",
     ),
     ExecutionNodeSpec(
@@ -146,6 +159,7 @@ NODES: tuple[ExecutionNodeSpec, ...] = (
         lane="governance",
         current_state="implemented_control_plane",
         current_work_item_types=(),
+        failure_mode="blocking",
         description="Create the pull request only after approval and successful verification.",
     ),
 )

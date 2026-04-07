@@ -22,6 +22,14 @@ settings = get_settings()
 log = logging.getLogger("app.runtime.worker")
 
 
+def _work_item_terminal_event_type(status: str) -> str:
+    if status == "DONE":
+        return "WORK_ITEM_DONE"
+    if status == "SKIPPED":
+        return "WORK_ITEM_SKIPPED"
+    return "WORK_ITEM_FAILED"
+
+
 async def execute_item(session, wi: WorkItem, agent: Agent):
     run = await session.get(Run, wi.run_id)
     if run is None:
@@ -45,7 +53,7 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
             project_id=wi.project_id,
             run_id=wi.run_id,
             work_item_id=wi.id,
-            event_type="WORK_ITEM_DONE" if wi.status == "DONE" else "WORK_ITEM_FAILED",
+            event_type=_work_item_terminal_event_type(wi.status),
             actor_type="AGENT",
             actor_id=str(agent.id),
             payload={"work_item_id": str(wi.id), "status": wi.status},

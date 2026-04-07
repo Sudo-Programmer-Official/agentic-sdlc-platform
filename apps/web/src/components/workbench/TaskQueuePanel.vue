@@ -18,15 +18,17 @@
       <span class="workbench-chip">Queued {{ queuedCount }}</span>
       <span class="workbench-chip is-running">Running {{ runningCount }}</span>
       <span class="workbench-chip is-success">Completed {{ completedCount }}</span>
-      <span class="workbench-chip is-danger">Failed {{ failedCount }}</span>
+      <span class="workbench-chip is-danger">Blocked {{ blockedCount }}</span>
+      <span class="workbench-chip is-warning">Warnings {{ warningCount }}</span>
     </div>
 
     <div v-if="tasks.length" class="task-queue">
-      <article v-for="task in tasks" :key="task.id" class="task-card" :class="`is-${task.rawStatus.toLowerCase()}`">
+      <article v-for="task in tasks" :key="task.id" class="task-card" :class="taskCardClass(task)">
         <div class="task-card__top">
           <div class="task-card__status">
-            <span class="soft-dot" :class="taskDotClass(task.rawStatus)" />
+            <span class="soft-dot" :class="taskDotClass(task.rawStatus, task.blocking)" />
             <span>{{ task.rawStatus }}</span>
+            <span v-if="task.blocking === false" class="task-card__status-note">Optional</span>
           </div>
           <div class="task-card__progress">{{ task.progress }}%</div>
         </div>
@@ -65,6 +67,7 @@ type QueueTask = {
   id: string;
   title: string;
   rawStatus: string;
+  blocking?: boolean;
   agent: string;
   executor: string;
   progress: number;
@@ -81,14 +84,21 @@ const props = defineProps<{
 const queuedCount = computed(() => props.tasks.filter((task) => task.rawStatus === "QUEUED").length);
 const runningCount = computed(() => props.tasks.filter((task) => ["RUNNING", "CLAIMED"].includes(task.rawStatus)).length);
 const completedCount = computed(() => props.tasks.filter((task) => task.rawStatus === "DONE").length);
-const failedCount = computed(() => props.tasks.filter((task) => task.rawStatus === "FAILED").length);
+const blockedCount = computed(() => props.tasks.filter((task) => task.rawStatus === "FAILED" && task.blocking !== false).length);
+const warningCount = computed(() => props.tasks.filter((task) => task.rawStatus === "FAILED" && task.blocking === false).length);
 
-function taskDotClass(status: string) {
+function taskDotClass(status: string, blocking = true) {
   const normalized = status.toUpperCase();
   if (normalized === "DONE") return "pulse-dot is-success";
+  if (normalized === "FAILED" && !blocking) return "pulse-dot is-warning";
   if (normalized === "FAILED") return "pulse-dot is-danger";
   if (normalized === "RUNNING" || normalized === "CLAIMED") return "pulse-dot is-warning";
   return "";
+}
+
+function taskCardClass(task: QueueTask) {
+  if (task.rawStatus === "FAILED" && task.blocking === false) return "is-warning";
+  return `is-${task.rawStatus.toLowerCase()}`;
 }
 </script>
 
@@ -189,6 +199,11 @@ function taskDotClass(status: string) {
   color: var(--danger);
 }
 
+.workbench-chip.is-warning {
+  border-color: rgba(245, 158, 11, 0.2);
+  color: var(--warning);
+}
+
 .task-queue {
   margin-top: 1rem;
   display: grid;
@@ -209,6 +224,10 @@ function taskDotClass(status: string) {
   box-shadow: 0 16px 30px rgba(8, 13, 22, 0.18);
 }
 
+.task-card.is-warning {
+  border-color: rgba(245, 158, 11, 0.24);
+}
+
 .task-card__top,
 .task-card__foot {
   display: flex;
@@ -222,9 +241,20 @@ function taskDotClass(status: string) {
 .task-card__status {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.45rem;
   font-weight: 700;
   letter-spacing: 0.06em;
+}
+
+.task-card__status-note {
+  border-radius: 999px;
+  border: 1px solid rgba(245, 158, 11, 0.18);
+  padding: 0.14rem 0.5rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warning);
 }
 
 .task-card__progress {

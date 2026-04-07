@@ -21,10 +21,18 @@ from app.runtime.dag import generate_template_dag
 from app.runtime.plan_snapshot import persist_run_plan_snapshot
 from app.core.config import get_settings
 from app.services.task_decomposition import persist_run_task_decomposition
+from app.services.work_item_state import is_blocking_failure
 from app.services.workspace_supervisor import build_run_context, ensure_run_workspace
 
 log = logging.getLogger("app.runtime.orchestrator")
 
+
+def _work_item_terminal_event_type(status: str) -> str:
+    if status == "DONE":
+        return "WORK_ITEM_DONE"
+    if status == "SKIPPED":
+        return "WORK_ITEM_SKIPPED"
+    return "WORK_ITEM_FAILED"
 
 class RunOrchestrator:
     """Drives a run end-to-end using a provided executor."""
@@ -325,50 +333,59 @@ class RunOrchestrator:
                 active_count, queued_count = statuses
                 failed_items = (
                     await session.execute(
-                        select(WorkItem.result).where(
+                        select(WorkItem).where(
                             WorkItem.run_id == run_id,
                             WorkItem.status == "FAILED",
                         )
                     )
                 ).scalars().all()
-                failed_count = sum(
-                    1
-                    for result in failed_items
-                    if not (isinstance(result, dict) and result.get("superseded") is True)
-                )
+                failed_count = sum(1 for item in failed_items if is_blocking_failure(item))
 
-                if failed_count and queued_count == 0 and active_count == 0:
-                    run_failed = True
-                    break
                 if failed_count == 0 and queued_count == 0 and active_count == 0:
                     break
 
                 # find runnable items (QUEUED and deps done/skipped)
-                from sqlalchemy.orm import aliased
+                runnable: list[WorkItem] = []
+                if queued_count:
+                    from sqlalchemy.orm import aliased
 
-                parent = aliased(WorkItem)
-                blocking_exists = exists(
-                    select(1)
-                    .select_from(WorkItemEdge)
-                    .join(parent, parent.id == WorkItemEdge.from_work_item_id)
-                    .where(
-                        WorkItemEdge.run_id == run_id,
-                        WorkItemEdge.to_work_item_id == WorkItem.id,
-                        parent.status.notin_(["DONE", "SKIPPED"]),
-                    )
-                )
-                runnable = (
-                    await session.execute(
-                        select(WorkItem)
+                    parent = aliased(WorkItem)
+                    blocking_exists = exists(
+                        select(1)
+                        .select_from(WorkItemEdge)
+                        .join(parent, parent.id == WorkItemEdge.from_work_item_id)
                         .where(
-                            WorkItem.run_id == run_id,
-                            WorkItem.status == "QUEUED",
-                            ~blocking_exists,
+                            WorkItemEdge.run_id == run_id,
+                            WorkItemEdge.to_work_item_id == WorkItem.id,
+                            parent.status.notin_(["DONE", "SKIPPED"]),
                         )
-                        .order_by(WorkItem.priority.desc(), WorkItem.created_at)
-                        .limit(max_conc)
                     )
-                ).scalars().all()
+                    runnable = (
+                        await session.execute(
+                            select(WorkItem)
+                            .where(
+                                WorkItem.run_id == run_id,
+                                WorkItem.status == "QUEUED",
+                                ~blocking_exists,
+                            )
+                            .order_by(WorkItem.priority.desc(), WorkItem.created_at)
+                            .limit(max_conc)
+                        )
+                    ).scalars().all()
+
+                if failed_count and active_count == 0:
+                    if queued_count == 0:
+                        run_failed = True
+                        break
+                    if not runnable:
+                        await self._cancel_terminally_blocked_items(
+                            session,
+                            run=run,
+                            actor_type=actor_type,
+                            actor_id=actor_id,
+                        )
+                        run_failed = True
+                        break
 
                 if use_external_runtime:
                     # external mode: do not execute items here, just wait for workers
@@ -461,6 +478,49 @@ class RunOrchestrator:
             await session.flush()
         return False
 
+    async def _cancel_terminally_blocked_items(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        actor_type: str,
+        actor_id: str | None,
+    ) -> None:
+        blocked_items = (
+            await session.execute(
+                select(WorkItem)
+                .where(
+                    WorkItem.run_id == run.id,
+                    WorkItem.status == "QUEUED",
+                )
+                .order_by(WorkItem.priority.desc(), WorkItem.created_at)
+            )
+        ).scalars().all()
+        if not blocked_items:
+            return
+
+        finished_at = datetime.now(timezone.utc)
+        for wi in blocked_items:
+            wi.status = "CANCELED"
+            wi.finished_at = finished_at
+            session.add(wi)
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                work_item_id=wi.id,
+                event_type="WORK_ITEM_CANCELED",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                tenant_id=run.tenant_id,
+                message="Canceled because an upstream failure left this work item blocked.",
+                payload={
+                    "work_item_id": str(wi.id),
+                    "reason": "blocked_by_terminal_failure",
+                },
+            )
+        await session.flush()
+
     async def _load_run_for_update(self, session: AsyncSession, run_id: uuid.UUID) -> Run | None:
         result = await session.execute(select(Run).where(Run.id == run_id).with_for_update())
         return result.scalar_one_or_none()
@@ -510,7 +570,7 @@ class RunOrchestrator:
                 project_id=run.project_id,
                 run_id=run.id,
                 work_item_id=wi.id,
-                event_type="WORK_ITEM_DONE" if wi.status == "DONE" else "WORK_ITEM_FAILED",
+                event_type=_work_item_terminal_event_type(wi.status),
                 actor_type="SYSTEM",
                 payload={
                     "work_item_id": str(wi.id),

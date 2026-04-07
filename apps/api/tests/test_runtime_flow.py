@@ -615,6 +615,123 @@ class HealingExecutor:
         }
 
 
+class ExhaustedHealingExecutor:
+    name = "dummy"
+
+    def __init__(self):
+        self.test_attempts = 0
+
+    async def execute(self, work_item, context):
+        if work_item.type == "RUN_TESTS":
+            self.test_attempts += 1
+            return {
+                "status": "FAILED",
+                "message": "tests failed",
+                "payload": {
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": f"test failed on attempt {self.test_attempts}",
+                },
+            }
+        if work_item.type == "FIX_TEST_FAILURE":
+            return {
+                "status": "DONE",
+                "message": "fix applied",
+                "payload": {"artifacts": [{"type": "git_diff", "content": "diff --git a/auth.py b/auth.py"}]},
+            }
+        return {
+            "status": "DONE",
+            "message": "ok",
+            "payload": {"executor": "exhausted-healing"},
+        }
+
+
+class PassingExecutor:
+    name = "dummy"
+
+    async def execute(self, work_item, context):
+        if work_item.type == "RUN_TESTS":
+            return {
+                "status": "DONE",
+                "message": "tests passed",
+                "payload": {
+                    "exit_code": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                },
+            }
+        return {
+            "status": "DONE",
+            "message": "ok",
+            "payload": {"executor": "passing"},
+        }
+
+
+class PolicyBlockedExecutor:
+    name = "dummy"
+
+    async def execute(self, work_item, context):
+        if work_item.type == "CODE_BACKEND":
+            return {
+                "status": "FAILED",
+                "message": "human_review_required",
+                "payload": {
+                    "stop_reason": "human_review_required",
+                    "next_action": "Obtain approval or reduce risk before attempting autonomous execution.",
+                    "policy": {
+                        "task_type": "implementation",
+                        "risk_level": "high",
+                        "requires_human_review": True,
+                    },
+                },
+            }
+        return {
+            "status": "DONE",
+            "message": "ok",
+            "payload": {"executor": "policy-blocked"},
+        }
+
+
+class OptionalFailureExecutor:
+    name = "dummy"
+
+    async def execute(self, work_item, context):
+        if work_item.type == "REVIEW_INTEGRATION":
+            return {
+                "status": "FAILED",
+                "message": "optional integration review unavailable",
+                "payload": {
+                    "review_surface": "preview",
+                    "reason": "preview_unavailable",
+                },
+            }
+        return {
+            "status": "DONE",
+            "message": "ok",
+            "payload": {"executor": "optional-failure"},
+        }
+
+
+class SkippingExecutor:
+    name = "dummy"
+
+    async def execute(self, work_item, context):
+        if work_item.type == "RUN_TESTS":
+            return {
+                "status": "SKIPPED",
+                "message": "No relevant tests were collected; validation skipped.",
+                "payload": {
+                    "skip_reason": "no_tests_collected",
+                    "message": "No relevant tests were collected; validation skipped.",
+                },
+            }
+        return {
+            "status": "DONE",
+            "message": "ok",
+            "payload": {"executor": "skipping"},
+        }
+
+
 @pytest.mark.anyio
 async def test_embedded_runtime_self_heals_test_failure(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "embedded")
@@ -684,3 +801,328 @@ async def test_embedded_runtime_self_heals_test_failure(monkeypatch, runtime_db)
         ).scalars().all()
         assert any(trace.from_id == failed_test.id and trace.to_id == fix_item.id for trace in traces)
         assert any(trace.from_id == failed_test.id and trace.to_id == retried_test.id for trace in traces)
+
+
+@pytest.mark.anyio
+async def test_embedded_runtime_allows_optional_review_failure_without_failing_run(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Optional failure runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    monkeypatch.setattr(orchestrator_module, "build_executor", lambda *_args, **_kwargs: OptionalFailureExecutor())
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.bootstrap(run_id)
+
+    async with runtime_db() as session:
+        review_item = await session.scalar(
+            select(WorkItem).where(WorkItem.run_id == run_id, WorkItem.type == "REVIEW_INTEGRATION")
+        )
+        assert review_item is not None
+        review_item.payload = {**(review_item.payload or {}), "blocking": False}
+        session.add(review_item)
+        await session.commit()
+
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at, WorkItem.id)
+            )
+        ).scalars().all()
+        assert len(work_items) == 7
+
+        review_item = next(wi for wi in work_items if wi.type == "REVIEW_INTEGRATION")
+        assert review_item.status == "FAILED"
+        assert review_item.payload["blocking"] is False
+        assert review_item.result == {
+            "review_surface": "preview",
+            "reason": "preview_unavailable",
+        }
+        assert all(wi.status == "DONE" for wi in work_items if wi.type != "REVIEW_INTEGRATION")
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "WORK_ITEM_FAILED" in event_types
+        assert "WORK_ITEM_RECOVERY" not in event_types
+        assert "WORK_ITEM_CANCELED" not in event_types
+        assert "RUN_FAILED" not in event_types
+        assert "RUN_COMPLETED" in event_types
+        assert any(
+            event.work_item_id == review_item.id
+            and event.payload
+            and event.payload.get("message") == "optional integration review unavailable"
+            for event in events
+            if event.event_type == "WORK_ITEM_FAILED"
+        )
+
+
+@pytest.mark.anyio
+async def test_embedded_runtime_surfaces_policy_block_and_stops_cleanly(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Policy blocked runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    monkeypatch.setattr(orchestrator_module, "build_executor", lambda *_args, **_kwargs: PolicyBlockedExecutor())
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "FAILED"
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at, WorkItem.id)
+            )
+        ).scalars().all()
+        assert len(work_items) == 7
+
+        backend_item = next(wi for wi in work_items if wi.type == "CODE_BACKEND")
+        frontend_item = next(wi for wi in work_items if wi.type == "CODE_FRONTEND")
+        canceled_items = [wi for wi in work_items if wi.status == "CANCELED"]
+
+        assert backend_item.status == "FAILED"
+        assert backend_item.result == {
+            "stop_reason": "human_review_required",
+            "next_action": "Obtain approval or reduce risk before attempting autonomous execution.",
+            "policy": {
+                "task_type": "implementation",
+                "risk_level": "high",
+                "requires_human_review": True,
+            },
+        }
+        assert frontend_item.status == "DONE"
+        assert {wi.type for wi in canceled_items} == {"WRITE_TESTS", "REVIEW_DIFF", "RUN_TESTS", "REVIEW_INTEGRATION"}
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        failed_events = [event for event in events if event.event_type == "WORK_ITEM_FAILED"]
+        canceled_events = [event for event in events if event.event_type == "WORK_ITEM_CANCELED"]
+        assert any(
+            event.work_item_id == backend_item.id
+            and event.payload
+            and event.payload.get("message") == "human_review_required"
+            for event in failed_events
+        )
+        assert len(canceled_events) == 4
+        assert all(
+            event.payload == {
+                "work_item_id": str(event.work_item_id),
+                "reason": "blocked_by_terminal_failure",
+            }
+            for event in canceled_events
+        )
+        event_types = [event.event_type for event in events]
+        assert "WORK_ITEM_RECOVERY" not in event_types
+        assert "RUN_FAILED" in event_types
+        assert "RUN_COMPLETED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_embedded_runtime_completes_cleanly_when_validation_passes(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Passing runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    monkeypatch.setattr(orchestrator_module, "build_executor", lambda *_args, **_kwargs: PassingExecutor())
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at, WorkItem.id)
+            )
+        ).scalars().all()
+        assert len(work_items) == 7
+        assert sum(1 for wi in work_items if wi.type == "FIX_TEST_FAILURE") == 0
+
+        run_tests = next(wi for wi in work_items if wi.type == "RUN_TESTS")
+        integration_review = next(wi for wi in work_items if wi.type == "REVIEW_INTEGRATION")
+        assert run_tests.status == "DONE"
+        assert run_tests.result["exit_code"] == 0
+        assert integration_review.status == "DONE"
+        assert all(wi.status == "DONE" for wi in work_items)
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "WORK_ITEM_DONE" in event_types
+        assert "WORK_ITEM_RECOVERY" not in event_types
+        assert "WORK_ITEM_CANCELED" not in event_types
+        assert "RUN_FAILED" not in event_types
+        assert "RUN_COMPLETED" in event_types
+
+
+@pytest.mark.anyio
+async def test_embedded_runtime_fails_cleanly_after_exhausting_test_recovery(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("MAX_FIX_ATTEMPTS_PER_RUN", "1")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Exhausted healing runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    exhausted_executor = ExhaustedHealingExecutor()
+    monkeypatch.setattr(orchestrator_module, "build_executor", lambda *_args, **_kwargs: exhausted_executor)
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "FAILED"
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at, WorkItem.id)
+            )
+        ).scalars().all()
+        assert len(work_items) == 9
+        assert sum(1 for wi in work_items if wi.type == "FIX_TEST_FAILURE") == 1
+        assert sum(1 for wi in work_items if wi.type == "RUN_TESTS") == 2
+
+        failed_tests = [wi for wi in work_items if wi.type == "RUN_TESTS" and wi.status == "FAILED"]
+        assert len(failed_tests) == 2
+        original_failed = next(wi for wi in failed_tests if wi.result.get("superseded") is True)
+        retried_failed = next(wi for wi in failed_tests if wi.id != original_failed.id)
+        fix_item = next(wi for wi in work_items if wi.type == "FIX_TEST_FAILURE")
+        integration_review = next(wi for wi in work_items if wi.type == "REVIEW_INTEGRATION")
+
+        assert original_failed.result["failure_class"] == "test_failure"
+        assert original_failed.result["recovery_action"] == "spawn_fix_node"
+        assert original_failed.result["superseded_by"] == str(retried_failed.id)
+        assert retried_failed.result["failure_class"] == "test_failure"
+        assert retried_failed.result["recovery_action"] == "spawn_fix_node"
+        assert retried_failed.result.get("superseded") is not True
+        assert fix_item.status == "DONE"
+        assert fix_item.result["recovery_action"] == "spawn_retry_node"
+        assert integration_review.status == "CANCELED"
+        assert exhausted_executor.test_attempts == 2
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        recovery_events = [event for event in events if event.event_type == "WORK_ITEM_RECOVERY"]
+        canceled_events = [event for event in events if event.event_type == "WORK_ITEM_CANCELED"]
+        assert len(recovery_events) == 2
+        assert any(event.payload and event.payload.get("recovery_type") == "FIX_TEST_FAILURE" for event in recovery_events)
+        assert any(event.payload and event.payload.get("recovery_type") == "RUN_TESTS" for event in recovery_events)
+        assert len(canceled_events) == 1
+        assert canceled_events[0].work_item_id == integration_review.id
+        assert canceled_events[0].payload == {
+            "work_item_id": str(integration_review.id),
+            "reason": "blocked_by_terminal_failure",
+        }
+        assert any(event.event_type == "RUN_FAILED" for event in events)
+
+
+@pytest.mark.anyio
+async def test_embedded_runtime_treats_no_tests_collected_as_skipped(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Skipping runtime project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="dummy")
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    monkeypatch.setattr(orchestrator_module, "build_executor", lambda *_args, **_kwargs: SkippingExecutor())
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    await orchestrator.start(run_id)
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+
+        work_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.priority.desc(), WorkItem.created_at)
+            )
+        ).scalars().all()
+        run_tests = next(wi for wi in work_items if wi.type == "RUN_TESTS")
+        assert run_tests.status == "SKIPPED"
+        assert run_tests.result["skip_reason"] == "no_tests_collected"
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "WORK_ITEM_SKIPPED" in event_types
+        assert "WORK_ITEM_RECOVERY" not in event_types
+        assert "RUN_COMPLETED" in event_types

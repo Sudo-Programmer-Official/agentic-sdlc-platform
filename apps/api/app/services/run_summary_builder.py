@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Approval, Artifact, Run, RunEvent, RunSummary, WorkItem
+from app.services.work_item_state import is_blocking_failure
 
 
 def _elapsed_seconds(run: Run) -> float | None:
@@ -75,7 +76,7 @@ def _changed_files_from_diff(diff: str) -> set[str]:
 
 def _primary_error(run: Run, work_items: list[WorkItem]) -> str | None:
     ordered = sorted(
-        work_items,
+        [item for item in work_items if is_blocking_failure(item)],
         key=lambda wi: (wi.finished_at or wi.updated_at or wi.created_at),
         reverse=True,
     )

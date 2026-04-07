@@ -33,6 +33,8 @@ def _event_status(event_type: str) -> str:
     upper = event_type.upper()
     if upper.endswith("FAILED") or upper == "RUN_FAILED":
         return "failed"
+    if upper.endswith("SKIPPED"):
+        return "warning"
     if upper.endswith("DONE") or upper.endswith("COMPLETED") or upper == "RUN_PULL_REQUEST_CREATED":
         return "success"
     if "RECOVERY" in upper or "RETRIED" in upper:
@@ -64,6 +66,7 @@ def _event_title(event: RunEvent, work_item: WorkItem | None) -> str:
         "WORK_ITEM_CLAIMED": f"{label} claimed",
         "WORK_ITEM_STARTED": f"{label} started",
         "WORK_ITEM_DONE": f"{label} completed",
+        "WORK_ITEM_SKIPPED": f"{label} skipped",
         "WORK_ITEM_FAILED": f"{label} failed",
         "WORK_ITEM_RECOVERY": f"Recovery created for {label}",
         "WORK_ITEM_CREATED": f"{label} created",

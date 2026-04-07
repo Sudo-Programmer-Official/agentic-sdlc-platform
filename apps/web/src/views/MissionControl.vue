@@ -66,7 +66,7 @@
           <div class="mission-chip-panel__label">Automation Pulse</div>
           <div class="mission-chip-panel__value">{{ agentSnapshot.active }} active agents</div>
           <div class="mission-chip-panel__meta">
-            {{ runtimeCounts.queued }} queued · {{ runtimeCounts.failed }} blocked · {{ runtimeCounts.done }} done
+            {{ runtimeCounts.queued }} queued · {{ runtimeCounts.blocked }} blocked · {{ runtimeCounts.warnings }} warnings · {{ runtimeCounts.done }} done
           </div>
         </div>
       </div>
@@ -154,8 +154,8 @@
       <MetricCard
         label="Work Items"
         :value="`${runtimeCounts.running} running`"
-        :detail="`${runtimeCounts.queued} queued · ${runtimeCounts.done} done · ${runtimeCounts.failed} failed`"
-        :tone="runtimeCounts.failed ? 'danger' : runtimeCounts.running ? 'warning' : 'neutral'"
+        :detail="`${runtimeCounts.queued} queued · ${runtimeCounts.done} done · ${runtimeCounts.blocked} blocked · ${runtimeCounts.warnings} warnings`"
+        :tone="runtimeCounts.blocked ? 'danger' : runtimeCounts.warnings || runtimeCounts.running ? 'warning' : 'neutral'"
       >
         <template #icon>
           <AppIcon name="mission" size="lg" />
@@ -232,9 +232,10 @@
                 >
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <div class="font-medium text-slate-900">{{ subtask.title }}</div>
-                    <el-tag size="small" effect="light" :type="narrativeStatusTagType(subtask.status)">
+                    <el-tag size="small" effect="light" :type="narrativeStatusTagType(subtask.status, subtask.blocking)">
                       {{ subtask.status }}
                     </el-tag>
+                    <el-tag v-if="subtask.blocking === false" size="small" effect="light" type="warning">Optional</el-tag>
                   </div>
                   <div v-if="subtask.description" class="mt-1 text-slate-600">{{ subtask.description }}</div>
                   <div class="mt-2 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
@@ -357,9 +358,10 @@
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-2">
                     <div class="text-sm font-semibold text-slate-900">{{ step.title }}</div>
-                    <el-tag size="small" effect="light" :type="narrativeStatusTagType(step.status)">
+                    <el-tag size="small" effect="light" :type="narrativeStatusTagType(step.status, step.blocking)">
                       {{ step.status }}
                     </el-tag>
+                    <el-tag v-if="step.blocking === false" size="small" effect="light" type="warning">Optional</el-tag>
                     <el-tag size="small" effect="light" type="info">
                       {{ humanizeToken(step.phase) }}
                     </el-tag>
@@ -398,9 +400,10 @@
             <div class="flex flex-wrap items-center justify-between gap-2">
               <div class="text-sm font-semibold text-slate-900">{{ reflection.title }}</div>
               <div class="flex flex-wrap items-center gap-2">
-                <el-tag size="small" effect="light" :type="narrativeStatusTagType(reflection.status)">
+                <el-tag size="small" effect="light" :type="narrativeStatusTagType(reflection.status, reflection.blocking)">
                   {{ reflection.status }}
                 </el-tag>
+                <el-tag v-if="reflection.blocking === false" size="small" effect="light" type="warning">Optional</el-tag>
                 <el-tag
                   v-if="reflection.matched_plan !== null"
                   size="small"
@@ -476,6 +479,10 @@
             {{ runNarrative.working_context.latest_failure || "None recorded." }}
           </div>
           <div class="text-sm text-slate-600">
+            <strong>Latest warning:</strong>
+            {{ runNarrative.working_context.latest_warning || "None recorded." }}
+          </div>
+          <div class="text-sm text-slate-600">
             <strong>API runtime auth:</strong>
             {{ formatRuntimeGitAuthSummary(runNarrative.working_context) }}
             <span v-if="runtimeGitAuthMissing(runNarrative.working_context).length">
@@ -484,6 +491,8 @@
           </div>
           <div class="grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
             <div><strong>Recovery count:</strong> {{ runNarrative.working_context.recovery_count }}</div>
+            <div><strong>Blocking failures:</strong> {{ runNarrative.working_context.blocking_failure_count }}</div>
+            <div><strong>Warnings:</strong> {{ runNarrative.working_context.warning_failure_count }}</div>
             <div><strong>Workspace:</strong> {{ runNarrative.working_context.workspace_status || "—" }}</div>
             <div><strong>Branch:</strong> {{ runNarrative.working_context.branch_name || "—" }}</div>
             <div><strong>Confidence:</strong> {{ formatConfidence(runNarrative.working_context.confidence_score) }}</div>
@@ -994,9 +1003,10 @@
           <el-table-column prop="executor" label="Executor" min-width="120" />
           <el-table-column label="Status" width="130">
             <template #default="{ row }">
-              <el-tag :type="workItemStatusTagType(row.rawStatus)" effect="light">
+              <el-tag :type="workItemStatusTagType(row.rawStatus, row.blocking)" effect="light">
                 {{ row.rawStatus }}
               </el-tag>
+              <el-tag v-if="row.blocking === false" class="ml-2" type="warning" effect="light">OPTIONAL</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="Started" min-width="180">
@@ -1984,6 +1994,7 @@ const displayWorkItems = computed(() =>
       executor: wi.executor,
       status: normalizeTimelineStatus(wi.status),
       rawStatus: wi.status,
+      blocking: payload.blocking !== false,
       depends_on: Array.isArray(payload.depends_on) ? payload.depends_on : [],
       depends_on_count: wi.depends_on_count || 0,
       outputs: Array.isArray(payload.outputs) ? payload.outputs : [],
@@ -2017,7 +2028,7 @@ const timelineLogs = computed(() =>
 const agentRows = computed(() =>
   displayWorkItems.value.map((item) => ({
     name: item.title,
-    status: panelStatusFor(item.rawStatus),
+    status: panelStatusFor(item.rawStatus, item.blocking),
     taskCount: 1,
   }))
 );
@@ -2039,14 +2050,16 @@ const runtimeCounts = computed(() => {
     queued: 0,
     running: 0,
     done: 0,
-    failed: 0,
+    blocked: 0,
+    warnings: 0,
     canceled: 0,
   };
-  workItems.value.forEach((wi) => {
+  displayWorkItems.value.forEach((wi) => {
     if (wi.status === "QUEUED") counts.queued += 1;
     else if (wi.status === "CLAIMED" || wi.status === "RUNNING") counts.running += 1;
     else if (wi.status === "DONE") counts.done += 1;
-    else if (wi.status === "FAILED") counts.failed += 1;
+    else if (wi.status === "FAILED" && wi.blocking === false) counts.warnings += 1;
+    else if (wi.status === "FAILED") counts.blocked += 1;
     else if (wi.status === "CANCELED") counts.canceled += 1;
   });
   return counts;
@@ -2130,13 +2143,14 @@ const workbenchTasks = computed(() =>
       id: item.task_id,
       title: item.title,
       rawStatus: item.rawStatus,
+      blocking: item.blocking,
       agent: item.agent,
       executor: item.executor,
       progress: workbenchProgressForStatus(item.rawStatus),
       logLine:
         item.last_error ||
         latestLogMessageByTask.value.get(item.task_id) ||
-        workbenchStatusMessage(item.rawStatus),
+        workbenchStatusMessage(item.rawStatus, item.blocking),
       changedArtifacts: relatedArtifacts,
       startedAtLabel: item.started_at ? `Started ${formatTimestamp(item.started_at)}` : "Not started",
       finishedAtLabel: item.finished_at ? `Finished ${formatTimestamp(item.finished_at)}` : "Awaiting completion",
@@ -2811,11 +2825,12 @@ function workbenchProgressForStatus(status?: string | null) {
   return 0;
 }
 
-function workbenchStatusMessage(status?: string | null) {
+function workbenchStatusMessage(status?: string | null, blocking = true) {
   const normalized = String(status || "").toUpperCase();
   if (normalized === "RUNNING" || normalized === "CLAIMED") return "AI is actively working through this step.";
   if (normalized === "QUEUED") return "Queued for execution in the current run.";
   if (normalized === "DONE") return "Completed successfully and attached to the run record.";
+  if (normalized === "FAILED" && !blocking) return "Optional step failed, but the run can still complete.";
   if (normalized === "FAILED") return "This step failed. Inspect the replay and healing path.";
   if (normalized === "CANCELED") return "Execution stopped before this step could finish.";
   return "Waiting for runtime signal.";
@@ -2901,9 +2916,10 @@ function workspaceStatusTagType(status?: string | null) {
   return "warning";
 }
 
-function workItemStatusTagType(status?: string | null) {
+function workItemStatusTagType(status?: string | null, blocking = true) {
   if (status === "RUNNING" || status === "CLAIMED") return "warning";
   if (status === "DONE") return "success";
+  if (status === "FAILED" && !blocking) return "warning";
   if (status === "FAILED" || status === "CANCELED") return "danger";
   if (status === "QUEUED") return "info";
   return "default";
@@ -2956,17 +2972,23 @@ function timelineStatusTagType(status?: string | null) {
   }
 }
 
-function narrativeStatusTagType(status?: string | null) {
+function narrativeStatusTagType(status?: string | null, blocking = true) {
   if (status === "RUNNING" || status === "CLAIMED") return "warning";
   if (status === "DONE" || status === "COMPLETED") return "success";
+  if (status === "WARNING") return "warning";
+  if (status === "SKIPPED") return "warning";
+  if (status === "FAILED" && !blocking) return "warning";
   if (status === "FAILED" || status === "CANCELED") return "danger";
   if (status === "QUEUED" || status === "PENDING") return "info";
   return "default";
 }
 
-function panelStatusFor(status?: string | null) {
+function panelStatusFor(status?: string | null, blocking = true) {
   if (status === "RUNNING" || status === "CLAIMED") return "Running";
   if (status === "DONE") return "Completed";
+  if (status === "WARNING") return "Warning";
+  if (status === "SKIPPED") return "Skipped";
+  if (status === "FAILED" && !blocking) return "Warning";
   if (status === "FAILED" || status === "CANCELED") return "Blocked";
   return "Waiting";
 }
@@ -2975,6 +2997,7 @@ function normalizeTimelineStatus(status?: string | null) {
   if (status === "QUEUED") return "PENDING";
   if (status === "CLAIMED" || status === "RUNNING") return "RUNNING";
   if (status === "DONE") return "DONE";
+  if (status === "SKIPPED") return "SKIPPED";
   if (status === "FAILED") return "FAILED";
   if (status === "CANCELED") return "CANCELED";
   return status || "PENDING";
@@ -2995,6 +3018,7 @@ function mapEventMessage(eventType: string, title?: string) {
   if (eventType === "WORK_ITEM_CLAIMED") return `Task ${itemTitle} claimed`;
   if (eventType === "WORK_ITEM_STARTED") return `Task ${itemTitle} started`;
   if (eventType === "WORK_ITEM_DONE") return `Task ${itemTitle} completed`;
+  if (eventType === "WORK_ITEM_SKIPPED") return `Task ${itemTitle} skipped`;
   if (eventType === "WORK_ITEM_FAILED") return `Task ${itemTitle} failed`;
   if (eventType === "WORK_ITEM_LEASE_EXPIRED") return `Task ${itemTitle} lease expired`;
   if (eventType === "WORK_ITEM_RETRIED") return `Task ${itemTitle} retried`;

@@ -29,9 +29,26 @@ class TestExecutor(TaskExecutor):
             path_parts.insert(0, python_bin)
         return {"PATH": os.pathsep.join(path_parts) if path_parts else python_bin}
 
+    def _normalize_test_command(self, command: list[str]) -> list[str]:
+        if not command:
+            return command
+        executable = Path(command[0]).name
+        if executable == "pytest":
+            return [sys.executable, "-m", "pytest", *command[1:]]
+        return command
+
+    @staticmethod
+    def _is_pytest_command(command: list[str]) -> bool:
+        if not command:
+            return False
+        executable = Path(command[0]).name
+        if executable == "pytest":
+            return True
+        return len(command) >= 3 and command[1] == "-m" and command[2] == "pytest"
+
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
-        cmd = shlex.split(self.settings.test_command)
+        cmd = self._normalize_test_command(shlex.split(self.settings.test_command))
         log_dir = Path(context.logs_path) if context.logs_path else repo_root / ".agentic-sdlc-logs"
         try:
             result = await run_workspace_command_async(
@@ -69,7 +86,8 @@ class TestExecutor(TaskExecutor):
             out = result.stdout
             err = result.stderr
             exit_code = result.exit_code
-            status = "DONE" if exit_code == 0 else "FAILED"
+            no_tests_collected = self._is_pytest_command(cmd) and exit_code == 5
+            status = "SKIPPED" if no_tests_collected else ("DONE" if exit_code == 0 else "FAILED")
             artifacts: list[dict] = []
             if result.log_path:
                 log_path = Path(result.log_path)
@@ -87,13 +105,19 @@ class TestExecutor(TaskExecutor):
                         },
                     }
                 )
+            if no_tests_collected:
+                message = "No relevant tests were collected; validation skipped."
+            else:
+                message = "Tests passed" if status == "DONE" else "Tests failed"
             return {
                 "status": status,
-                "message": "Tests passed" if status == "DONE" else "Tests failed",
+                "message": message,
                 "payload": {
                     "exit_code": exit_code,
                     "stdout": out,
                     "stderr": err,
+                    "message": message,
+                    "skip_reason": "no_tests_collected" if no_tests_collected else None,
                     "command_status": result.status,
                     "command_audit_path": result.audit_path,
                     "artifacts": artifacts,

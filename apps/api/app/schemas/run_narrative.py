@@ -14,6 +14,7 @@ class RunPlanStep(BaseModel):
     title: str
     phase: str
     status: str
+    blocking: bool = True
     rationale: str | None = None
     success_criteria: list[str] = Field(default_factory=list)
     expected_files: list[str] = Field(default_factory=list)
@@ -80,6 +81,7 @@ class RunExecutionSubtask(BaseModel):
     title: str
     description: str | None = None
     status: str
+    blocking: bool = True
     depends_on: list[str] = Field(default_factory=list)
     work_item_ids: list[str] = Field(default_factory=list)
     work_item_types: list[str] = Field(default_factory=list)
@@ -106,6 +108,7 @@ class RunReflectionItem(BaseModel):
     ts: datetime | None = None
     title: str
     status: str
+    blocking: bool = True
     happened: str
     matched_plan: bool | None = None
     changed_next: str | None = None
@@ -120,9 +123,12 @@ class RunWorkingContextSummary(BaseModel):
     next_best_step: str | None = None
     files_touched: list[str] = Field(default_factory=list)
     latest_failure: str | None = None
+    latest_warning: str | None = None
     validation_state: str | None = None
     review_state: str | None = None
     recovery_count: int = 0
+    blocking_failure_count: int = 0
+    warning_failure_count: int = 0
     workspace_status: str | None = None
     branch_name: str | None = None
     confidence_score: float | None = None

@@ -242,7 +242,13 @@ async def build_run_execution_console(
     recent_steps = sorted(
         work_items,
         key=lambda wi: (
-            0 if wi.status in {"RUNNING", "CLAIMED"} else 1 if wi.status == "FAILED" else 2 if wi.status == "DONE" else 3,
+            0
+            if wi.status in {"RUNNING", "CLAIMED"}
+            else 1
+            if wi.status == "FAILED"
+            else 2
+            if wi.status in {"DONE", "SKIPPED"}
+            else 3,
             wi.started_at or wi.finished_at or wi.updated_at or wi.created_at,
         ),
     )[:8]

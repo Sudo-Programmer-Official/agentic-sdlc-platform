@@ -1009,11 +1009,12 @@ async def complete_work_item(
     now = datetime.now(timezone.utc)
     if wi.lease_expires_at and wi.lease_expires_at < now:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lease expired; please re-claim the work item.")
+    terminal_status = payload.status.upper()
     ok = await update_work_item_status(
         session,
         wi.id,
         ["RUNNING"],
-        "DONE",
+        terminal_status,
         result=payload.result,
         finished_at=now,
         last_error=None,
@@ -1028,9 +1029,9 @@ async def complete_work_item(
             project_id=wi.project_id,
             run_id=wi.run_id,
             work_item_id=wi.id,
-            event_type="WORK_ITEM_DONE",
+            event_type="WORK_ITEM_SKIPPED" if terminal_status == "SKIPPED" else "WORK_ITEM_DONE",
             actor_type="AGENT",
-            payload={"work_item_id": str(wi.id), "status": "DONE"},
+            payload={"work_item_id": str(wi.id), "status": terminal_status},
         )
         await maybe_apply_recovery(session, wi)
         await _maybe_finalize_run(session, wi.run_id)

@@ -308,6 +308,7 @@ function statusClass(status?: string | null) {
   const normalized = String(status || "").toUpperCase();
   if (normalized === "RUNNING" || normalized === "CLAIMED") return "is-running";
   if (normalized === "SUCCEEDED" || normalized === "DONE" || normalized === "COMPLETED" || normalized === "READY") return "is-success";
+  if (normalized === "SKIPPED") return "is-neutral";
   if (normalized === "FAILED" || normalized === "CANCELED" || normalized === "ERROR" || normalized === "TIMEOUT" || normalized === "BLOCKED") return "is-danger";
   return "is-neutral";
 }

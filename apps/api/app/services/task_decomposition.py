@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Run, WorkItem
+from app.services.work_item_state import is_blocking_failure, is_non_blocking_failure, is_superseded_failure
 
 MAX_SUBTASKS = 5
 MAX_FILES_PER_TASK = 5
@@ -111,16 +112,22 @@ def _choose_template(goal: str | None) -> DecompositionTemplate:
         return TEMPLATES[3]
     return TEMPLATES[4]
 
-
 def _aggregate_status(items: list[WorkItem]) -> str:
-    statuses = {item.status for item in items}
-    if "FAILED" in statuses:
+    effective_items = [item for item in items if not is_superseded_failure(item)] or items
+    statuses = {item.status for item in effective_items}
+    if any(is_blocking_failure(item) for item in effective_items):
         return "FAILED"
+    if any(is_non_blocking_failure(item) for item in effective_items):
+        residual_statuses = {item.status for item in effective_items if not is_non_blocking_failure(item)}
+        if not residual_statuses or residual_statuses.issubset({"DONE", "SKIPPED"}):
+            return "WARNING"
     if "CANCELED" in statuses:
         return "CANCELED"
     if "RUNNING" in statuses or "CLAIMED" in statuses:
         return "RUNNING"
-    if statuses and statuses.issubset({"DONE"}):
+    if statuses == {"SKIPPED"}:
+        return "SKIPPED"
+    if statuses and statuses.issubset({"DONE", "SKIPPED"}):
         return "DONE"
     if "QUEUED" in statuses:
         return "QUEUED"
@@ -162,6 +169,7 @@ def build_task_decomposition(run: Run, work_items: list[WorkItem]) -> dict:
                 "title": bucket.title,
                 "description": bucket.description,
                 "status": _aggregate_status(bucket_items),
+                "blocking": not any(is_non_blocking_failure(item) for item in bucket_items if not is_superseded_failure(item)),
                 "depends_on": prior_ids[-1:] if prior_ids else [],
                 "work_item_ids": [str(item.id) for item in bucket_items],
                 "work_item_types": list(dict.fromkeys(item.type for item in bucket_items)),

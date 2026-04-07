@@ -24,6 +24,7 @@ from app.services.patch_verification import build_run_patch_plan_and_verificatio
 from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.services.run_summary_builder import upsert_run_summary
 from app.services.task_decomposition import build_task_decomposition
+from app.services.work_item_state import is_blocking_failure, is_non_blocking_failure, is_optional_work_item, is_superseded_failure
 
 PHASE_BY_TYPE = {
     "PLAN_DAG": "plan",
@@ -79,7 +80,6 @@ def _work_item_label(work_item: WorkItem) -> str:
         return work_item.key
     return _humanize_token(work_item.type)
 
-
 def _review_metrics(work_items: list[WorkItem]) -> tuple[float | None, float | None]:
     risk_scores: list[float] = []
     confidence_scores: list[float] = []
@@ -126,9 +126,15 @@ def _next_best_step(run: Run, work_items: list[WorkItem], summary: RunTimelineSu
     if queued:
         return f"Queue {_work_item_label(queued)} next."
 
-    failed = next((item for item in work_items if item.status == "FAILED"), None)
-    if failed:
+    blocking_failed = next((item for item in work_items if is_blocking_failure(item)), None)
+    if blocking_failed:
         return "Inspect the failure and decide whether to retry or fork a safer strategy."
+
+    optional_failed = next((item for item in work_items if is_non_blocking_failure(item)), None)
+    if optional_failed and summary.pull_request_url:
+        return "Review the warning and decide whether to merge."
+    if optional_failed and run.status == "COMPLETED":
+        return "Review the warning and decide whether to continue with pull request creation."
 
     if summary.pull_request_url:
         return "Review the pull request and decide whether to merge."
@@ -145,14 +151,19 @@ def _next_best_step(run: Run, work_items: list[WorkItem], summary: RunTimelineSu
 def _validation_state(run: Run, work_items: list[WorkItem]) -> str:
     if run.workspace_status == "ERROR":
         return "BLOCKED"
-    validation_items = [item for item in work_items if item.type in {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}]
-    if not validation_items:
+    validation_items = [
+        item for item in work_items if item.type in {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
+    ]
+    effective_validation_items = [item for item in validation_items if not is_superseded_failure(item)]
+    if not effective_validation_items:
         return "NOT_STARTED"
-    if any(item.status == "FAILED" for item in validation_items):
+    if any(is_blocking_failure(item) for item in effective_validation_items):
         return "FAILED"
-    if any(item.status in {"RUNNING", "CLAIMED", "QUEUED"} for item in validation_items):
+    if any(item.status in {"RUNNING", "CLAIMED", "QUEUED"} for item in effective_validation_items):
         return "PENDING"
-    if all(item.status == "DONE" for item in validation_items):
+    if any(is_non_blocking_failure(item) for item in effective_validation_items):
+        return "PASSED_WITH_WARNINGS"
+    if all(item.status in {"DONE", "SKIPPED"} for item in effective_validation_items):
         return "PASSED"
     return "IN_PROGRESS"
 
@@ -167,11 +178,14 @@ def _review_state(run: Run, summary: RunTimelineSummary, work_items: list[WorkIt
         if isinstance(approval_status, str) and approval_status:
             return approval_status
     review_items = [item for item in work_items if item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}]
-    if any(item.status == "FAILED" for item in review_items):
+    effective_review_items = [item for item in review_items if not is_superseded_failure(item)]
+    if any(is_blocking_failure(item) for item in effective_review_items):
         return "CHANGES_REQUESTED"
-    if review_items and all(item.status == "DONE" for item in review_items):
+    if any(is_non_blocking_failure(item) for item in effective_review_items):
+        return "REVIEWED_WITH_WARNINGS"
+    if effective_review_items and all(item.status in {"DONE", "SKIPPED"} for item in effective_review_items):
         return "REVIEWED"
-    if review_items:
+    if effective_review_items:
         return "PENDING_REVIEW"
     return "NOT_STARTED"
 
@@ -229,6 +243,10 @@ async def build_run_narrative(
     latest_non_recovery_messages_by_work_item: dict[uuid.UUID, tuple[object, str]] = {}
     recovery_message_by_work_item: dict[uuid.UUID, str] = {}
     latest_failure = summary.primary_error if summary else None
+    latest_warning: str | None = None
+    summary_has_primary_error = bool(summary and summary.primary_error)
+    active_blocking_failed_work_item_ids = {item.id for item in work_items if is_blocking_failure(item)}
+    active_warning_work_item_ids = {item.id for item in work_items if is_non_blocking_failure(item)}
     for event in events:
         if event.work_item_id:
             message = _event_message(event)
@@ -238,8 +256,12 @@ async def build_run_narrative(
                     latest_non_recovery_messages_by_work_item[event.work_item_id] = (event.ts, message)
                 if event.event_type == "WORK_ITEM_RECOVERY":
                     recovery_message_by_work_item[event.work_item_id] = message
-        if not latest_failure and event.event_type in {"WORK_ITEM_FAILED", "RUN_FAILED"}:
+        if not summary_has_primary_error and event.event_type == "WORK_ITEM_FAILED" and event.work_item_id in active_blocking_failed_work_item_ids:
             latest_failure = _event_message(event)
+        elif not summary_has_primary_error and event.event_type == "RUN_FAILED" and run.status == "FAILED":
+            latest_failure = _event_message(event)
+        if event.event_type == "WORK_ITEM_FAILED" and event.work_item_id in active_warning_work_item_ids:
+            latest_warning = _event_message(event) or latest_warning
 
     risk_score, confidence_score = _review_metrics(work_items)
     risk_level = _risk_level(
@@ -260,6 +282,7 @@ async def build_run_narrative(
                 title=label,
                 phase=PHASE_BY_TYPE.get(item.type, "execute"),
                 status=item.status,
+                blocking=not is_optional_work_item(item),
                 rationale=RATIONALE_BY_TYPE.get(item.type, "Carry the run forward with the next scoped execution step."),
                 success_criteria=SUCCESS_CRITERIA_BY_TYPE.get(item.type, ["Step completes without runtime errors."]),
                 expected_files=files_for_item,
@@ -280,6 +303,10 @@ async def build_run_narrative(
         if not message:
             if item.status == "DONE":
                 message = f"{label} completed successfully."
+            elif item.status == "SKIPPED":
+                message = f"{label} was skipped because validation was not required."
+            elif is_non_blocking_failure(item):
+                message = f"{label} failed without blocking run completion."
             elif item.status in {"RUNNING", "CLAIMED"}:
                 message = f"{label} is currently in progress."
             elif item.status == "QUEUED":
@@ -288,19 +315,32 @@ async def build_run_narrative(
                 message = f"{label} ended with status {item.status}."
 
         next_label = _work_item_label(work_items[index + 1]) if index + 1 < len(work_items) else None
-        changed_next = recovery_message_by_work_item.get(item.id) or (f"Next planned step: {next_label}." if next_label else None)
+        changed_next = (
+            recovery_message_by_work_item.get(item.id)
+            or ("Optional warning recorded; remaining delivery steps can still continue." if is_non_blocking_failure(item) else None)
+            or (f"Next planned step: {next_label}." if next_label else None)
+        )
         reflections.append(
             RunReflectionItem(
                 id=f"reflection:{item.id}",
                 ts=item.finished_at or item.started_at or item.created_at,
                 title=label,
                 status=item.status,
+                blocking=not is_optional_work_item(item),
                 happened=message,
-                matched_plan=True if item.status == "DONE" else False if item.status in {"FAILED", "CANCELED"} else None,
+                matched_plan=True if item.status in {"DONE", "SKIPPED"} else False if item.status in {"FAILED", "CANCELED"} else None,
                 changed_next=changed_next,
                 files_touched=files_for_item,
                 work_item_id=item.id,
-                event_type="WORK_ITEM_DONE" if item.status == "DONE" else "WORK_ITEM_FAILED" if item.status == "FAILED" else "WORK_ITEM_STARTED",
+                event_type=(
+                    "WORK_ITEM_DONE"
+                    if item.status == "DONE"
+                    else "WORK_ITEM_SKIPPED"
+                    if item.status == "SKIPPED"
+                    else "WORK_ITEM_FAILED"
+                    if item.status == "FAILED"
+                    else "WORK_ITEM_STARTED"
+                ),
             )
         )
 
@@ -309,7 +349,7 @@ async def build_run_narrative(
     if active_item:
         current_step = _work_item_label(active_item)
     else:
-        last_finished = next((item for item in reversed(work_items) if item.status in {"DONE", "FAILED", "CANCELED"}), None)
+        last_finished = next((item for item in reversed(work_items) if item.status in {"DONE", "SKIPPED", "FAILED", "CANCELED"}), None)
         if last_finished:
             current_step = _work_item_label(last_finished)
 
@@ -446,9 +486,12 @@ async def build_run_narrative(
         next_best_step=_next_best_step(run, work_items, timeline_summary),
         files_touched=sorted(changed_files),
         latest_failure=latest_failure,
+        latest_warning=latest_warning,
         validation_state=_validation_state(run, work_items),
         review_state=_review_state(run, timeline_summary, work_items),
         recovery_count=timeline_summary.recovery_count,
+        blocking_failure_count=len(active_blocking_failed_work_item_ids),
+        warning_failure_count=len(active_warning_work_item_ids),
         workspace_status=run.workspace_status,
         branch_name=run.branch_name,
         confidence_score=confidence_score,

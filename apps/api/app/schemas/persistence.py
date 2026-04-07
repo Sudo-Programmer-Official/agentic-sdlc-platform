@@ -263,6 +263,7 @@ class AgentOut(BaseModel):
 
 
 class WorkItemComplete(BaseModel):
+    status: Literal["DONE", "SKIPPED"] = "DONE"
     result: dict = Field(default_factory=dict)
     artifacts: list[dict] = Field(default_factory=list)
 

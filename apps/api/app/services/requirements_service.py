@@ -93,7 +93,38 @@ class RequirementGraphService:
         return self._store.get(project_id)
 
     def update_graph(self, project_id: str, nodes: List[RequirementNode], edges: List[RequirementEdge]) -> RequirementGraph:
-        existing = self._store.get(project_id)
+        try:
+            existing = self._store.get(project_id)
+        except RequirementGraphNotFoundError:
+            created_at = datetime.utcnow()
+            created = RequirementGraph(
+                project_id=project_id,
+                version=1,
+                nodes=nodes,
+                edges=edges,
+                status=RequirementGraphStatus.DRAFT,
+                created_at=created_at,
+                updated_at=created_at,
+                approved_at=None,
+                approved_by=None,
+            )
+            self._store.upsert(created)
+            self._apply_propagation_flags(project_id, empty_graph(project_id), created)
+            self._ledger.log(
+                run_id="system",
+                project_id=project_id,
+                stage=Stage.REQUIREMENTS_DRAFTED,
+                agent_name="system",
+                tool_name="requirements_service",
+                message="Requirements graph created from manual edits",
+                details={
+                    "version": created.version,
+                    "node_count": len(nodes),
+                    "edge_count": len(edges),
+                },
+            )
+            return created
+
         new_version = existing.version + 1
         status = RequirementGraphStatus.STALE if existing.status == RequirementGraphStatus.APPROVED else RequirementGraphStatus.DRAFT
         updated = RequirementGraph(

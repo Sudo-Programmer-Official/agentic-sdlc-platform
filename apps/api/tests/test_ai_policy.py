@@ -66,3 +66,23 @@ def test_sensitive_paths_force_human_review():
     assert contains_sensitive_paths(changed_files) is True
     assert policy.max_model_tier == "tier_standard"
     assert policy.requires_human_review is True
+
+
+def test_high_risk_reviewer_job_does_not_force_human_review():
+    manager = AIJobManager()
+    policy = manager.route_job(
+        AIJobRequest(
+            workflow_type="pr_review",
+            role="reviewer",
+            task_type="review",
+            ambiguity_level="high",
+            risk_level="high",
+            tenant_id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
+            changed_files=["apps/api/app/api/v1/knowledge.py", "apps/api/alembic/versions/20260314_0009_ai_control.py"],
+        )
+    )
+
+    assert policy.max_model_tier == "tier_premium"
+    assert policy.selected_model_tier == "tier_premium"
+    assert policy.requires_human_review is False

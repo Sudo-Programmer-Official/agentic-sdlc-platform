@@ -157,7 +157,7 @@ async def test_test_executor_respects_workspace_command_policy(tmp_path, monkeyp
 
 
 @pytest.mark.anyio
-async def test_test_executor_prepends_interpreter_bin_to_path(tmp_path, monkeypatch):
+async def test_test_executor_runs_pytest_via_active_interpreter(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_COMMAND", "pytest -q")
 
     captured: dict[str, object] = {}
@@ -200,7 +200,51 @@ async def test_test_executor_prepends_interpreter_bin_to_path(tmp_path, monkeypa
     result = await TestExecutor().execute(work_item, context)
 
     assert result["status"] == "DONE"
-    assert captured["command"] == ["pytest", "-q"]
+    assert captured["command"] == [sys.executable, "-m", "pytest", "-q"]
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).resolve().parent)
+
+
+@pytest.mark.anyio
+async def test_test_executor_skips_when_pytest_collects_no_tests(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_COMMAND", "pytest -q")
+
+    async def fake_run_workspace_command_async(command, **kwargs):
+        return SimpleNamespace(
+            status="FAILED",
+            stdout="no tests ran in 0.00s",
+            stderr="",
+            exit_code=5,
+            timed_out=False,
+            log_path=None,
+            audit_path=None,
+        )
+
+    monkeypatch.setattr("app.runtime.test_executor.run_workspace_command_async", fake_run_workspace_command_async)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+
+    work_item = WorkItem(
+        project_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        type="RUN_TESTS",
+        executor="test",
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        repo_path=str(repo_root),
+        logs_path=str(logs_root),
+        workspace_status="READY",
+    )
+
+    result = await TestExecutor().execute(work_item, context)
+
+    assert result["status"] == "SKIPPED"
+    assert result["message"] == "No relevant tests were collected; validation skipped."
+    assert result["payload"]["skip_reason"] == "no_tests_collected"

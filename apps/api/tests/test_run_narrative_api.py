@@ -235,3 +235,304 @@ async def test_run_narrative_returns_plan_reflections_and_working_context(db_ses
     assert context["review_state"] == "PENDING_REVIEW"
     assert context["next_best_step"] == "Queue Review generated patch next."
     assert "app/auth.py" in context["files_touched"]
+
+
+@pytest.mark.anyio
+async def test_run_narrative_treats_superseded_failures_and_skipped_validation_as_healthy(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Smoke narrative", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    started = datetime.utcnow() - timedelta(minutes=2)
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/smoke",
+        workspace_status="SEEDED",
+        started_at=started,
+        finished_at=started + timedelta(seconds=30),
+        summary={"goal": "GitHub smoke commit test"},
+    )
+    session.add(run)
+    await session.flush()
+
+    plan_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="PLAN_DAG",
+        key="PLAN_DAG",
+        status="DONE",
+        priority=0,
+        executor="dummy",
+        payload={"title": "Plan smoke commit"},
+        result={},
+        started_at=started,
+        finished_at=started + timedelta(seconds=3),
+    )
+    failed_test_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="RUN_TESTS",
+        key="RUN_TESTS_OLD",
+        status="FAILED",
+        priority=10,
+        executor="test",
+        payload={"title": "Run smoke validation"},
+        result={"superseded": True, "message": "tests failed"},
+        last_error="tests failed",
+        started_at=started + timedelta(seconds=4),
+        finished_at=started + timedelta(seconds=10),
+    )
+    skipped_test_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="RUN_TESTS",
+        key="RUN_TESTS",
+        status="SKIPPED",
+        priority=20,
+        executor="test",
+        payload={"title": "Run smoke validation"},
+        result={
+            "message": "No relevant tests were collected; validation skipped.",
+            "skip_reason": "no_tests_collected",
+        },
+        started_at=started + timedelta(seconds=11),
+        finished_at=started + timedelta(seconds=14),
+    )
+    review_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="REVIEW_INTEGRATION",
+        key="REVIEW_INTEGRATION",
+        status="DONE",
+        priority=30,
+        executor="dummy",
+        payload={"title": "Confirm smoke integration"},
+        result={},
+        started_at=started + timedelta(seconds=15),
+        finished_at=started + timedelta(seconds=20),
+    )
+    session.add_all([plan_item, failed_test_item, skipped_test_item, review_item])
+    await session.flush()
+
+    session.add_all(
+        [
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                event_type="RUN_CREATED",
+                actor_type="USER",
+                ts=started,
+            ),
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                work_item_id=failed_test_item.id,
+                event_type="WORK_ITEM_FAILED",
+                actor_type="SYSTEM",
+                message="Tests failed before the retry path was created.",
+                ts=started + timedelta(seconds=10),
+            ),
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                work_item_id=failed_test_item.id,
+                event_type="WORK_ITEM_RECOVERY",
+                actor_type="SYSTEM",
+                message="Recovery queued RUN_TESTS retry after FIX_TEST_FAILURE.",
+                ts=started + timedelta(seconds=11),
+            ),
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                work_item_id=skipped_test_item.id,
+                event_type="WORK_ITEM_SKIPPED",
+                actor_type="SYSTEM",
+                message="No relevant tests were collected; validation skipped.",
+                ts=started + timedelta(seconds=14),
+            ),
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                event_type="RUN_COMPLETED",
+                actor_type="SYSTEM",
+                ts=started + timedelta(seconds=30),
+            ),
+        ]
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/runs/{run.id}/narrative")
+
+    assert response.status_code == 200
+    data = response.json()
+    context = data["working_context"]
+    assert context["latest_failure"] is None
+    assert context["validation_state"] == "PASSED"
+    assert context["review_state"] == "REVIEWED"
+    assert context["next_best_step"] == "Open the review surface and create a pull request."
+
+    skipped_reflection = next(item for item in data["reflections"] if item["work_item_id"] == str(skipped_test_item.id))
+    assert skipped_reflection["status"] == "SKIPPED"
+    assert skipped_reflection["matched_plan"] is True
+    assert "validation skipped" in skipped_reflection["happened"].lower()
+
+    rerun_subtask = next(item for item in data["task_decomposition"]["subtasks"] if item["title"] == "Rerun tests")
+    assert rerun_subtask["status"] == "SKIPPED"
+
+
+@pytest.mark.anyio
+async def test_run_narrative_surfaces_optional_review_failures_as_warnings(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Optional warning narrative", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    started = datetime.utcnow() - timedelta(minutes=1)
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/optional-warning",
+        workspace_status="SEEDED",
+        started_at=started,
+        finished_at=started + timedelta(seconds=40),
+        summary={"goal": "Optional preview review warning"},
+    )
+    session.add(run)
+    await session.flush()
+
+    session.add_all(
+        [
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="PLAN_DAG",
+                key="PLAN_DAG",
+                status="DONE",
+                priority=0,
+                executor="dummy",
+                payload={"title": "Plan warning path"},
+                result={},
+                started_at=started,
+                finished_at=started + timedelta(seconds=3),
+            ),
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="CODE_BACKEND",
+                key="CODE_BACKEND",
+                status="DONE",
+                priority=10,
+                executor="codex",
+                payload={"title": "Patch backend"},
+                result={},
+                started_at=started + timedelta(seconds=4),
+                finished_at=started + timedelta(seconds=10),
+            ),
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="RUN_TESTS",
+                key="RUN_TESTS",
+                status="DONE",
+                priority=20,
+                executor="test",
+                payload={"title": "Run validation"},
+                result={"exit_code": 0, "stdout": "ok", "stderr": ""},
+                started_at=started + timedelta(seconds=11),
+                finished_at=started + timedelta(seconds=18),
+            ),
+        ]
+    )
+    await session.flush()
+
+    optional_review_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="REVIEW_INTEGRATION",
+        key="REVIEW_INTEGRATION",
+        status="FAILED",
+        priority=30,
+        executor="dummy",
+        payload={"title": "Confirm preview integration", "blocking": False},
+        result={"reason": "preview_unavailable"},
+        last_error="Preview environment was unavailable.",
+        started_at=started + timedelta(seconds=19),
+        finished_at=started + timedelta(seconds=25),
+    )
+    session.add(optional_review_item)
+    await session.flush()
+
+    session.add_all(
+        [
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                event_type="RUN_CREATED",
+                actor_type="USER",
+                ts=started,
+            ),
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                work_item_id=optional_review_item.id,
+                event_type="WORK_ITEM_FAILED",
+                actor_type="SYSTEM",
+                message="Preview environment was unavailable.",
+                ts=started + timedelta(seconds=25),
+            ),
+            RunEvent(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=run.id,
+                event_type="RUN_COMPLETED",
+                actor_type="SYSTEM",
+                ts=started + timedelta(seconds=40),
+            ),
+        ]
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/runs/{run.id}/narrative")
+
+    assert response.status_code == 200
+    data = response.json()
+    context = data["working_context"]
+    assert context["latest_failure"] is None
+    assert context["latest_warning"] == "Preview environment was unavailable."
+    assert context["blocking_failure_count"] == 0
+    assert context["warning_failure_count"] == 1
+    assert context["validation_state"] == "PASSED_WITH_WARNINGS"
+    assert context["review_state"] == "REVIEWED_WITH_WARNINGS"
+    assert context["next_best_step"] == "Review the warning and decide whether to continue with pull request creation."
+
+    optional_reflection = next(item for item in data["reflections"] if item["work_item_id"] == str(optional_review_item.id))
+    assert optional_reflection["status"] == "FAILED"
+    assert optional_reflection["blocking"] is False
+    assert "remaining delivery steps can still continue" in optional_reflection["changed_next"].lower()
+
+    review_subtask = next(item for item in data["task_decomposition"]["subtasks"] if item["title"] == "Review delivery")
+    assert review_subtask["status"] == "WARNING"
+    assert review_subtask["blocking"] is False

@@ -24,6 +24,9 @@ def test_execution_graph_spec_is_well_formed():
         assert retry_rule.node_id in valid_nodes
         assert retry_rule.max_retries >= 0
 
+    validate_results = next(node for node in spec.nodes if node.id == "VALIDATE_RESULTS")
+    assert validate_results.failure_mode == "warning_allowed"
+
 
 def test_current_work_item_types_map_to_expected_execution_nodes():
     mapping = current_work_item_stage_map()

@@ -1,28 +1,91 @@
 {
-  "project_id": "ab4c64d7-e69d-4d57-ad57-b4eb24139e46",
-  "version": 2,
+  "project_id": "f7096fa5-8c0c-47cb-8309-821283fae2da",
+  "version": 1,
   "status": "APPROVED",
-  "created_at": "2026-03-07T19:35:31.625427",
-  "updated_at": "2026-03-07T19:35:31.627928",
-  "approved_at": "2026-03-07T19:35:31.627928",
-  "approved_by": "tester",
+  "created_at": "2026-04-07T02:07:26.066165",
+  "updated_at": "2026-04-07T02:07:43.286301",
+  "approved_at": "2026-04-07T02:07:43.286301",
+  "approved_by": "ui-user",
   "nodes": [
     {
-      "id": "FR-001",
+      "id": "FR1 \u2014 Homepage",
       "type": "FR",
-      "text": "Must allow SSO login",
-      "confidence": 0.9,
+      "text": "\t\u2022\tCreate index.html\n\t\u2022\tInclude:\n\t\u2022\tName (e.g., \u201cAbhishek\u201d)\n\t\u2022\tTagline: \u201cAI Engineer & Builder\u201d\n\t\u2022\tCTA button: \u201cView Projects\u201d",
+      "confidence": 0.7,
       "source": "AI_EXTRACTED",
       "quality_type": null,
       "tags": []
     },
     {
-      "id": "QR-001",
+      "id": "FR2 \u2014 About Section",
+      "type": "FR",
+      "text": "\tShort paragraph about:\n\t\u2022\tAI + Full-stack focus\n\t\u2022\tStartup mindset",
+      "confidence": 0.7,
+      "source": "HUMAN_EDITED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR3 \u2014 Projects Section",
+      "type": "FR",
+      "text": "\t\u2022\t2\u20133 dummy projects:\n\t\u2022\tAI SaaS App\n\t\u2022\tSystem Design Tool\n\t\u2022\tFrontend Dashboard\n\nEach project:\n\t\u2022\tTitle\n\t\u2022\tShort description\n",
+      "confidence": 0.7,
+      "source": "HUMAN_EDITED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR4 \u2014 Contact Section",
+      "type": "FR",
+      "text": "\t\u2022\tEmail placeholder\n\t\u2022\tGitHub / LinkedIn placeholders",
+      "confidence": 0.7,
+      "source": "HUMAN_EDITED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR5 \u2014 Styling",
+      "type": "FR",
+      "text": "\t\u2022\tClean layout\n\t\u2022\tCentered content\n\t\u2022\tUse:\n\t\u2022\tsimple CSS OR inline styles (preferred for reliability)\n\t\u2022\tMobile responsive (basic)",
+      "confidence": 0.7,
+      "source": "HUMAN_EDITED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR1 \u2014 No Build Step",
       "type": "QR",
-      "text": "System should be secure and reliable",
+      "text": "\tPure HTML/CSS (no React, no bundler)",
       "confidence": 0.9,
       "source": "AI_EXTRACTED",
-      "quality_type": "security",
+      "quality_type": "reliability",
+      "tags": []
+    },
+    {
+      "id": "QR2 \u2014 Deterministic Output",
+      "type": "QR",
+      "text": "\t\u2022\tSame input \u2192 same file",
+      "confidence": 0.9,
+      "source": "AI_EXTRACTED",
+      "quality_type": "scalability",
+      "tags": []
+    },
+    {
+      "id": "QR3 \u2014 Previewable",
+      "type": "QR",
+      "text": "\tMust open directly in browser OR via local server\n",
+      "confidence": 0.7,
+      "source": "HUMAN_EDITED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR4 \u2014 No External Dependencies",
+      "type": "QR",
+      "text": "\tNo CDN required (keep it safe)",
+      "confidence": 0.7,
+      "source": "HUMAN_EDITED",
+      "quality_type": null,
       "tags": []
     }
   ],
@@ -34,7 +97,15 @@
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
+    },
+    {
+      "id": "EDGE-002",
+      "from_id": "FR-001",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
     }
   ],
-  "sha256": "e0a38fdbb5dc19783d1d66bb313208436f4767168a030fd62c815dc006fc2f95"
+  "sha256": "110ed4a7c1ba854c93015ff487b84a8a3615f6b025146cb1daf3ccf9c6b73813"
 }

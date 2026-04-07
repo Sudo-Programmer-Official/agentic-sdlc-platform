@@ -97,7 +97,7 @@ def _recovery_steps(events: list[RunEvent]) -> list[str]:
 
 
 def _work_item_counts(items: list[WorkItem]) -> dict[str, int]:
-    counts: dict[str, int] = {"queued": 0, "running": 0, "done": 0, "failed": 0, "canceled": 0}
+    counts: dict[str, int] = {"queued": 0, "running": 0, "done": 0, "skipped": 0, "failed": 0, "canceled": 0}
     for item in items:
         if item.status == "QUEUED":
             counts["queued"] += 1
@@ -105,6 +105,8 @@ def _work_item_counts(items: list[WorkItem]) -> dict[str, int]:
             counts["running"] += 1
         elif item.status == "DONE":
             counts["done"] += 1
+        elif item.status == "SKIPPED":
+            counts["skipped"] += 1
         elif item.status == "FAILED":
             counts["failed"] += 1
         elif item.status == "CANCELED":

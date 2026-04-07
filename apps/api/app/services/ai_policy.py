@@ -262,7 +262,8 @@ class AIJobManager:
             "tier_none": 0,
         }[selected_tier]
 
-        requires_human_review = (
+        review_only_job = request.role == "reviewer" and request.task_type == "review"
+        requires_human_review = (not review_only_job) and (
             request.risk_level == "high"
             or contains_sensitive_paths(request.changed_files)
             or len(request.changed_files) > settings.ai_human_review_file_threshold

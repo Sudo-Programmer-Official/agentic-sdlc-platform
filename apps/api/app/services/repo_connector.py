@@ -424,6 +424,42 @@ def prepare_workspace_repo(
     _run_git(["clean", "-fd"], cwd=repo_dir)
 
 
+def checkout_workspace_branch_from_head(
+    *,
+    repo_dir: Path,
+    provider: str,
+    repo_url: str,
+    branch_name: str,
+    repo_full_name: str | None = None,
+    installation_id: int | None = None,
+) -> None:
+    access = resolve_repo_runtime_access(
+        provider=provider,
+        repo_url=repo_url,
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
+    )
+    repo_dir = repo_dir.resolve()
+    target_branch = branch_name.strip()
+    if not target_branch:
+        raise ValueError("branch_name is required")
+
+    try:
+        _run_git(["remote", "set-url", "origin", access.transport_url], cwd=repo_dir)
+    except RuntimeError:
+        _run_git(["remote", "add", "origin", access.transport_url], cwd=repo_dir)
+
+    _run_git(["fetch", "origin", "--prune"], cwd=repo_dir, git_config=access.git_config)
+
+    if remote_branch_exists(repo_dir, target_branch):
+        _run_git(["checkout", "-B", target_branch, f"origin/{target_branch}"], cwd=repo_dir)
+    else:
+        _run_git(["checkout", "-B", target_branch, "HEAD"], cwd=repo_dir)
+
+    _run_git(["reset", "--hard", "HEAD"], cwd=repo_dir)
+    _run_git(["clean", "-fd"], cwd=repo_dir)
+
+
 def repo_has_changes(repo_dir: Path) -> bool:
     return bool(_run_git(["status", "--porcelain"], cwd=repo_dir))
 

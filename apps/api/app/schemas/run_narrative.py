@@ -119,6 +119,13 @@ class RunReflectionItem(BaseModel):
 
 class RunWorkingContextSummary(BaseModel):
     goal: str | None = None
+    feedback_mode: str | None = None
+    feedback_source: str | None = None
+    feedback_text: str | None = None
+    parent_run_id: str | None = None
+    target_files: list[str] = Field(default_factory=list)
+    edit_scope_mode: str | None = None
+    edit_scope_max_files: int | None = None
     current_step: str | None = None
     next_best_step: str | None = None
     files_touched: list[str] = Field(default_factory=list)

@@ -26,7 +26,9 @@ export function createEmptyRepoMap(message = "No local repo workspace is availab
   };
 }
 
-export function createEmptyProjectPreviewProfile(message = "Preview profile not configured yet.") {
+export function createEmptyProjectPreviewProfile(
+  message = "Using default static-web-monorepo preview contract. Edit it if this project needs a different architecture."
+) {
   return {
     configured: false,
     message,
@@ -37,7 +39,7 @@ export function createEmptyProjectPreviewProfile(message = "Preview profile not 
     compose_file: null,
     frontend_build_command: null,
     backend_build_command: null,
-    frontend_start_command: null,
+    frontend_start_command: "python3 -m http.server $PORT --bind $HOST",
     backend_start_command: null,
     frontend_healthcheck_path: "/",
     backend_healthcheck_path: "/",
@@ -430,6 +432,9 @@ export async function createRunStrategies(
     executor?: string;
     start_now?: boolean;
     limit?: number;
+    mode?: string;
+    feedback_text?: string;
+    feedback_source?: string;
   } = {}
 ) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/strategies`, {
@@ -443,6 +448,30 @@ export async function createRunStrategies(
 export async function fetchRunStrategies(runId: string) {
   const resp = await fetch(`${API_BASE}/runs/${runId}/strategies`);
   return parseApiResponse(resp);
+}
+
+export async function reportRunIssue(
+  runId: string,
+  payload: {
+    issue: string;
+    files?: string[];
+    goal?: string;
+    executor?: string;
+    start_now?: boolean;
+    feedback_source?: string;
+  }
+) {
+  return createRunStrategies(runId, {
+    goal: payload.goal,
+    error: payload.issue,
+    files: payload.files || [],
+    executor: payload.executor,
+    start_now: payload.start_now,
+    limit: 1,
+    mode: "feedback",
+    feedback_text: payload.issue,
+    feedback_source: payload.feedback_source || "user",
+  });
 }
 
 export async function fetchRunTimeline(runId: string) {

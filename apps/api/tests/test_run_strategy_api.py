@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Artifact, Project, Run, RunEvent, WorkItem
+from app.db.models import Artifact, Project, Run, RunEvent, RunSummary, WorkItem
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -117,6 +117,85 @@ async def test_run_strategy_group_creates_candidate_forks(db_session):
     assert all((run.summary or {}).get("strategy_group_id") == data["group_id"] for run in forked)
     assert all((run.summary or {}).get("strategy_source_run_id") == str(source_run.id) for run in forked)
     assert all(run.status == "QUEUED" for run in forked)
+
+
+@pytest.mark.anyio
+async def test_run_strategy_group_persists_feedback_metadata(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Feedback strategy project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/portfolio",
+        summary={"goal": "Build portfolio landing page"},
+    )
+    session.add(source_run)
+    await session.flush()
+    session.add(
+        RunSummary(
+            run_id=source_run.id,
+            tenant_id=tenant_id,
+            project_id=project.id,
+            goal_text="Build portfolio landing page",
+            status="COMPLETED",
+            executor="codex",
+            branch_name="run/portfolio",
+            workspace_status="SEEDED",
+            changed_files=["index.html", "styles.css", "test_index_html.py"],
+            artifact_types=[],
+            recovery_count=0,
+            artifact_count=0,
+        )
+    )
+    await session.commit()
+    await session.refresh(source_run)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/runs/{source_run.id}/strategies",
+            json={
+                "goal": "Build portfolio landing page",
+                "error": "Projects section is missing on the homepage preview.",
+                "files": ["index.html", "styles.css"],
+                "start_now": False,
+                "limit": 1,
+                "mode": "feedback",
+                "feedback_text": "Projects section is missing on the homepage preview.",
+                "feedback_source": "user",
+            },
+        )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert len(data["candidates"]) == 1
+    assert data["candidates"][0]["strategy_type"] == "minimal_patch"
+
+    forked_run = await session.scalar(select(Run).where(Run.project_id == project.id, Run.id != source_run.id))
+    assert forked_run is not None
+    assert forked_run.summary["strategy_mode"] == "feedback"
+    assert forked_run.summary["feedback_text"] == "Projects section is missing on the homepage preview."
+    assert forked_run.summary["feedback_source"] == "user"
+    assert forked_run.summary["strategy_error"] == "Projects section is missing on the homepage preview."
+    assert forked_run.summary["strategy_files"] == ["index.html", "styles.css"]
+    assert forked_run.summary["target_files"] == ["index.html", "styles.css"]
+    assert forked_run.summary["target_reasons"]["index.html"][:2] == [
+        "explicit_request",
+        "changed_in_source_run",
+    ]
+    assert forked_run.summary["target_reasons"]["styles.css"][:2] == [
+        "explicit_request",
+        "changed_in_source_run",
+    ]
+    assert forked_run.summary["edit_budget"] == {
+        "mode": "minimal_patch",
+        "max_files": 2,
+        "hard_max_files": 4,
+    }
 
 
 @pytest.mark.anyio

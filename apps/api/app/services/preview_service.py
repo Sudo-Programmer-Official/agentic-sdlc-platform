@@ -26,6 +26,7 @@ from app.services.workspace_commands import run_workspace_command_async
 
 
 DEFAULT_PREVIEW_STATUS = "NOT_CONFIGURED"
+DEFAULT_STATIC_START_COMMAND = "python3 -m http.server $PORT --bind $HOST"
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,59 @@ class _PreviewProcess:
     log_path: str
     url: str
     port: int
+
+
+@dataclass(frozen=True)
+class ResolvedPreviewProfile:
+    enabled: bool = True
+    mode: str = "local"
+    frontend_root: str | None = None
+    backend_root: str | None = None
+    compose_file: str | None = None
+    frontend_build_command: str | None = None
+    backend_build_command: str | None = None
+    frontend_start_command: str | None = None
+    backend_start_command: str | None = None
+    frontend_healthcheck_path: str | None = "/"
+    backend_healthcheck_path: str | None = "/"
+    frontend_port: int | None = None
+    backend_port: int | None = None
+    env_overrides: dict[str, str] | None = None
+    ttl_hours: int = 24
+    max_previews_per_project: int | None = None
+    created_by: str | None = None
+
+
+def build_default_preview_profile() -> ResolvedPreviewProfile:
+    return ResolvedPreviewProfile(
+        enabled=True,
+        mode="local",
+        frontend_start_command=DEFAULT_STATIC_START_COMMAND,
+        frontend_healthcheck_path="/",
+        ttl_hours=get_settings().preview_default_ttl_hours,
+        created_by="system:default-static-web-monorepo",
+    )
+
+
+def resolve_preview_profile(
+    profile: ProjectPreviewProfile | None,
+    *,
+    repository_connected: bool,
+) -> ProjectPreviewProfile | ResolvedPreviewProfile | None:
+    if profile is not None:
+        return profile
+    if repository_connected:
+        return build_default_preview_profile()
+    return None
+
+
+def preview_profile_available(
+    profile: ProjectPreviewProfile | None,
+    *,
+    repository_connected: bool,
+) -> bool:
+    resolved = resolve_preview_profile(profile, repository_connected=repository_connected)
+    return bool(resolved and resolved.enabled)
 
 
 def _now() -> datetime:
@@ -92,6 +146,32 @@ def _root_path(repo_root: Path, configured: str | None) -> Path:
     if not resolved.exists():
         raise ValueError(f"Preview root does not exist: {configured}")
     return resolved
+
+
+def _uses_static_frontend_contract(profile: ProjectPreviewProfile | ResolvedPreviewProfile | None) -> bool:
+    if profile is None:
+        return False
+    return (profile.frontend_start_command or "").strip() == DEFAULT_STATIC_START_COMMAND
+
+
+def _validate_static_frontend_contract(
+    frontend_root: Path,
+    profile: ProjectPreviewProfile | ResolvedPreviewProfile | None,
+) -> None:
+    if not _uses_static_frontend_contract(profile):
+        return
+    entry_file = frontend_root / "index.html"
+    if not entry_file.exists():
+        raise ValueError("Static preview contract requires index.html at the frontend root")
+    try:
+        content = entry_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError("Static preview contract could not read index.html") from exc
+    lower = content.lower()
+    if "<body" not in lower:
+        raise ValueError("Static preview contract requires index.html to contain a <body> element")
+    if "<html" not in lower and "<!doctype html" not in lower:
+        raise ValueError("Static preview contract requires index.html to contain an <html> element or doctype")
 
 
 def _pick_port(preferred: int | None = None) -> int:
@@ -250,7 +330,7 @@ async def cleanup_expired_previews(session: AsyncSession, *, tenant_id: uuid.UUI
 def _build_preview_response(
     run: Run,
     *,
-    profile: ProjectPreviewProfile | None,
+    profile: ProjectPreviewProfile | ResolvedPreviewProfile | None,
     repository_connected: bool,
 ) -> RunPreviewOut:
     preview = _preview_summary(run)
@@ -291,6 +371,7 @@ async def get_run_preview(
     repo = await session.scalar(
         select(ProjectRepository).where(ProjectRepository.project_id == run.project_id, ProjectRepository.tenant_id == tenant_id)
     )
+    effective_profile = resolve_preview_profile(profile, repository_connected=repo is not None)
     preview = _preview_summary(run)
     now = _now()
     changed = False
@@ -317,7 +398,7 @@ async def get_run_preview(
             _write_preview_summary(run, preview)
             session.add(run)
             await session.flush()
-    return _build_preview_response(run, profile=profile, repository_connected=repo is not None)
+    return _build_preview_response(run, profile=effective_profile, repository_connected=repo is not None)
 
 
 async def launch_run_preview(
@@ -332,16 +413,16 @@ async def launch_run_preview(
     if run is None:
         raise ValueError("Run not found")
     profile = await get_project_preview_profile(session, tenant_id=tenant_id, project_id=run.project_id)
-    if profile is None or not profile.enabled:
-        raise ValueError("Project preview profile is not configured")
-    if profile.compose_file and not (profile.frontend_start_command or profile.backend_start_command):
-        raise ValueError("Compose-only preview profiles are not supported in the local preview launcher yet")
-    if run.status != "COMPLETED":
-        raise ValueError("Run must be completed before preview launch")
-
     repo = await session.scalar(
         select(ProjectRepository).where(ProjectRepository.project_id == run.project_id, ProjectRepository.tenant_id == tenant_id)
     )
+    effective_profile = resolve_preview_profile(profile, repository_connected=repo is not None)
+    if effective_profile is None or not effective_profile.enabled:
+        raise ValueError("Project preview profile is not configured")
+    if effective_profile.compose_file and not (effective_profile.frontend_start_command or effective_profile.backend_start_command):
+        raise ValueError("Compose-only preview profiles are not supported in the local preview launcher yet")
+    if run.status != "COMPLETED":
+        raise ValueError("Run must be completed before preview launch")
     preview = _preview_summary(run)
     if reuse_if_healthy and preview.get("status") == "READY":
         expires_at = _coerce_datetime(preview.get("expires_at"))
@@ -356,11 +437,11 @@ async def launch_run_preview(
             _write_preview_summary(run, preview)
             session.add(run)
             await session.flush()
-            return _build_preview_response(run, profile=profile, repository_connected=repo is not None)
+            return _build_preview_response(run, profile=effective_profile, repository_connected=repo is not None)
 
     project_active = await _count_active_previews(session, tenant_id=tenant_id, project_id=run.project_id)
     global_active = await _count_active_previews(session, tenant_id=tenant_id)
-    max_project = profile.max_previews_per_project or get_settings().preview_max_per_project
+    max_project = effective_profile.max_previews_per_project or get_settings().preview_max_per_project
     max_global = get_settings().preview_max_global
     if project_active >= max_project:
         raise ValueError("Project preview limit reached")
@@ -373,10 +454,13 @@ async def launch_run_preview(
     logs_dir.mkdir(parents=True, exist_ok=True)
     preview_dir = workspace_root / "context"
     host = get_settings().preview_host
-    env_overrides = {str(key): str(value) for key, value in (profile.env_overrides or {}).items()}
-    ttl_hours = profile.ttl_hours or get_settings().preview_default_ttl_hours
+    env_overrides = {str(key): str(value) for key, value in (effective_profile.env_overrides or {}).items()}
+    ttl_hours = effective_profile.ttl_hours or get_settings().preview_default_ttl_hours
     launched_at = _now()
     expires_at = launched_at + timedelta(hours=ttl_hours)
+    frontend_root = _root_path(repo_root, effective_profile.frontend_root)
+    _validate_static_frontend_contract(frontend_root, effective_profile)
+    backend_root = _root_path(repo_root, effective_profile.backend_root)
 
     if preview:
         _stop_preview_processes(preview)
@@ -398,12 +482,20 @@ async def launch_run_preview(
         if result.status != "SUCCEEDED":
             raise ValueError(result.stderr or result.stdout or f"{label} failed")
 
-    await _run_build_if_configured(profile.frontend_build_command, _root_path(repo_root, profile.frontend_root), "preview-frontend-build")
-    await _run_build_if_configured(profile.backend_build_command, _root_path(repo_root, profile.backend_root), "preview-backend-build")
+    await _run_build_if_configured(
+        effective_profile.frontend_build_command,
+        frontend_root,
+        "preview-frontend-build",
+    )
+    await _run_build_if_configured(
+        effective_profile.backend_build_command,
+        backend_root,
+        "preview-backend-build",
+    )
 
     try:
-        if profile.frontend_start_command:
-            port = _pick_port(profile.frontend_port)
+        if effective_profile.frontend_start_command:
+            port = _pick_port(effective_profile.frontend_port)
             env = {
                 **env_overrides,
                 "PORT": str(port),
@@ -413,8 +505,8 @@ async def launch_run_preview(
                 "BRANCH_NAME": run.branch_name or "",
             }
             process = _start_service_process(
-                command=profile.frontend_start_command,
-                cwd=_root_path(repo_root, profile.frontend_root),
+                command=effective_profile.frontend_start_command,
+                cwd=frontend_root,
                 env=env,
                 log_path=logs_dir / "frontend-preview.log",
                 host=host,
@@ -426,16 +518,16 @@ async def launch_run_preview(
                 "url": process.url,
                 "pid": process.pid,
                 "port": process.port,
-                "root": profile.frontend_root,
-                "start_command": profile.frontend_start_command,
-                "build_command": profile.frontend_build_command,
-                "healthcheck_path": profile.frontend_healthcheck_path or "/",
+                "root": effective_profile.frontend_root,
+                "start_command": effective_profile.frontend_start_command,
+                "build_command": effective_profile.frontend_build_command,
+                "healthcheck_path": effective_profile.frontend_healthcheck_path or "/",
                 "log_path": process.log_path,
                 "last_error": None,
             }
 
-        if profile.backend_start_command:
-            port = _pick_port(profile.backend_port)
+        if effective_profile.backend_start_command:
+            port = _pick_port(effective_profile.backend_port)
             env = {
                 **env_overrides,
                 "PORT": str(port),
@@ -445,8 +537,8 @@ async def launch_run_preview(
                 "BRANCH_NAME": run.branch_name or "",
             }
             process = _start_service_process(
-                command=profile.backend_start_command,
-                cwd=_root_path(repo_root, profile.backend_root),
+                command=effective_profile.backend_start_command,
+                cwd=backend_root,
                 env=env,
                 log_path=logs_dir / "backend-preview.log",
                 host=host,
@@ -458,10 +550,10 @@ async def launch_run_preview(
                 "url": process.url,
                 "pid": process.pid,
                 "port": process.port,
-                "root": profile.backend_root,
-                "start_command": profile.backend_start_command,
-                "build_command": profile.backend_build_command,
-                "healthcheck_path": profile.backend_healthcheck_path or "/",
+                "root": effective_profile.backend_root,
+                "start_command": effective_profile.backend_start_command,
+                "build_command": effective_profile.backend_build_command,
+                "healthcheck_path": effective_profile.backend_healthcheck_path or "/",
                 "log_path": process.log_path,
                 "last_error": None,
             }
@@ -494,7 +586,7 @@ async def launch_run_preview(
     preview_url = (frontend_service or backend_service or {}).get("url")
     preview_payload = {
         "status": "READY",
-        "mode": profile.mode,
+        "mode": effective_profile.mode,
         "preview_url": preview_url,
         "frontend": frontend_service,
         "backend": backend_service,
@@ -509,7 +601,7 @@ async def launch_run_preview(
     session.add(run)
     await session.flush()
     (preview_dir / "preview.json").write_text(json.dumps(preview_payload, indent=2), encoding="utf-8")
-    return _build_preview_response(run, profile=profile, repository_connected=repo is not None)
+    return _build_preview_response(run, profile=effective_profile, repository_connected=repo is not None)
 
 
 async def stop_run_preview(

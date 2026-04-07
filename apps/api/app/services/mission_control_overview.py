@@ -22,6 +22,7 @@ from app.schemas.mission_control import (
     MissionControlWorkIntakeItem,
 )
 from app.services.artifact_diff import parse_unified_diff, resolve_artifact_content
+from app.services.preview_service import preview_profile_available, resolve_preview_profile
 from app.services.run_memory import find_similar_runs
 from app.services.run_summary_builder import ensure_project_run_summaries
 
@@ -338,6 +339,7 @@ def _build_preview_panel(
     change_impact: MissionControlChangeImpact | None,
     run: Run | None,
 ) -> MissionControlPreviewAndPrs:
+    effective_profile = resolve_preview_profile(preview_profile, repository_connected=project_repo is not None)
     preview_summary = run.summary.get("preview") if run is not None and isinstance(run.summary, dict) else None
     if not isinstance(preview_summary, dict):
         preview_summary = {}
@@ -350,11 +352,11 @@ def _build_preview_panel(
     file_count = len(change_impact.files_changed) if change_impact and change_impact.patch_artifact else 0
     return MissionControlPreviewAndPrs(
         repository_connected=project_repo is not None,
-        profile_configured=preview_profile is not None and preview_profile.enabled,
+        profile_configured=preview_profile_available(preview_profile, repository_connected=project_repo is not None),
         provider=project_repo.provider if project_repo else None,
         repo_full_name=project_repo.repo_full_name if project_repo else None,
         branch_name=(summary.branch_name if summary else None) or (project_repo.default_branch if project_repo else None),
-        preview_mode=str(preview_summary.get("mode") or (preview_profile.mode if preview_profile else "local")),
+        preview_mode=str(preview_summary.get("mode") or (effective_profile.mode if effective_profile else "local")),
         preview_status=preview_status,
         preview_url=preview_url,
         frontend_url=frontend.get("url") if frontend else None,

@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -8,12 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.api.deps import TenantContext, get_tenant_context
 from app.api.v1 import persistence
 from app.db.base import Base
-from app.db.models import Project, Run
+from app.db.models import Project, ProjectRepository, Run
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
 from app.main import app
 from app.schemas.preview import RunPreviewOut, RunPreviewServiceRef
+from app.services import preview_service
 
 
 @pytest.fixture
@@ -170,3 +172,106 @@ async def test_run_preview_launch_maps_verification_error_to_conflict(db_session
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Run must be completed before preview launch"
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_uses_default_static_profile_for_repo_backed_run(db_session, monkeypatch, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Static preview default", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/static-site.git",
+            repo_full_name="acme/static-site",
+            default_branch="main",
+        )
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    (workspace_root / "context").mkdir(parents=True)
+    repo_root.mkdir(parents=True)
+    (repo_root / "index.html").write_text("<!doctype html><html><body>Preview</body></html>", encoding="utf-8")
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/static-preview",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(preview_service, "_pick_port", lambda _preferred=None: 3100)
+    monkeypatch.setattr(preview_service, "_service_healthcheck", lambda _url, _path=None: True)
+    monkeypatch.setattr(preview_service, "_terminate_process_group", lambda _pid=None: None)
+
+    def fake_start_service_process(**_kwargs):
+        return preview_service._PreviewProcess(
+            pid=12345,
+            log_path=str(Path(tmp_path) / "preview.log"),
+            url="http://127.0.0.1:3100",
+            port=3100,
+        )
+
+    monkeypatch.setattr(preview_service, "_start_service_process", fake_start_service_process)
+
+    preview = await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+
+    assert preview.status == "READY"
+    assert preview.preview_url == "http://127.0.0.1:3100"
+    assert preview.profile_configured is True
+    assert preview.repository_connected is True
+    assert preview.frontend is not None
+    assert preview.frontend.start_command == "python3 -m http.server $PORT --bind $HOST"
+    assert preview.frontend.healthcheck_path == "/"
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_rejects_invalid_static_entrypoint(db_session, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Broken static preview", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/static-site.git",
+            repo_full_name="acme/static-site",
+            default_branch="main",
+        )
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    (workspace_root / "context").mkdir(parents=True)
+    repo_root.mkdir(parents=True)
+    (repo_root / "index.html").write_text("<div>Broken preview entry</div>", encoding="utf-8")
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/static-preview",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    with pytest.raises(ValueError, match="Static preview contract requires index.html to contain a <body> element"):
+        await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)

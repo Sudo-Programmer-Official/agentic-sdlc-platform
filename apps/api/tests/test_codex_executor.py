@@ -1,4 +1,12 @@
-from app.runtime.codex_executor import _verification_from_action_scope
+from types import SimpleNamespace
+
+from app.runtime.codex_executor import (
+    _edit_budget_from_payload,
+    _is_static_frontend_scope,
+    _target_files_from_payload,
+    _verification_from_action_scope,
+    CodexExecutor,
+)
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
 
 
@@ -54,3 +62,62 @@ def test_verification_from_action_scope_keeps_confirmation_for_sensitive_paths()
     assert verification.scope_match is True
     assert verification.suggested_next_action == "Require operator confirmation before patch execution."
     assert [finding.code for finding in verification.findings] == ["scope_from_actions"]
+
+
+def test_target_files_from_payload_prefers_explicit_target_scope():
+    target_files = _target_files_from_payload(
+        {
+            "target_files": ["index.html", "styles.css"],
+            "files": ["README.md"],
+        }
+    )
+
+    assert target_files == ["index.html", "styles.css"]
+
+
+def test_target_files_from_payload_falls_back_to_expected_files():
+    target_files = _target_files_from_payload(
+        {
+            "expected_files": ["index.html"],
+        }
+    )
+
+    assert target_files == ["index.html"]
+
+
+def test_edit_budget_from_payload_uses_minimal_patch_limits():
+    edit_budget = _edit_budget_from_payload(
+        {
+            "edit_budget": {
+                "mode": "minimal_patch",
+                "max_files": 2,
+                "hard_max_files": 4,
+            }
+        }
+    )
+
+    assert edit_budget == {
+        "mode": "minimal_patch",
+        "file_budget": 2,
+        "hard_file_budget": 4,
+    }
+
+
+def test_static_frontend_scope_detects_html_css_only_targets():
+    assert _is_static_frontend_scope({"expected_files": ["index.html", "styles.css"]}) is True
+    assert _is_static_frontend_scope({"expected_files": ["index.html", "hero.py"]}) is False
+
+
+def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="WRITE_TESTS",
+        payload={"expected_files": ["index.html"]},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "Restrict edits to these files unless validation proves a neighboring file is required: index.html." in instructions
+    assert "This is a static frontend task." in instructions
+    assert "Do not introduce new third-party imports such as BeautifulSoup or bs4" in instructions
+    assert "html.parser" in instructions

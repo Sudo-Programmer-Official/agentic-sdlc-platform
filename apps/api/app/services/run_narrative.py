@@ -494,12 +494,26 @@ async def build_run_narrative(
     delivery_commit_sha = _summary_str(summary_payload, "pull_request_commit_sha") or _summary_str(
         summary_payload, "remote_branch_commit_sha"
     )
+    target_files = [
+        value.strip()
+        for value in (summary_payload.get("target_files") or [])
+        if isinstance(value, str) and value.strip()
+    ]
+    edit_budget = summary_payload.get("edit_budget") if isinstance(summary_payload.get("edit_budget"), dict) else {}
     pull_request_number = summary_payload.get("pull_request_number") if isinstance(summary_payload, dict) else None
     if isinstance(pull_request_number, str) and pull_request_number.isdigit():
         pull_request_number = int(pull_request_number)
 
     working_context = RunWorkingContextSummary(
         goal=goal,
+        feedback_mode=_summary_str(summary_payload, "strategy_mode"),
+        feedback_source=_summary_str(summary_payload, "feedback_source"),
+        feedback_text=_summary_str(summary_payload, "feedback_text"),
+        parent_run_id=_summary_str(summary_payload, "strategy_source_run_id")
+        or _summary_str(summary_payload, "forked_from_run_id"),
+        target_files=target_files,
+        edit_scope_mode=(edit_budget.get("mode") if isinstance(edit_budget.get("mode"), str) else None),
+        edit_scope_max_files=(edit_budget.get("max_files") if isinstance(edit_budget.get("max_files"), int) else None),
         current_step=current_step,
         next_best_step=_next_best_step(run, work_items, timeline_summary),
         files_touched=sorted(changed_files),

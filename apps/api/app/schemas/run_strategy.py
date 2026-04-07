@@ -13,6 +13,9 @@ class RunStrategyPlanRequest(BaseModel):
     executor: str | None = None
     start_now: bool = True
     limit: int = 3
+    mode: str | None = None
+    feedback_text: str | None = None
+    feedback_source: str | None = None
 
 
 class RunStrategyCandidate(BaseModel):

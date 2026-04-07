@@ -12,6 +12,8 @@ from app.db.session import SessionLocal
 from app.runtime.executor import TaskExecutor, TaskResult
 from app.runtime.context import RunContext
 from app.runtime.patch_guard import (
+    DEFAULT_MAX_PATCH_FILES,
+    HARD_MAX_PATCH_FILES,
     build_patch_guard_meta,
     derive_allowed_files,
     evaluate_patch_guard,
@@ -77,6 +79,56 @@ def _verification_from_action_scope(
     )
 
 
+def _target_files_from_payload(payload: dict[str, Any] | None) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    scoped = payload.get("target_files")
+    if isinstance(scoped, list):
+        values = scoped
+    elif isinstance(payload.get("files"), list):
+        values = payload.get("files")
+    elif isinstance(payload.get("expected_files"), list):
+        values = payload.get("expected_files")
+    else:
+        values = []
+    normalized: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            normalized.append(value.strip())
+    return list(dict.fromkeys(normalized))
+
+
+def _edit_budget_from_payload(payload: dict[str, Any] | None) -> dict[str, int | str | None]:
+    budget = payload.get("edit_budget") if isinstance(payload, dict) else None
+    mode = "minimal_patch"
+    file_budget = DEFAULT_MAX_PATCH_FILES
+    hard_file_budget = HARD_MAX_PATCH_FILES
+    if isinstance(budget, dict):
+        value = budget.get("mode")
+        if isinstance(value, str) and value.strip():
+            mode = value.strip()
+        value = budget.get("max_files")
+        if isinstance(value, int) and value > 0:
+            file_budget = value
+        value = budget.get("hard_max_files")
+        if isinstance(value, int) and value > 0:
+            hard_file_budget = value
+    hard_file_budget = max(file_budget, hard_file_budget)
+    return {
+        "mode": mode,
+        "file_budget": file_budget,
+        "hard_file_budget": hard_file_budget,
+    }
+
+
+def _is_static_frontend_scope(payload: dict[str, Any] | None) -> bool:
+    target_files = _target_files_from_payload(payload)
+    if not target_files:
+        return False
+    frontend_suffixes = {".html", ".css", ".js", ".mjs", ".cjs"}
+    return all(Path(path).suffix.lower() in frontend_suffixes for path in target_files)
+
+
 class CodexExecutor(TaskExecutor):
     name = "codex"
 
@@ -104,12 +156,16 @@ class CodexExecutor(TaskExecutor):
 
         context_bundle = self._build_context(repo, work_item)
         context_bundle.setdefault("meta", {})
+        target_files = _target_files_from_payload(work_item.payload)
         allowed_files = derive_allowed_files(
             work_item_id=str(work_item.id),
             work_item_type=work_item.type,
             payload=work_item.payload,
             plan_snapshot=context.plan_snapshot,
         )
+        if target_files:
+            allowed_files = list(dict.fromkeys(target_files + allowed_files))
+        edit_budget = _edit_budget_from_payload(work_item.payload)
         context_bundle["meta"]["workspace"] = {
             "workspace_root": context.workspace_root,
             "repo_path": context.repo_path,
@@ -138,7 +194,14 @@ class CodexExecutor(TaskExecutor):
                     if isinstance(step, dict)
                 ],
             }
-        context_bundle["meta"]["patch_guard"] = build_patch_guard_meta(context, allowed_files)
+        context_bundle["meta"]["patch_guard"] = build_patch_guard_meta(
+            context,
+            allowed_files,
+            file_budget=int(edit_budget["file_budget"]),
+            hard_file_budget=int(edit_budget["hard_file_budget"]),
+            scope_mode=str(edit_budget["mode"]) if edit_budget.get("mode") else None,
+            target_files=target_files,
+        )
         graph_context = await self._load_graph_context(work_item)
         if graph_context:
             context_bundle["graph_context"] = graph_context
@@ -361,7 +424,12 @@ class CodexExecutor(TaskExecutor):
                 "warnings": ["requires_confirmation"],
             }
 
-        patch_guard = evaluate_patch_guard(actions=plan.actions, allowed_files=allowed_files)
+        patch_guard = evaluate_patch_guard(
+            actions=plan.actions,
+            allowed_files=allowed_files,
+            file_budget=int(edit_budget["file_budget"]),
+            hard_file_budget=int(edit_budget["hard_file_budget"]),
+        )
         verification = await self._load_patch_verification(work_item, context)
         verification = _verification_from_action_scope(verification, patch_guard.touched_files)
         if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):
@@ -628,6 +696,9 @@ class CodexExecutor(TaskExecutor):
                 max_bytes -= len(v.encode())
 
         payload = work_item.payload or {}
+        target_files = _target_files_from_payload(payload)
+        if target_files:
+            add_paths(target_files)
 
         # 1) Diff artifact file paths (highest priority for fixes)
         diff_art = None
@@ -773,16 +844,40 @@ class CodexExecutor(TaskExecutor):
         return paths
 
     def _instructions_for(self, work_item: WorkItem) -> str:
+        payload = work_item.payload or {}
+        target_files = _target_files_from_payload(payload)
+        edit_budget = _edit_budget_from_payload(payload)
+        static_frontend_scope = _is_static_frontend_scope(payload)
         base = (
             "Produce JSON per schema. Prefer apply_patch with unified diff. "
             "Use write_file for new files or complete replacements. Keep changes minimal."
+        )
+        if target_files:
+            file_list = ", ".join(target_files[:4])
+            base += (
+                f" Restrict edits to these files unless validation proves a neighboring file is required: {file_list}. "
+                f"Keep the patch within {edit_budget['file_budget']} files and prefer a {edit_budget['mode']} strategy."
+            )
+        if static_frontend_scope:
+            base += (
+                " This is a static frontend task. Keep implementation inside the scoped HTML/CSS/JS files and "
+                "do not introduce Python helper modules or backend files unless the task explicitly asks for them."
+            )
+        test_dependency_guard = (
+            " Tests must rely on the Python standard library or dependencies that are already declared in repo "
+            "metadata such as requirements.txt, pyproject.toml, or package.json. Do not introduce new third-party "
+            "imports such as BeautifulSoup or bs4 unless you also update the declared dependencies and the runtime "
+            "is known to install them. For HTML validation, prefer html.parser or simple string assertions."
         )
         if work_item.type == "FIX_TEST_FAILURE":
             return (
                 base
                 + " You are fixing failing tests. Use the failing stack info and previous diff. "
                   "Make the smallest possible patch that addresses the failure; avoid broad refactors."
+                + test_dependency_guard
             )
+        if work_item.type in {"WRITE_TESTS", "RUN_TESTS"}:
+            return base + " Keep validation lightweight and directly tied to the requested behavior." + test_dependency_guard
         if "PLAN" in work_item.type:
             return base + " You may propose broader changes here, but still minimize diff where possible."
         return base
@@ -842,9 +937,10 @@ class CodexExecutor(TaskExecutor):
                 seen.add(cleaned)
                 ordered.append(cleaned)
 
+        payload = work_item.payload or {}
+        add(_target_files_from_payload(payload))
         add(list(context_bundle.get("files", {}).keys()))
         add(allowed_files)
-        payload = work_item.payload or {}
         for key in ("file", "filepath", "path", "target_file"):
             value = payload.get(key)
             if isinstance(value, str):

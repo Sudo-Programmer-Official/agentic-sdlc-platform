@@ -165,12 +165,22 @@ def evaluate_patch_guard(
     )
 
 
-def build_patch_guard_meta(context: RunContext, allowed_files: list[str]) -> dict[str, Any]:
+def build_patch_guard_meta(
+    context: RunContext,
+    allowed_files: list[str],
+    *,
+    file_budget: int = DEFAULT_MAX_PATCH_FILES,
+    hard_file_budget: int = HARD_MAX_PATCH_FILES,
+    scope_mode: str | None = None,
+    target_files: list[str] | None = None,
+) -> dict[str, Any]:
     plan_snapshot = context.plan_snapshot if isinstance(context.plan_snapshot, dict) else {}
     return {
         "allowed_files": allowed_files,
-        "file_budget": DEFAULT_MAX_PATCH_FILES,
-        "hard_file_budget": HARD_MAX_PATCH_FILES,
+        "target_files": target_files or [],
+        "scope_mode": scope_mode,
+        "file_budget": file_budget,
+        "hard_file_budget": hard_file_budget,
         "plan_risk_level": plan_snapshot.get("risk_level"),
         "validation_steps": plan_snapshot.get("validation_steps", []),
     }

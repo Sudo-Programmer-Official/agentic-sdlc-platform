@@ -675,7 +675,9 @@ const repoMapMetricDetail = computed(() => {
   }
   return repoMap.value?.message || "Start a repo-backed run to build the map.";
 });
-const previewProfileConfigured = computed(() => Boolean(previewProfile.value && previewProfile.value.configured !== false));
+const previewProfileConfigured = computed(
+  () => Boolean(previewProfile.value && (previewProfile.value.configured !== false || projectRepo.value))
+);
 const previewProfileSetupMessage = computed(
   () => previewProfile.value?.message || "Configure the project roots and launch commands once to enable preview delivery."
 );

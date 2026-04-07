@@ -456,16 +456,30 @@ const deliveryTone = computed<"neutral" | "success" | "warning" | "danger">(() =
 });
 
 const selectedRun = computed(() => runs.value.find((run) => run.id === selectedRunId.value) || runs.value[0] || null);
-
-const allNodes = computed(() => [
-  ...filteredInputNodes.value,
-  ...filteredPlanNodes.value,
-  ...filteredExecutionNodes.value,
-  ...filteredArtifactNodes.value,
-  ...filteredDeliveryNodes.value,
-]);
-
-const selectedNode = computed(() => allNodes.value.find((node) => node.key === selectedNodeKey.value) || null);
+const visibleRunsForFilter = computed(() => {
+  if (selectedFilter.value === "current-run" && selectedRunId.value) {
+    return runs.value.filter((run) => run.id === selectedRunId.value);
+  }
+  if (selectedFilter.value === "failures") {
+    return runs.value.filter((run) => ["FAILED", "CANCELED"].includes(run.status)).slice(0, 4);
+  }
+  return runs.value.slice(0, 4);
+});
+const visibleArtifactsForFilter = computed(() => {
+  if (selectedFilter.value === "current-run" && selectedRunId.value) {
+    return artifacts.value.filter((artifact) => String(artifact.run_id || "") === selectedRunId.value).slice(0, 6);
+  }
+  if (selectedFilter.value === "pr-path") {
+    return artifacts.value.filter((artifact) => /patch|diff|test/i.test(String(artifact.type || ""))).slice(0, 6);
+  }
+  if (selectedFilter.value === "failures") {
+    return artifacts.value.filter((artifact) => /error|log|fail/i.test(String(artifact.type || ""))).slice(0, 6);
+  }
+  return artifacts.value.slice(0, 6);
+});
+const selectedRunTimelineSteps = computed(() =>
+  inspectorTimeline.value?.run?.id === selectedRunId.value ? inspectorTimeline.value.steps || [] : []
+);
 
 const baseInputNodes = computed<AutomationNode[]>(() => {
   const docNodes = documents.value.slice(0, 5).map((doc) => ({
@@ -653,6 +667,16 @@ const filteredExecutionNodes = computed(() => applyNodeFilter(baseExecutionNodes
 const filteredArtifactNodes = computed(() => applyNodeFilter(baseArtifactNodes.value, "artifact"));
 const filteredDeliveryNodes = computed(() => applyNodeFilter(baseDeliveryNodes.value, "deliver"));
 
+const allNodes = computed(() => [
+  ...filteredInputNodes.value,
+  ...filteredPlanNodes.value,
+  ...filteredExecutionNodes.value,
+  ...filteredArtifactNodes.value,
+  ...filteredDeliveryNodes.value,
+]);
+
+const selectedNode = computed(() => allNodes.value.find((node) => node.key === selectedNodeKey.value) || null);
+
 const selectedNodeFacts = computed(() => {
   if (!selectedNode.value) return [];
   const raw = selectedNode.value.raw || {};
@@ -783,7 +807,6 @@ const inspectorActions = computed(() => {
   return actions;
 });
 
-const selectedRunTimelineSteps = computed(() => inspectorTimeline.value?.run?.id === selectedRunId.value ? inspectorTimeline.value.steps || [] : []);
 const activeFilterStyle = { background: "rgba(91, 156, 255, 0.16)", color: "var(--accent)", borderColor: "rgba(91, 156, 255, 0.35)" };
 
 watch(
@@ -994,29 +1017,6 @@ function filterPrPath(node: AutomationNode, lane: LaneId) {
   if (lane === "plan") return node.kind === "task" || node.kind === "strategy";
   return lane === "input";
 }
-
-const visibleRunsForFilter = computed(() => {
-  if (selectedFilter.value === "current-run" && selectedRunId.value) {
-    return runs.value.filter((run) => run.id === selectedRunId.value);
-  }
-  if (selectedFilter.value === "failures") {
-    return runs.value.filter((run) => ["FAILED", "CANCELED"].includes(run.status)).slice(0, 4);
-  }
-  return runs.value.slice(0, 4);
-});
-
-const visibleArtifactsForFilter = computed(() => {
-  if (selectedFilter.value === "current-run" && selectedRunId.value) {
-    return artifacts.value.filter((artifact) => String(artifact.run_id || "") === selectedRunId.value).slice(0, 6);
-  }
-  if (selectedFilter.value === "pr-path") {
-    return artifacts.value.filter((artifact) => /patch|diff|test/i.test(String(artifact.type || ""))).slice(0, 6);
-  }
-  if (selectedFilter.value === "failures") {
-    return artifacts.value.filter((artifact) => /error|log|fail/i.test(String(artifact.type || ""))).slice(0, 6);
-  }
-  return artifacts.value.slice(0, 6);
-});
 
 function runOptionLabel(run: any) {
   return `${shortId(run.id)} · ${run.status} · ${run.executor || "executor"}`;

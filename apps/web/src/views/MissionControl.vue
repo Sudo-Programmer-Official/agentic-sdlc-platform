@@ -38,6 +38,9 @@
           <el-button plain :disabled="!forkEnabled" @click="openStrategyDialog">
             Strategy Lab
           </el-button>
+          <el-button plain :disabled="!forkEnabled" @click="openImproveDialog()">
+            Report Issue / Improve
+          </el-button>
           <el-button plain :disabled="!compareEnabled" @click="openCompareDialog">
             Compare Runs
           </el-button>
@@ -99,6 +102,17 @@
       :closable="false"
       title="Mission Control overview is partially unavailable"
       :description="overviewError"
+      class="shadow-sm"
+    />
+
+    <el-alert
+      v-if="improveSuccessMessage"
+      type="success"
+      show-icon
+      closable
+      title="Improvement run created"
+      :description="improveSuccessMessage"
+      @close="improveSuccessMessage = ''"
       class="shadow-sm"
     />
 
@@ -482,6 +496,33 @@
             <strong>Latest warning:</strong>
             {{ runNarrative.working_context.latest_warning || "None recorded." }}
           </div>
+          <div v-if="runNarrative.working_context.feedback_text" class="mission-subcard p-3 text-sm">
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="text-xs uppercase tracking-wide text-slate-400">Feedback Fork</div>
+              <el-tag size="small" effect="light" type="warning">
+                {{ runNarrative.working_context.feedback_mode || "feedback" }}
+              </el-tag>
+            </div>
+            <div class="mt-2 text-slate-700">
+              {{ runNarrative.working_context.feedback_text }}
+            </div>
+            <div class="mt-2 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+              <div><strong>Parent run:</strong> {{ runNarrative.working_context.parent_run_id || "—" }}</div>
+              <div><strong>Source:</strong> {{ runNarrative.working_context.feedback_source || "—" }}</div>
+              <div class="sm:col-span-2">
+                <strong>Target files:</strong>
+                {{ runNarrative.working_context.target_files?.join(", ") || "—" }}
+              </div>
+              <div>
+                <strong>Edit scope:</strong>
+                {{ runNarrative.working_context.edit_scope_mode || "—" }}
+              </div>
+              <div>
+                <strong>Max files:</strong>
+                {{ runNarrative.working_context.edit_scope_max_files ?? "—" }}
+              </div>
+            </div>
+          </div>
           <div class="text-sm text-slate-600">
             <strong>API runtime auth:</strong>
             {{ formatRuntimeGitAuthSummary(runNarrative.working_context) }}
@@ -846,6 +887,14 @@
               @click="openCreatePrDialog(previewsAndPrs.patch_artifact)"
             >
               Open PR Flow
+            </el-button>
+            <el-button
+              plain
+              size="small"
+              :disabled="!forkEnabled"
+              @click="openImproveDialog()"
+            >
+              Report Issue / Improve
             </el-button>
           </div>
         </div>
@@ -1444,6 +1493,76 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="improveDialogOpen" title="Report Issue / Improve" width="720px">
+      <div class="space-y-4">
+        <div class="text-sm text-slate-600">
+          Describe what you noticed in preview, QA, or review. Mission Control will fork from the latest run, reuse its workspace, and launch one focused improvement run.
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div class="mission-subcard p-3 text-sm">
+            <div class="text-xs uppercase tracking-wide text-slate-400">Source Run</div>
+            <div class="mt-1 font-mono text-slate-900">{{ latestRun?.id || "—" }}</div>
+            <div class="mt-1 text-xs text-slate-500">Executor {{ latestRun?.executor || "—" }}</div>
+          </div>
+          <div class="mission-subcard p-3 text-sm">
+            <div class="text-xs uppercase tracking-wide text-slate-400">Workspace Reuse</div>
+            <div class="mt-1 text-slate-900">{{ latestRun?.workspace_status || "PENDING" }}</div>
+            <div class="mt-1 text-xs text-slate-500">Forks the latest seeded repo state instead of restarting from scratch.</div>
+          </div>
+        </div>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">Issue / Improvement Request</span>
+          <textarea
+            v-model="improveIssueText"
+            rows="4"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Projects section is missing below the hero on mobile preview."
+          />
+        </label>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Files (optional)</span>
+            <input
+              v-model="improveFilesInput"
+              type="text"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              placeholder="index.html, styles.css"
+            />
+          </label>
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Executor</span>
+            <select
+              v-model="improveExecutor"
+              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              <option value="">Use source executor</option>
+              <option v-for="option in forkExecutorOptions" :key="option" :value="option">
+                {{ option }}
+              </option>
+            </select>
+          </label>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-slate-700">
+          <input v-model="improveStartNow" type="checkbox" class="rounded border-slate-300" />
+          Start the improvement run immediately
+        </label>
+        <div v-if="improveError" class="text-sm text-rose-600">{{ improveError }}</div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <el-button :disabled="improveLoading" @click="improveDialogOpen = false">Cancel</el-button>
+          <el-button
+            type="primary"
+            :loading="improveLoading"
+            :disabled="!improveReady"
+            @click="submitImproveRun"
+          >
+            Create Improvement Run
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="strategyDialogOpen" title="Strategy Lab" width="760px">
       <div class="space-y-4">
         <div class="text-sm text-slate-600">
@@ -1757,6 +1876,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 
 import AgentPanel from "../components/AgentPanel.vue";
 import AppIcon from "../components/AppIcon.vue";
@@ -1793,6 +1913,7 @@ import {
   listRunEvents,
   listRuns,
   listWorkItems,
+  reportRunIssue,
   updateRunStatus,
 } from "../api/lifecycle";
 import { updateProjectContext } from "../state/projectContext";
@@ -1873,6 +1994,14 @@ const strategyFilesInput = ref("");
 const strategyStartNow = ref(true);
 const strategyLimit = ref(3);
 const strategyExecutor = ref("");
+const improveDialogOpen = ref(false);
+const improveLoading = ref(false);
+const improveError = ref("");
+const improveSuccessMessage = ref("");
+const improveIssueText = ref("");
+const improveFilesInput = ref("");
+const improveStartNow = ref(true);
+const improveExecutor = ref("");
 const runMemoryLoading = ref(false);
 const runMemoryError = ref("");
 const runMemoryResult = ref<any | null>(null);
@@ -1911,6 +2040,7 @@ const compareRunOptions = computed(() =>
     label: runOptionLabel(run),
   }))
 );
+const improveReady = computed(() => Boolean(latestRun.value?.id && improveIssueText.value.trim()));
 const similarRunMatches = computed(() =>
   (runMemoryResult.value?.matches || []).filter((match: any) => match.run_id !== latestRun.value?.id)
 );
@@ -2244,21 +2374,29 @@ function resetState() {
   strategyGoal.value = "";
   strategyErrorText.value = "";
   strategyFilesInput.value = "";
-    strategyStartNow.value = true;
-    strategyLimit.value = 3;
-    strategyExecutor.value = "";
-    runMemoryLoading.value = false;
-    runMemoryError.value = "";
+  strategyStartNow.value = true;
+  strategyLimit.value = 3;
+  strategyExecutor.value = "";
+  improveDialogOpen.value = false;
+  improveLoading.value = false;
+  improveError.value = "";
+  improveSuccessMessage.value = "";
+  improveIssueText.value = "";
+  improveFilesInput.value = "";
+  improveStartNow.value = true;
+  improveExecutor.value = "";
+  runMemoryLoading.value = false;
+  runMemoryError.value = "";
   runMemoryResult.value = null;
   intakeRunLoadingId.value = "";
   replayDialogOpen.value = false;
-    replayLoading.value = false;
-    replayError.value = "";
-    replayResult.value = null;
-    replayRunId.value = "";
-    runNarrativeLoading.value = false;
-    runNarrativeError.value = "";
-    runNarrative.value = null;
+  replayLoading.value = false;
+  replayError.value = "";
+  replayResult.value = null;
+  replayRunId.value = "";
+  runNarrativeLoading.value = false;
+  runNarrativeError.value = "";
+  runNarrative.value = null;
 }
 
 function primeContext() {
@@ -2658,11 +2796,66 @@ async function openStrategyDialog() {
   }
 }
 
-function parsedStrategyFiles() {
-  return strategyFilesInput.value
+function defaultImproveGoal() {
+  return (
+    latestRun.value?.summary?.goal ||
+    latestRun.value?.summary?.strategy_goal ||
+    `Improve run ${latestRun.value?.id || ""}`
+  );
+}
+
+function parseCommaSeparatedList(value: string) {
+  return value
     .split(",")
-    .map((value) => value.trim())
+    .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function openImproveDialog(issueText = "", files: string[] = []) {
+  if (!latestRun.value?.id) return;
+  improveDialogOpen.value = true;
+  improveLoading.value = false;
+  improveError.value = "";
+  improveIssueText.value = issueText;
+  improveFilesInput.value = files.join(", ");
+  improveStartNow.value = true;
+  improveExecutor.value = "";
+}
+
+function parsedStrategyFiles() {
+  return parseCommaSeparatedList(strategyFilesInput.value);
+}
+
+function parsedImproveFiles() {
+  return parseCommaSeparatedList(improveFilesInput.value);
+}
+
+async function submitImproveRun() {
+  if (!latestRun.value?.id || !improveIssueText.value.trim()) return;
+  improveLoading.value = true;
+  improveError.value = "";
+  improveSuccessMessage.value = "";
+  try {
+    const result = await reportRunIssue(latestRun.value.id, {
+      goal: defaultImproveGoal(),
+      issue: improveIssueText.value.trim(),
+      files: parsedImproveFiles(),
+      executor: improveExecutor.value || undefined,
+      start_now: improveStartNow.value,
+    });
+    strategyResult.value = result;
+    improveDialogOpen.value = false;
+    const createdRun = result?.candidates?.[0];
+    improveSuccessMessage.value = createdRun?.run_id
+      ? `Created improvement run ${createdRun.run_id} on ${createdRun.branch_name || "a forked branch"}.`
+      : "Created a focused improvement run from the latest workspace.";
+    await loadAll();
+    ElMessage.success("Improvement run created.");
+  } catch (err: any) {
+    improveError.value = err?.message || "Failed to create improvement run.";
+  } finally {
+    improveLoading.value = false;
+  }
 }
 
 async function submitStrategyPlan() {
@@ -2859,15 +3052,15 @@ async function rejectWorkbenchPatch() {
 }
 
 function requestPatchModification() {
-  strategyGoal.value =
-    latestRun.value?.summary?.goal ||
-    latestRun.value?.summary?.strategy_goal ||
-    "Refine the latest patch with a smaller, safer diff.";
-  strategyErrorText.value =
+  const files = Array.isArray(latestRun.value?.summary?.changed_files)
+    ? latestRun.value.summary.changed_files.filter((file: any) => typeof file === "string" && file.trim())
+    : [];
+  openImproveDialog(
     latestArtifactApproval.value?.comment ||
-    createPrApprovalError.value ||
-    "Review feedback requested changes on the latest patch.";
-  void openStrategyDialog();
+      createPrApprovalError.value ||
+      "Review feedback requested changes on the latest patch.",
+    files,
+  );
 }
 
 async function openWorkbenchPrFlow() {

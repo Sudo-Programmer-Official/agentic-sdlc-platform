@@ -14,6 +14,7 @@ from app.db.models import Run
 from app.runtime.context import RunContext
 from app.services.event_log import record_event
 from app.services.repo_connector import (
+    checkout_workspace_branch_from_head,
     get_project_repository,
     prepare_workspace_repo,
     resolve_repo_runtime_access,
@@ -182,6 +183,15 @@ async def ensure_run_workspace(
         repo_seeded = paths.repo.exists() and any(paths.repo.iterdir())
         if require_repo and not repo_seeded and source is not None:
             repo_seeded = _seed_repo(source, paths.repo)
+            if repo_seeded and repo_url and repo_provider and (paths.repo / ".git").exists():
+                checkout_workspace_branch_from_head(
+                    repo_dir=paths.repo,
+                    provider=repo_provider,
+                    repo_url=repo_url,
+                    repo_full_name=repo_full_name,
+                    installation_id=repo_installation_id,
+                    branch_name=paths.branch_name,
+                )
         if require_repo and not repo_seeded and repo_url:
             prepare_workspace_repo(
                 repo_dir=paths.repo,

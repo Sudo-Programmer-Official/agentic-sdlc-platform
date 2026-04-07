@@ -74,6 +74,17 @@ def _changed_files_from_diff(diff: str) -> set[str]:
     return changed
 
 
+def _diff_summary(changed_files: list[str]) -> str | None:
+    normalized = [path for path in changed_files if isinstance(path, str) and path.strip()]
+    if not normalized:
+        return None
+    if len(normalized) == 1:
+        return f"Updated {normalized[0]}"
+    if len(normalized) == 2:
+        return f"Updated {normalized[0]} and {normalized[1]}"
+    return f"Updated {normalized[0]}, {normalized[1]}, and {len(normalized) - 2} more files"
+
+
 def _primary_error(run: Run, work_items: list[WorkItem]) -> str | None:
     ordered = sorted(
         [item for item in work_items if is_blocking_failure(item)],
@@ -147,6 +158,7 @@ async def upsert_run_summary(session: AsyncSession, run_id: uuid.UUID) -> RunSum
         diff = _artifact_content(run, artifact)
         if diff:
             changed_files.update(_changed_files_from_diff(diff))
+    diff_summary = _diff_summary(sorted(changed_files))
 
     pr_url, pr_number = _pull_request_meta(run, artifacts)
 
@@ -172,6 +184,16 @@ async def upsert_run_summary(session: AsyncSession, run_id: uuid.UUID) -> RunSum
     summary.pull_request_number = pr_number
     summary.run_created_at = run.created_at
     summary.finished_at = run.finished_at
+    summary_meta = dict(run.summary or {})
+    if diff_summary:
+        summary_meta["diff_summary"] = diff_summary
+    else:
+        summary_meta.pop("diff_summary", None)
+    if summary_meta != (run.summary or {}):
+        run.summary = summary_meta
+        session.add(run)
+        await session.flush()
+        await session.refresh(run, attribute_names=["updated_at"])
     summary.source_updated_at = run.updated_at
     await session.flush()
     return summary

@@ -300,6 +300,67 @@ async def test_run_narrative_includes_delivery_metadata_in_working_context(db_se
 
 
 @pytest.mark.anyio
+async def test_run_narrative_exposes_feedback_lineage_and_scope(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Feedback narrative", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    started = datetime.now(timezone.utc) - timedelta(minutes=1)
+    parent_run_id = str(uuid.uuid4())
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="RUNNING",
+        executor="codex",
+        branch_name="run/portfolio-feedback",
+        workspace_status="SEEDED",
+        started_at=started,
+        summary={
+            "goal": "Improve portfolio layout",
+            "strategy_mode": "feedback",
+            "feedback_source": "user",
+            "feedback_text": "Projects section is not visible on mobile.",
+            "strategy_source_run_id": parent_run_id,
+            "target_files": ["index.html", "styles.css"],
+            "edit_budget": {"mode": "minimal_patch", "max_files": 2, "hard_max_files": 4},
+        },
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="RUNNING",
+            priority=10,
+            executor="codex",
+            payload={"title": "Patch portfolio layout"},
+            result={},
+            started_at=started,
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/runs/{run.id}/narrative")
+
+    assert response.status_code == 200
+    data = response.json()
+    context = data["working_context"]
+    assert context["feedback_mode"] == "feedback"
+    assert context["feedback_source"] == "user"
+    assert context["feedback_text"] == "Projects section is not visible on mobile."
+    assert context["parent_run_id"] == parent_run_id
+    assert context["target_files"] == ["index.html", "styles.css"]
+    assert context["edit_scope_mode"] == "minimal_patch"
+    assert context["edit_scope_max_files"] == 2
+
+
+@pytest.mark.anyio
 async def test_run_narrative_treats_superseded_failures_and_skipped_validation_as_healthy(db_session):
     session, tenant_id = db_session
     project = Project(name="Smoke narrative", tenant_id=tenant_id)

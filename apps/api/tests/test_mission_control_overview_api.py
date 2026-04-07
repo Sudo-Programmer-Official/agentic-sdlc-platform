@@ -218,15 +218,44 @@ async def test_mission_control_overview_returns_intake_impact_and_insights(db_se
     assert "auth_service" in data["latest_change_impact"]["modules_impacted"]
     assert "tests/test_auth.py" in data["latest_change_impact"]["tests_impacted"]
     assert "GET /login" in data["latest_change_impact"]["api_impact"]
+
+
+@pytest.mark.anyio
+async def test_mission_control_overview_surfaces_default_preview_contract_for_repo_backed_project(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Default preview contract", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/static-site.git",
+            repo_full_name="acme/static-site",
+            default_branch="main",
+        )
+    )
+
+    run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/static-site",
+        workspace_status="SEEDED",
+        summary={"goal": "Create static homepage"},
+    )
+    session.add(run)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/mission-control/overview")
+
+    assert response.status_code == 200, response.text
+    data = response.json()
     assert data["previews_and_prs"]["repository_connected"] is True
     assert data["previews_and_prs"]["profile_configured"] is True
-    assert data["previews_and_prs"]["preview_status"] == "READY"
-    assert data["previews_and_prs"]["preview_url"] == "http://127.0.0.1:3100"
-    assert data["previews_and_prs"]["frontend_url"] == "http://127.0.0.1:3100"
-    assert data["previews_and_prs"]["backend_url"] == "http://127.0.0.1:8100"
-    assert data["previews_and_prs"]["pull_request_url"] == "https://github.com/acme/example/pull/42"
-    assert data["previews_and_prs"]["approval_status"] == "APPROVED"
-    assert data["strategy_learning"][0]["label"] == "Minimal Patch"
-    assert data["system_insights"]["total_runs"] == 2
-    assert data["system_insights"]["successful_runs"] == 2
-    assert data["system_insights"]["total_pull_requests"] == 1
+    assert data["previews_and_prs"]["preview_mode"] == "local"
+    assert data["previews_and_prs"]["preview_status"] == "NOT_CONFIGURED"

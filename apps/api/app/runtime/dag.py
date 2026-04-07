@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from typing import List
+from typing import Any, List
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +14,7 @@ log = logging.getLogger("app.runtime")
 PATH_HINT_PATTERN = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+[\w.-]+)(?![\w./-])")
 
 
-def _task_payload_from_summary(run_summary: dict | None) -> dict[str, str | list[str]]:
+def _task_payload_from_summary(run_summary: dict | None) -> dict[str, Any]:
     if not isinstance(run_summary, dict):
         return {}
     task_id = run_summary.get("task_id")
@@ -33,7 +33,21 @@ def _task_payload_from_summary(run_summary: dict | None) -> dict[str, str | list
     source = (run_summary.get("task_source") or "").strip()
     if source:
         payload["task_source"] = source
+    target_files = [
+        value.strip()
+        for value in (run_summary.get("target_files") or [])
+        if isinstance(value, str) and value.strip()
+    ]
+    if target_files:
+        normalized_target_files = list(dict.fromkeys(target_files))
+        payload["target_files"] = normalized_target_files
+        payload["files"] = normalized_target_files
+    edit_budget = run_summary.get("edit_budget")
+    if isinstance(edit_budget, dict):
+        payload["edit_budget"] = dict(edit_budget)
     expected_files = _expected_files_from_text(task_title, payload["goal"], description)
+    if target_files:
+        expected_files = list(dict.fromkeys(target_files + expected_files))
     if expected_files:
         payload["expected_files"] = expected_files
     return payload

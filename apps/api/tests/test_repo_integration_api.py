@@ -19,7 +19,7 @@ from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
 from app.main import app
-from app.services import pr_service, repo_connector, run_delivery, workspace_supervisor
+from app.services import pr_service, repo_connector, run_delivery, run_replay, workspace_supervisor
 
 
 def _git_env() -> dict[str, str]:
@@ -352,6 +352,74 @@ async def test_publish_run_branch_if_ready_pushes_clean_branch_without_new_commi
 
     show_ref = _run_git(["--git-dir", str(remote), "show-ref", "--verify", "refs/heads/run/publish-clean"])
     assert show_ref.endswith("refs/heads/run/publish-clean")
+
+
+@pytest.mark.anyio
+async def test_feedback_fork_materializes_branch_before_publish(db_session):
+    session, tenant_id, tmp_path = db_session
+    remote = _seed_remote_repo(tmp_path)
+
+    source_workspace_root = tmp_path / "workspaces" / "proj" / "source-run"
+    source_repo_path = source_workspace_root / "repo"
+    _run_git(["clone", str(remote), str(source_repo_path)])
+    _run_git(["checkout", "-b", "run/9054455f"], cwd=source_repo_path)
+    (source_repo_path / "index.html").write_text("<!doctype html><html><body>base</body></html>\n", encoding="utf-8")
+    _run_git(["add", "index.html"], cwd=source_repo_path)
+    _run_git(["commit", "-m", "base run"], cwd=source_repo_path)
+    _run_git(["push", "-u", "origin", "run/9054455f"], cwd=source_repo_path)
+
+    project = Project(name="Feedback fork project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url=str(remote),
+            repo_full_name="example/repo",
+            default_branch="main",
+        )
+    )
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(source_workspace_root),
+        repo_path=str(source_repo_path),
+        branch_name="run/9054455f",
+        workspace_status="SEEDED",
+        summary={"goal": "Base portfolio run"},
+    )
+    session.add(source_run)
+    await session.commit()
+    await session.refresh(source_run)
+
+    forked_run = await run_replay.fork_run(
+        session,
+        source_run=source_run,
+        executor="codex",
+        branch_name="run/9054455f-minimal-patch",
+        summary_overrides={"feedback_text": "Move footer to bottom of viewport"},
+        start_now=False,
+    )
+
+    forked_repo_path = Path(forked_run.repo_path)
+    assert _run_git(["branch", "--show-current"], cwd=forked_repo_path) == "run/9054455f-minimal-patch"
+
+    (forked_repo_path / "index.html").write_text(
+        "<!doctype html><html><body><footer>moved</footer></body></html>\n",
+        encoding="utf-8",
+    )
+    result = await run_delivery.publish_run_branch_if_ready(session, run=forked_run)
+
+    assert result is not None
+    assert result["branch_name"] == "run/9054455f-minimal-patch"
+    show_ref = _run_git(
+        ["--git-dir", str(remote), "show-ref", "--verify", "refs/heads/run/9054455f-minimal-patch"]
+    )
+    assert show_ref.endswith("refs/heads/run/9054455f-minimal-patch")
 
 
 @pytest.mark.anyio

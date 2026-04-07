@@ -85,6 +85,7 @@ class RunSummary(BaseModel):
     recovery_count: int = 0
     artifact_count: int = 0
     files_changed: List[str] = Field(default_factory=list)
+    diff_summary: Optional[str] = None
     primary_error: Optional[str] = None
     approval_status: Optional[str] = None
     pull_request_url: Optional[str] = None

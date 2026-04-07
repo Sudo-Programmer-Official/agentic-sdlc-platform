@@ -1427,6 +1427,7 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
             recovery_count=latest_summary.recovery_count if latest_summary is not None else 0,
             artifact_count=latest_summary.artifact_count if latest_summary is not None else 0,
             files_changed=list(latest_summary.changed_files) if latest_summary is not None else [],
+            diff_summary=_delivery_summary_value(run_summary_meta, "diff_summary"),
             primary_error=latest_summary.primary_error if latest_summary is not None else latest_run_row.workspace_error,
             approval_status=latest_summary.approval_status if latest_summary is not None else None,
             pull_request_url=latest_summary.pr_url if latest_summary is not None else _delivery_summary_value(run_summary_meta, "pull_request_url"),

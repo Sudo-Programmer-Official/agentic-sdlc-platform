@@ -134,6 +134,7 @@ async def test_public_project_summary_exposes_latest_delivery_state(db_session):
     assert latest_run["workspace_status"] == "SEEDED"
     assert latest_run["artifact_count"] == 1
     assert latest_run["files_changed"] == ["docs/delivery.md"]
+    assert latest_run["diff_summary"] == "Updated docs/delivery.md"
     assert latest_run["pull_request_url"] == "https://github.com/acme/example/pull/42"
     assert latest_run["pull_request_number"] == 42
     assert latest_run["delivery_pushed"] is True

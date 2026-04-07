@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import uuid
+from pathlib import PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +17,9 @@ from app.schemas.run_strategy import (
 from app.services.run_replay import fork_run
 from app.services.run_summary_builder import ensure_project_run_summaries
 from app.services.strategy_planner import plan_run_strategies
+
+_MAX_TARGET_FILES = 2
+_TEST_PATH_PATTERN = re.compile(r"(^|/)(tests?/|test_|.+_test\.)")
 
 
 def _summary_text(run: Run, key: str) -> str | None:
@@ -54,6 +59,122 @@ def _strategy_branch_name(source_run: Run, strategy_type: str, override: str | N
     base = (source_run.branch_name or f"run/{str(source_run.id)[:8]}").rstrip("/")
     suffix = strategy_type.replace("_", "-")
     return f"{base}-{suffix}"
+
+
+def _normalize_paths(values: list[str] | None) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        candidate = value.replace("\\", "/").strip().strip("`'\"")
+        while candidate.startswith("./"):
+            candidate = candidate[2:]
+        if candidate:
+            normalized.append(str(PurePosixPath(candidate)))
+    return list(dict.fromkeys(normalized))
+
+
+def _feedback_terms(*values: str | None) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        tokens.update(
+            token
+            for token in re.findall(r"[a-z0-9]+", value.lower())
+            if len(token) >= 3
+        )
+    return tokens
+
+
+def _select_target_files(
+    *,
+    explicit_files: list[str],
+    changed_files: list[str],
+    feedback_text: str | None,
+) -> tuple[list[str], dict[str, list[str]], dict[str, int | str]]:
+    explicit = _normalize_paths(explicit_files)
+    changed = _normalize_paths(changed_files)
+    candidates = list(dict.fromkeys(explicit + changed))
+    if not candidates:
+        return [], {}, {}
+
+    feedback_terms = _feedback_terms(feedback_text)
+    mentions_test = any(token in {"test", "tests", "pytest"} for token in feedback_terms)
+    scored: list[tuple[int, int, str, list[str]]] = []
+    for index, path in enumerate(candidates):
+        score = 0
+        reasons: list[str] = []
+        lower_path = path.lower()
+        basename = PurePosixPath(lower_path).name
+
+        if path in explicit:
+            score += 6
+            reasons.append("explicit_request")
+        if path in changed:
+            score += 5
+            reasons.append("changed_in_source_run")
+
+        matched_terms = sorted(term for term in feedback_terms if term in lower_path)
+        if matched_terms:
+            score += min(len(matched_terms), 3)
+            reasons.extend(f"keyword_match:{term}" for term in matched_terms[:3])
+
+        if not mentions_test and _TEST_PATH_PATTERN.search(lower_path):
+            score -= 2
+            reasons.append("test_file_penalty")
+        elif mentions_test and _TEST_PATH_PATTERN.search(lower_path):
+            score += 2
+            reasons.append("feedback_mentions_tests")
+
+        if lower_path.endswith((".html", ".css", ".js")) and any(
+            token in feedback_terms
+            for token in {"preview", "layout", "mobile", "responsive", "header", "footer", "section", "page", "homepage"}
+        ):
+            score += 1
+            reasons.append("preview_surface_match")
+
+        scored.append((score, -index, path, reasons))
+
+    scored.sort(reverse=True)
+    selected = [path for score, _order, path, _reasons in scored if score > 0][: _MAX_TARGET_FILES]
+    if not selected:
+        selected = candidates[: _MAX_TARGET_FILES]
+
+    reason_map = {
+        path: reasons
+        for _score, _order, path, reasons in scored
+        if path in selected
+    }
+    max_files = max(1, min(len(selected), _MAX_TARGET_FILES))
+    edit_budget: dict[str, int | str] = {
+        "mode": "minimal_patch",
+        "max_files": max_files,
+        "hard_max_files": max(4, max_files + 2),
+    }
+    return selected, reason_map, edit_budget
+
+
+async def _source_changed_files(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    source_run: Run,
+) -> list[str]:
+    summary = await session.scalar(select(RunSummary).where(RunSummary.run_id == source_run.id))
+    if summary is None:
+        await ensure_project_run_summaries(
+            session,
+            tenant_id=tenant_id,
+            project_id=source_run.project_id,
+            limit=10,
+        )
+        summary = await session.scalar(select(RunSummary).where(RunSummary.run_id == source_run.id))
+    if summary is None or not isinstance(summary.changed_files, list):
+        return []
+    return [value for value in summary.changed_files if isinstance(value, str)]
 
 
 def _score_run_summary(summary: RunSummary) -> tuple[float, dict[str, float], list[str]]:
@@ -264,26 +385,43 @@ async def create_strategy_group(
     if not strategies:
         raise ValueError("No strategies available for this run")
 
+    changed_files = await _source_changed_files(session, tenant_id=tenant_id, source_run=source_run)
+    target_files, target_reasons, edit_budget = _select_target_files(
+        explicit_files=request.files,
+        changed_files=changed_files,
+        feedback_text=request.feedback_text or request.error or goal_text,
+    )
     group_id = uuid.uuid4()
     for option in strategies:
         branch_name = _strategy_branch_name(source_run, option.strategy_type)
+        summary_overrides = {
+            "strategy_group_id": str(group_id),
+            "strategy_source_run_id": str(source_run.id),
+            "strategy_type": option.strategy_type,
+            "strategy_label": option.label,
+            "strategy_rationale": option.rationale,
+            "strategy_prompt_hint": option.prompt_hint,
+            "strategy_goal": goal_text,
+            "strategy_error": request.error,
+            "strategy_files": request.files,
+        }
+        if target_files:
+            summary_overrides["target_files"] = target_files
+            summary_overrides["target_reasons"] = target_reasons
+            summary_overrides["edit_budget"] = edit_budget
+        if request.mode:
+            summary_overrides["strategy_mode"] = request.mode
+        if request.feedback_text:
+            summary_overrides["feedback_text"] = request.feedback_text
+        if request.feedback_source:
+            summary_overrides["feedback_source"] = request.feedback_source
         await fork_run(
             session,
             source_run=source_run,
             executor=request.executor,
             branch_name=branch_name,
             start_now=request.start_now,
-            summary_overrides={
-                "strategy_group_id": str(group_id),
-                "strategy_source_run_id": str(source_run.id),
-                "strategy_type": option.strategy_type,
-                "strategy_label": option.label,
-                "strategy_rationale": option.rationale,
-                "strategy_prompt_hint": option.prompt_hint,
-                "strategy_goal": goal_text,
-                "strategy_error": request.error,
-                "strategy_files": request.files,
-            },
+            summary_overrides=summary_overrides,
         )
 
     return await get_strategy_group(session, tenant_id=tenant_id, run_id=source_run_id)

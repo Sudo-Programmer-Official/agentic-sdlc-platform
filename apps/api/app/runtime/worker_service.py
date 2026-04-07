@@ -157,17 +157,25 @@ async def tick_worker(agent_id: uuid.UUID):
 async def main():
     settings = get_settings()
     agent_id = uuid.uuid4()
-    diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode)
+    diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode, settings.runtime_git_auth_mode)
     log.info(
-        "Starting worker build=%s sha=%s runtime_mode=%s",
+        "Starting worker build=%s sha=%s runtime_mode=%s runtime_git_auth_mode=%s",
         diagnostics.build_version,
         diagnostics.build_sha,
         diagnostics.runtime_mode,
+        diagnostics.runtime_git_auth_mode,
     )
     if diagnostics.git_binary:
         log.info("Worker runtime tool availability git=%s", diagnostics.git_binary)
     else:
         log.warning("Worker runtime tool availability git=missing repo-backed runs will fail until git is installed")
+    if diagnostics.runtime_git_auth_mode == "ssh":
+        if diagnostics.ssh_binary:
+            log.info("Worker runtime tool availability ssh=%s", diagnostics.ssh_binary)
+        else:
+            log.warning(
+                "Worker runtime tool availability ssh=missing SSH-authenticated repo runs will fail until ssh is installed"
+            )
     log.info(
         "Worker GitHub integration env app_id_present=%s private_key_present=%s webhook_secret_present=%s",
         diagnostics.github_app_id_present,

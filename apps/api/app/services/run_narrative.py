@@ -18,8 +18,10 @@ from app.schemas.run_narrative import (
     RunWorkingContextSummary,
 )
 from app.schemas.run_timeline import RunTimelineSummary
+from app.core.config import get_settings
 from app.services.artifact_diff import parse_unified_diff, resolve_artifact_content
 from app.services.patch_verification import build_run_patch_plan_and_verification
+from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.services.run_summary_builder import upsert_run_summary
 from app.services.task_decomposition import build_task_decomposition
 
@@ -435,6 +437,8 @@ async def build_run_narrative(
     task_decomposition = RunTaskDecomposition.model_validate(
         stored_decomposition if isinstance(stored_decomposition, dict) else build_task_decomposition(run, work_items)
     )
+    settings = get_settings()
+    runtime_diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode, settings.runtime_git_auth_mode)
 
     working_context = RunWorkingContextSummary(
         goal=goal,
@@ -450,6 +454,19 @@ async def build_run_narrative(
         confidence_score=confidence_score,
         risk_level=risk_level,
         pull_request_url=timeline_summary.pull_request_url,
+        runtime_mode=runtime_diagnostics.runtime_mode,
+        runtime_git_auth_mode=runtime_diagnostics.runtime_git_auth_mode,
+        runtime_git_auth_status=runtime_diagnostics.runtime_git_auth_status,
+        runtime_git_auth_ready=runtime_diagnostics.runtime_git_auth_ready,
+        runtime_git_auth_missing=list(runtime_diagnostics.runtime_git_auth_missing),
+        git_binary=runtime_diagnostics.git_binary,
+        ssh_binary=runtime_diagnostics.ssh_binary,
+        github_clone_auth_status=runtime_diagnostics.github_clone_auth_status,
+        github_clone_auth_ready=runtime_diagnostics.github_clone_auth_ready,
+        github_clone_auth_missing=list(runtime_diagnostics.github_clone_auth_missing),
+        github_app_id_present=runtime_diagnostics.github_app_id_present,
+        github_private_key_present=runtime_diagnostics.github_private_key_present,
+        github_webhook_secret_present=runtime_diagnostics.github_webhook_secret_present,
     )
 
     return RunNarrativeResponse(

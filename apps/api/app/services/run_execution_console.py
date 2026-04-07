@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.models import Run, WorkItem
 from app.schemas.mission_control import (
     MissionControlExecutionCommand,
@@ -17,6 +18,7 @@ from app.schemas.mission_control import (
     MissionControlExecutionStep,
     MissionControlExecutionSummary,
 )
+from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 
 
 def _safe_json_load(path: Path) -> dict[str, Any]:
@@ -195,6 +197,8 @@ async def build_run_execution_console(
         if candidate.exists():
             manifest_path = candidate
             manifest = _safe_json_load(candidate)
+    settings = get_settings()
+    runtime_diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode, settings.runtime_git_auth_mode)
 
     environment = MissionControlExecutionEnvironment(
         workspace_root=run.workspace_root,
@@ -215,6 +219,19 @@ async def build_run_execution_console(
         allowed_command_prefixes=[
             str(value) for value in manifest.get("allowed_command_prefixes") or [] if isinstance(value, str)
         ],
+        runtime_mode=runtime_diagnostics.runtime_mode,
+        runtime_git_auth_mode=runtime_diagnostics.runtime_git_auth_mode,
+        runtime_git_auth_status=runtime_diagnostics.runtime_git_auth_status,
+        runtime_git_auth_ready=runtime_diagnostics.runtime_git_auth_ready,
+        runtime_git_auth_missing=list(runtime_diagnostics.runtime_git_auth_missing),
+        git_binary=runtime_diagnostics.git_binary,
+        ssh_binary=runtime_diagnostics.ssh_binary,
+        github_clone_auth_status=runtime_diagnostics.github_clone_auth_status,
+        github_clone_auth_ready=runtime_diagnostics.github_clone_auth_ready,
+        github_clone_auth_missing=list(runtime_diagnostics.github_clone_auth_missing),
+        github_app_id_present=runtime_diagnostics.github_app_id_present,
+        github_private_key_present=runtime_diagnostics.github_private_key_present,
+        github_webhook_secret_present=runtime_diagnostics.github_webhook_secret_present,
     )
 
     commands = _merge_command_audit_records(_load_command_records(environment.command_audit_log))

@@ -34,3 +34,23 @@ The production architecture is intentionally split so the runtime stays determin
 The import guard for this boundary lives in:
 
 - [`apps/api/tests/test_execution_plane_imports.py`](/Users/abhishekkumarjha/Documents/sudo-programmer-official/agentic-sdlc-platform/apps/api/tests/test_execution_plane_imports.py)
+
+Backend is running via Docker now.
+
+From the repo root, the backend command is:
+
+```bash
+docker compose up -d --build db api scheduler worker
+```
+
+I verified the stack is up and `http://localhost:8000/health` returns `{"status":"ok"}`. Postgres is exposed on `localhost:5432`, and the running backend services are `db`, `api`, `scheduler`, and `worker`.
+
+Use these commands going forward:
+
+```bash
+docker compose ps
+docker compose logs -f api scheduler worker db
+docker compose down
+```
+
+One important detail: Compose uses the repo-root [`.env`](Documents/sudo-programmer-official/agentic-sdlc-platform/.env), not `apps/api/.env`. For Docker local startup, the current root `.env` is already set up correctly to use the `db` container.

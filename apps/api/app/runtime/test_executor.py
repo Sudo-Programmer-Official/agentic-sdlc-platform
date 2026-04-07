@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shlex
+import sys
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -19,6 +21,14 @@ class TestExecutor(TaskExecutor):
         self.settings = get_settings()
         self.repo_root = repo_root or Path.cwd()
 
+    def _command_env(self) -> dict[str, str]:
+        python_bin = str(Path(sys.executable).resolve().parent)
+        current_path = os.environ.get("PATH", "")
+        path_parts = [part for part in current_path.split(os.pathsep) if part]
+        if python_bin not in path_parts:
+            path_parts.insert(0, python_bin)
+        return {"PATH": os.pathsep.join(path_parts) if path_parts else python_bin}
+
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
         cmd = shlex.split(self.settings.test_command)
@@ -31,6 +41,7 @@ class TestExecutor(TaskExecutor):
                 label=f"test-{work_item.type.lower()}",
                 timeout_seconds=self.settings.test_timeout_seconds,
                 output_max_bytes=self.settings.test_output_max_bytes,
+                env=self._command_env(),
             )
             if result.status == "BLOCKED":
                 return {

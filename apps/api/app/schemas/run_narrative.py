@@ -128,6 +128,19 @@ class RunWorkingContextSummary(BaseModel):
     confidence_score: float | None = None
     risk_level: str = "LOW"
     pull_request_url: str | None = None
+    runtime_mode: str | None = None
+    runtime_git_auth_mode: str | None = None
+    runtime_git_auth_status: str | None = None
+    runtime_git_auth_ready: bool = False
+    runtime_git_auth_missing: list[str] = Field(default_factory=list)
+    git_binary: str | None = None
+    ssh_binary: str | None = None
+    github_clone_auth_status: str | None = None
+    github_clone_auth_ready: bool = False
+    github_clone_auth_missing: list[str] = Field(default_factory=list)
+    github_app_id_present: bool = False
+    github_private_key_present: bool = False
+    github_webhook_secret_present: bool = False
 
 
 class RunNarrativeResponse(BaseModel):

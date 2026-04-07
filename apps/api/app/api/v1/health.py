@@ -14,6 +14,7 @@ from app.db.models import Run, WorkItem
 from app.db.session import get_session
 from app.core.config import get_settings
 from app.services.build_info import get_current_build_info
+from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.startup import resolve_alembic_config_path
 
 # Keep legacy /store/... routes and add public /projects/... routes to match frontend calls.
@@ -172,6 +173,7 @@ def _alembic_head() -> str | None:
 async def health_detail(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     settings = get_settings()
     build = get_current_build_info()
+    diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode, settings.runtime_git_auth_mode)
     # DB connectivity
     try:
         await session.execute(text("SELECT 1"))
@@ -184,6 +186,21 @@ async def health_detail(session: AsyncSession = Depends(get_session)) -> dict[st
         "environment": settings.env,
         "database_connected": db_ok,
         "alembic_head": _alembic_head(),
+        "runtime_mode": diagnostics.runtime_mode,
+        "runtime_git_auth": {
+            "runtime_git_auth_mode": diagnostics.runtime_git_auth_mode,
+            "runtime_git_auth_status": diagnostics.runtime_git_auth_status,
+            "runtime_git_auth_ready": diagnostics.runtime_git_auth_ready,
+            "runtime_git_auth_missing": list(diagnostics.runtime_git_auth_missing),
+            "git_binary": diagnostics.git_binary,
+            "ssh_binary": diagnostics.ssh_binary,
+            "github_clone_auth_status": diagnostics.github_clone_auth_status,
+            "github_clone_auth_ready": diagnostics.github_clone_auth_ready,
+            "github_clone_auth_missing": list(diagnostics.github_clone_auth_missing),
+            "github_app_id_present": diagnostics.github_app_id_present,
+            "github_private_key_present": diagnostics.github_private_key_present,
+            "github_webhook_secret_present": diagnostics.github_webhook_secret_present,
+        },
     }
 
 

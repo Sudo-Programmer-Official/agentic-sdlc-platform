@@ -36,6 +36,11 @@
         <div class="execution-console__env-value">{{ allowedToolCount }}</div>
         <div class="execution-console__env-meta">{{ allowedToolPreview }}</div>
       </div>
+      <div class="execution-console__env-card">
+        <div class="execution-console__env-label">API Repo Auth</div>
+        <div class="execution-console__env-value">{{ runtimeGitAuthValue }}</div>
+        <div class="execution-console__env-meta">{{ runtimeGitAuthMeta }}</div>
+      </div>
     </div>
 
     <div class="execution-console__grid">
@@ -180,6 +185,59 @@ const allowedToolPreview = computed(() => {
   if (!prefixes.length) return "No command policy loaded yet";
   return prefixes.slice(0, 5).join(", ");
 });
+const runtimeGitAuthMode = computed(() => normalizeRuntimeGitAuthMode(environment.value.runtime_git_auth_mode));
+const runtimeGitAuthStatus = computed(() => String(environment.value.runtime_git_auth_status || environment.value.github_clone_auth_status || "UNKNOWN"));
+const runtimeGitAuthMissing = computed(() => {
+  const missing = Array.isArray(environment.value.runtime_git_auth_missing)
+    ? environment.value.runtime_git_auth_missing.filter((value: any) => typeof value === "string" && value.trim())
+    : [];
+  if (missing.length) return missing;
+  if (runtimeGitAuthMode.value !== "github_app_https") return [];
+  return Array.isArray(environment.value.github_clone_auth_missing)
+    ? environment.value.github_clone_auth_missing.filter((value: any) => typeof value === "string" && value.trim())
+    : [];
+});
+const runtimeGitAuthValue = computed(() => {
+  const modeLabel = formatRuntimeGitAuthMode(runtimeGitAuthMode.value);
+  return modeLabel === "Unknown" ? runtimeGitAuthStatus.value : `${modeLabel} ${runtimeGitAuthStatus.value}`;
+});
+const runtimeGitAuthMeta = computed(() => {
+  const missing = runtimeGitAuthMissing.value;
+  const modeLabel = formatRuntimeGitAuthMode(runtimeGitAuthMode.value);
+  if (missing.length) {
+    return `API snapshot · mode ${modeLabel} · missing ${missing.join(", ")}`;
+  }
+  if (runtimeGitAuthMode.value === "ssh") {
+    return [
+      "API snapshot",
+      "mode SSH",
+      `git ${formatPresence(Boolean(environment.value.git_binary))}`,
+      `ssh ${formatPresence(Boolean(environment.value.ssh_binary))}`,
+    ].join(" · ");
+  }
+  if (runtimeGitAuthMode.value === "github_app_https") {
+    return [
+      "API snapshot",
+      "mode GitHub App",
+      `app id ${formatPresence(environment.value.github_app_id_present)}`,
+      `key ${formatPresence(environment.value.github_private_key_present)}`,
+      `webhook ${formatPresence(environment.value.github_webhook_secret_present)}`,
+    ].join(" · ");
+  }
+  if (runtimeGitAuthMode.value === "auto") {
+    return [
+      "API snapshot",
+      "mode Auto",
+      `git ${formatPresence(Boolean(environment.value.git_binary))}`,
+      environment.value.github_clone_auth_ready ? "GitHub App env ready" : "GitHub App env optional",
+    ].join(" · ");
+  }
+  return [
+    "API snapshot",
+    `mode ${modeLabel}`,
+    `git ${formatPresence(Boolean(environment.value.git_binary))}`,
+  ].join(" · ");
+});
 
 const headline = computed(() => {
   if (primaryCommand.value?.status === "RUNNING") {
@@ -223,6 +281,27 @@ function humanizeStatus(value: string) {
     .toLowerCase()
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatPresence(value?: boolean | null) {
+  return value ? "yes" : "no";
+}
+
+function normalizeRuntimeGitAuthMode(value?: string | null) {
+  const normalized = String(value || "auto").trim().toLowerCase();
+  if (normalized === "github_app_https" || normalized === "ssh" || normalized === "none" || normalized === "auto") {
+    return normalized;
+  }
+  return "auto";
+}
+
+function formatRuntimeGitAuthMode(value?: string | null) {
+  const normalized = normalizeRuntimeGitAuthMode(value);
+  if (normalized === "github_app_https") return "GitHub App";
+  if (normalized === "ssh") return "SSH";
+  if (normalized === "none") return "Plain";
+  if (normalized === "auto") return "Auto";
+  return "Unknown";
 }
 
 function statusClass(status?: string | null) {
@@ -365,7 +444,7 @@ function humanDuration(durationMs: number) {
   margin-top: 1rem;
   display: grid;
   gap: 0.8rem;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
 }
 
 .execution-console__env-card,

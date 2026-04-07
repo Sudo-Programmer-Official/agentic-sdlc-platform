@@ -165,12 +165,20 @@ onMounted(() => {
   void hydrateGitHubInstallRedirect();
   void refreshProjects();
   void hydrateEnvironment();
+  hydrateMissingProjectNotice();
 });
 
 watch(
   () => [route.query.installation_id, route.query.setup_action, route.query.state],
   () => {
     void hydrateGitHubInstallRedirect();
+  }
+);
+
+watch(
+  () => route.query.missingProject,
+  () => {
+    hydrateMissingProjectNotice();
   }
 );
 
@@ -225,6 +233,22 @@ async function hydrateGitHubInstallRedirect() {
       setup_action: Array.isArray(route.query.setup_action) ? route.query.setup_action[0] : route.query.setup_action,
     },
   });
+}
+
+function hydrateMissingProjectNotice() {
+  const rawMissingProject = Array.isArray(route.query.missingProject)
+    ? route.query.missingProject[0]
+    : route.query.missingProject;
+
+  if (!rawMissingProject) {
+    return;
+  }
+
+  projectId.value = String(rawMissingProject);
+  error.value = `Project ${rawMissingProject} was not found in the current backend. Create a new project or open one from Recent Projects.`;
+  window.setTimeout(() => {
+    projectIdInput.value?.focus?.();
+  }, 120);
 }
 
 async function createProject() {

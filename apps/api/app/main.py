@@ -99,19 +99,25 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def on_startup() -> None:
         build = get_current_build_info()
-        diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode)
+        diagnostics = collect_runtime_startup_diagnostics(settings.runtime_mode, settings.runtime_git_auth_mode)
         log.info(
-            "Starting API build=%s sha=%s env=%s prefix=%s runtime_mode=%s",
+            "Starting API build=%s sha=%s env=%s prefix=%s runtime_mode=%s runtime_git_auth_mode=%s",
             build.get("version"),
             build.get("short_sha"),
             settings.env,
             settings.api_prefix,
             diagnostics.runtime_mode,
+            diagnostics.runtime_git_auth_mode,
         )
         if diagnostics.git_binary:
             log.info("Runtime tool availability git=%s", diagnostics.git_binary)
         else:
             log.warning("Runtime tool availability git=missing repo-backed runs will fail until git is installed")
+        if diagnostics.runtime_git_auth_mode == "ssh":
+            if diagnostics.ssh_binary:
+                log.info("Runtime tool availability ssh=%s", diagnostics.ssh_binary)
+            else:
+                log.warning("Runtime tool availability ssh=missing SSH-authenticated repo runs will fail until ssh is installed")
         log.info(
             "GitHub integration env app_id_present=%s private_key_present=%s webhook_secret_present=%s",
             diagnostics.github_app_id_present,

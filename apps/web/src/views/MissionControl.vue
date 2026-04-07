@@ -475,11 +475,35 @@
             <strong>Latest failure:</strong>
             {{ runNarrative.working_context.latest_failure || "None recorded." }}
           </div>
+          <div class="text-sm text-slate-600">
+            <strong>API runtime auth:</strong>
+            {{ formatRuntimeGitAuthSummary(runNarrative.working_context) }}
+            <span v-if="runtimeGitAuthMissing(runNarrative.working_context).length">
+              (missing {{ runtimeGitAuthMissing(runNarrative.working_context).join(", ") }})
+            </span>
+          </div>
           <div class="grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
             <div><strong>Recovery count:</strong> {{ runNarrative.working_context.recovery_count }}</div>
             <div><strong>Workspace:</strong> {{ runNarrative.working_context.workspace_status || "—" }}</div>
             <div><strong>Branch:</strong> {{ runNarrative.working_context.branch_name || "—" }}</div>
             <div><strong>Confidence:</strong> {{ formatConfidence(runNarrative.working_context.confidence_score) }}</div>
+            <div><strong>Runtime mode:</strong> {{ runNarrative.working_context.runtime_mode || "—" }}</div>
+            <div><strong>Git auth mode:</strong> {{ formatRuntimeGitAuthMode(runNarrative.working_context.runtime_git_auth_mode) }}</div>
+            <div v-if="usesGitHubAppRuntimeAuth(runNarrative.working_context)">
+              <strong>GitHub env (API):</strong>
+              app id {{ formatPresence(runNarrative.working_context.github_app_id_present) }}
+              · key {{ formatPresence(runNarrative.working_context.github_private_key_present) }}
+              · webhook {{ formatPresence(runNarrative.working_context.github_webhook_secret_present) }}
+            </div>
+            <div v-else-if="usesSshRuntimeAuth(runNarrative.working_context)">
+              <strong>SSH runtime (API):</strong>
+              git {{ formatPresence(Boolean(runNarrative.working_context.git_binary)) }}
+              · ssh {{ formatPresence(Boolean(runNarrative.working_context.ssh_binary)) }}
+            </div>
+            <div v-else>
+              <strong>Repo auth (API):</strong>
+              {{ formatRuntimeGitAuthDetails(runNarrative.working_context) }}
+            </div>
           </div>
           <div v-if="runNarrative.working_context.pull_request_url">
             <el-button
@@ -3007,6 +3031,77 @@ function formatElapsed(seconds?: number | null) {
 function formatConfidence(score?: number | null) {
   if (typeof score !== "number") return "—";
   return `${Math.round(score * 100)}%`;
+}
+
+function normalizeRuntimeGitAuthMode(value?: string | null) {
+  const normalized = String(value || "auto").trim().toLowerCase();
+  if (normalized === "github_app_https" || normalized === "ssh" || normalized === "none" || normalized === "auto") {
+    return normalized;
+  }
+  return "auto";
+}
+
+function formatRuntimeGitAuthMode(value?: string | null) {
+  const normalized = normalizeRuntimeGitAuthMode(value);
+  if (normalized === "github_app_https") return "GitHub App";
+  if (normalized === "ssh") return "SSH";
+  if (normalized === "none") return "Plain";
+  if (normalized === "auto") return "Auto";
+  return "Unknown";
+}
+
+function runtimeGitAuthMissing(context?: any) {
+  const runtimeMissing = Array.isArray(context?.runtime_git_auth_missing)
+    ? context.runtime_git_auth_missing.filter((value: any) => typeof value === "string" && value.trim())
+    : [];
+  if (runtimeMissing.length) return runtimeMissing;
+  if (normalizeRuntimeGitAuthMode(context?.runtime_git_auth_mode) !== "github_app_https") return [];
+  return Array.isArray(context?.github_clone_auth_missing)
+    ? context.github_clone_auth_missing.filter((value: any) => typeof value === "string" && value.trim())
+    : [];
+}
+
+function runtimeGitAuthStatus(context?: any) {
+  return String(context?.runtime_git_auth_status || context?.github_clone_auth_status || "UNKNOWN");
+}
+
+function formatRuntimeGitAuthSummary(context?: any) {
+  const modeLabel = formatRuntimeGitAuthMode(context?.runtime_git_auth_mode);
+  const status = runtimeGitAuthStatus(context);
+  return modeLabel === "Unknown" ? status : `${modeLabel} ${status}`;
+}
+
+function usesGitHubAppRuntimeAuth(context?: any) {
+  return normalizeRuntimeGitAuthMode(context?.runtime_git_auth_mode) === "github_app_https";
+}
+
+function usesSshRuntimeAuth(context?: any) {
+  return normalizeRuntimeGitAuthMode(context?.runtime_git_auth_mode) === "ssh";
+}
+
+function formatRuntimeGitAuthDetails(context?: any) {
+  const mode = normalizeRuntimeGitAuthMode(context?.runtime_git_auth_mode);
+  if (mode === "ssh") {
+    return `git ${formatPresence(Boolean(context?.git_binary))} · ssh ${formatPresence(Boolean(context?.ssh_binary))}`;
+  }
+  if (mode === "github_app_https") {
+    return [
+      `app id ${formatPresence(context?.github_app_id_present)}`,
+      `key ${formatPresence(context?.github_private_key_present)}`,
+      `webhook ${formatPresence(context?.github_webhook_secret_present)}`,
+    ].join(" · ");
+  }
+  if (mode === "auto") {
+    return [
+      `git ${formatPresence(Boolean(context?.git_binary))}`,
+      context?.github_clone_auth_ready ? "GitHub App env ready" : "GitHub App env optional",
+    ].join(" · ");
+  }
+  return `git ${formatPresence(Boolean(context?.git_binary))}`;
+}
+
+function formatPresence(value?: boolean | null) {
+  return value ? "yes" : "no";
 }
 
 function shortenUri(uri?: string | null) {

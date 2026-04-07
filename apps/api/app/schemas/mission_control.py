@@ -126,6 +126,19 @@ class MissionControlExecutionEnvironment(BaseModel):
     command_audit_log: str | None = None
     workspace_manifest_path: str | None = None
     allowed_command_prefixes: list[str] = Field(default_factory=list)
+    runtime_mode: str | None = None
+    runtime_git_auth_mode: str | None = None
+    runtime_git_auth_status: str | None = None
+    runtime_git_auth_ready: bool = False
+    runtime_git_auth_missing: list[str] = Field(default_factory=list)
+    git_binary: str | None = None
+    ssh_binary: str | None = None
+    github_clone_auth_status: str | None = None
+    github_clone_auth_ready: bool = False
+    github_clone_auth_missing: list[str] = Field(default_factory=list)
+    github_app_id_present: bool = False
+    github_private_key_present: bool = False
+    github_webhook_secret_present: bool = False
 
 
 class MissionControlExecutionCommand(BaseModel):

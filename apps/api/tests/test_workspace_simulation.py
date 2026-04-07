@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
+from types import SimpleNamespace
 import uuid
 from pathlib import Path
 
@@ -151,3 +154,53 @@ async def test_test_executor_respects_workspace_command_policy(tmp_path, monkeyp
     audit_path = logs_root / COMMAND_AUDIT_LOG_NAME
     records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert records[-1]["status"] == "BLOCKED"
+
+
+@pytest.mark.anyio
+async def test_test_executor_prepends_interpreter_bin_to_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_COMMAND", "pytest -q")
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_workspace_command_async(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs.get("env")
+        return SimpleNamespace(
+            status="SUCCEEDED",
+            stdout="ok",
+            stderr="",
+            exit_code=0,
+            timed_out=False,
+            log_path=None,
+            audit_path=None,
+        )
+
+    monkeypatch.setattr("app.runtime.test_executor.run_workspace_command_async", fake_run_workspace_command_async)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+
+    work_item = WorkItem(
+        project_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        type="RUN_TESTS",
+        executor="test",
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        repo_path=str(repo_root),
+        logs_path=str(logs_root),
+        workspace_status="READY",
+    )
+
+    result = await TestExecutor().execute(work_item, context)
+
+    assert result["status"] == "DONE"
+    assert captured["command"] == ["pytest", "-q"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).resolve().parent)

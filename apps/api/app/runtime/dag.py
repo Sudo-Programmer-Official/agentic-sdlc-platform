@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from pathlib import PurePosixPath
 from typing import Any, List
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +12,65 @@ from app.db.models import WorkItem, WorkItemEdge
 from app.services.runtime_lineage import link_run_to_work_item
 
 log = logging.getLogger("app.runtime")
-PATH_HINT_PATTERN = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+[\w.-]+)(?![\w./-])")
+PATH_HINT_PATTERN = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,12})(?![\w./-])")
+FRONTEND_SUFFIXES = {".html", ".css", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}
+BACKEND_SUFFIXES = {".py", ".rb", ".go", ".rs", ".java", ".kt", ".php", ".cs", ".scala"}
+FRONTEND_KEYWORDS = {
+    "homepage",
+    "landing page",
+    "hero section",
+    "footer",
+    "navbar",
+    "navigation",
+    "section",
+    "layout",
+    "responsive",
+    "portfolio",
+    "ui",
+    "frontend",
+    "css",
+    "style",
+}
+BACKEND_KEYWORDS = {
+    "backend",
+    "api",
+    "endpoint",
+    "route",
+    "service",
+    "database",
+    "model",
+    "server",
+    "webhook",
+    "auth",
+}
+
+
+class TaskScopeError(ValueError):
+    """Raised when a task-scoped run cannot determine a safe file envelope."""
+
+
+def _normalized_paths(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        candidate = value.strip().strip("`'\".,:;()[]{}")
+        candidate = candidate.lstrip("./")
+        if not candidate or candidate.startswith(("http://", "https://")):
+            continue
+        normalized.append(str(PurePosixPath(candidate)))
+    return list(dict.fromkeys(path for path in normalized if path))
+
+
+def _string_list_from_summary(run_summary: dict[str, Any] | None, *keys: str) -> list[str]:
+    if not isinstance(run_summary, dict):
+        return []
+    values: list[str] = []
+    for key in keys:
+        raw = run_summary.get(key)
+        if isinstance(raw, str) and raw.strip():
+            values.append(raw.strip())
+        elif isinstance(raw, list):
+            values.extend(item for item in raw if isinstance(item, str) and item.strip())
+    return _normalized_paths(values)
 
 
 def _task_payload_from_summary(run_summary: dict | None) -> dict[str, Any]:
@@ -33,11 +92,7 @@ def _task_payload_from_summary(run_summary: dict | None) -> dict[str, Any]:
     source = (run_summary.get("task_source") or "").strip()
     if source:
         payload["task_source"] = source
-    target_files = [
-        value.strip()
-        for value in (run_summary.get("target_files") or [])
-        if isinstance(value, str) and value.strip()
-    ]
+    target_files = _string_list_from_summary(run_summary, "target_files")
     if target_files:
         normalized_target_files = list(dict.fromkeys(target_files))
         payload["target_files"] = normalized_target_files
@@ -45,26 +100,85 @@ def _task_payload_from_summary(run_summary: dict | None) -> dict[str, Any]:
     edit_budget = run_summary.get("edit_budget")
     if isinstance(edit_budget, dict):
         payload["edit_budget"] = dict(edit_budget)
-    expected_files = _expected_files_from_text(task_title, payload["goal"], description)
+    related_files = _string_list_from_summary(run_summary, "expected_files", "files", "related_files")
+    expected_files = list(dict.fromkeys(related_files + _expected_files_from_text(task_title, payload["goal"], description)))
     if target_files:
         expected_files = list(dict.fromkeys(target_files + expected_files))
+    if not expected_files:
+        expected_files = _infer_frontend_entry_files(task_title, payload["goal"], description)
     if expected_files:
         payload["expected_files"] = expected_files
+    if related_files:
+        payload["related_files"] = related_files
     return payload
 
 
 def _expected_files_from_text(*values: str | None) -> list[str]:
-    paths: list[str] = []
-    for value in values:
-        if not value:
+    return _normalized_paths(
+        [
+            match
+            for value in values
+            if value
+            for match in PATH_HINT_PATTERN.findall(value)
+        ]
+    )
+
+
+def _infer_frontend_entry_files(*values: str | None) -> list[str]:
+    text = " ".join(value.strip().lower() for value in values if isinstance(value, str) and value.strip())
+    if not text:
+        return []
+    if any(keyword in text for keyword in FRONTEND_KEYWORDS) and not any(keyword in text for keyword in BACKEND_KEYWORDS):
+        return ["index.html"]
+    return []
+
+
+def _infer_test_files(expected_files: list[str]) -> list[str]:
+    tests: list[str] = []
+    for value in expected_files:
+        path = PurePosixPath(value)
+        name = path.name
+        if name.startswith("test_") and path.suffix == ".py":
+            tests.append(str(path))
             continue
-        for match in PATH_HINT_PATTERN.findall(value):
-            candidate = match.strip().strip("`'\".,:;()[]{}")
-            candidate = candidate.lstrip("./")
-            if "/" not in candidate or candidate.startswith(("http://", "https://")):
-                continue
-            paths.append(candidate)
-    return list(dict.fromkeys(path for path in paths if path))
+        if path.suffix == ".py":
+            tests.append(str(path.with_name(f"test_{path.stem}.py")))
+            continue
+        if path.suffix in FRONTEND_SUFFIXES:
+            tests.append(str(path.with_name(f"test_{name.replace('.', '_')}.py")))
+    return list(dict.fromkeys(tests))
+
+
+def _change_surface(task_payload: dict[str, Any]) -> str:
+    expected_files = [
+        path for path in (task_payload.get("expected_files") or [])
+        if isinstance(path, str) and path.strip()
+    ]
+    if expected_files:
+        suffixes = {PurePosixPath(path).suffix.lower() for path in expected_files}
+        if suffixes and suffixes.issubset(FRONTEND_SUFFIXES):
+            return "frontend"
+        if suffixes and suffixes.issubset(BACKEND_SUFFIXES):
+            return "backend"
+
+    text = " ".join(
+        value.strip().lower()
+        for value in (
+            task_payload.get("task_title"),
+            task_payload.get("goal"),
+            task_payload.get("task_description"),
+        )
+        if isinstance(value, str) and value.strip()
+    )
+    if not text:
+        return "mixed"
+    has_frontend = any(keyword in text for keyword in FRONTEND_KEYWORDS)
+    has_backend = any(keyword in text for keyword in BACKEND_KEYWORDS)
+    if has_frontend and not has_backend:
+        return "frontend"
+    if has_backend and not has_frontend:
+        return "backend"
+    return "mixed"
 
 
 def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]) -> dict:
@@ -83,6 +197,21 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
     }
     payload = dict(task_payload)
     payload["title"] = stage_titles.get(stage_name, task_title)
+    scoped_files = [
+        path for path in (payload.get("expected_files") or [])
+        if isinstance(path, str) and path.strip()
+    ]
+    if stage_name in {"CODE_BACKEND", "CODE_FRONTEND"} and scoped_files and not payload.get("target_files"):
+        payload["target_files"] = list(scoped_files)
+        payload["files"] = list(scoped_files)
+    if stage_name in {"WRITE_TESTS", "RUN_TESTS"}:
+        related_files = list(scoped_files)
+        test_files = _infer_test_files(related_files)
+        if test_files:
+            payload["related_files"] = related_files
+            payload["target_files"] = test_files
+            payload["files"] = test_files
+            payload["expected_files"] = test_files
     return payload
 
 
@@ -101,15 +230,24 @@ async def generate_template_dag(
     if count:
         return 0
 
-    nodes = [
-        ("PLAN_DAG", "plan"),
-        ("CODE_BACKEND", "code"),
-        ("CODE_FRONTEND", "code"),
-        ("WRITE_TESTS", "test"),
-        ("REVIEW_DIFF", "review"),
-        ("RUN_TESTS", "test_run"),
-        ("REVIEW_INTEGRATION", "review"),
-    ]
+    task_payload = _task_payload_from_summary(run_summary)
+    if task_payload.get("task_id") and not task_payload.get("expected_files"):
+        raise TaskScopeError(f"Task {task_payload['task_id']} has no file scope")
+
+    surface = _change_surface(task_payload)
+    nodes = [("PLAN_DAG", "plan")]
+    if surface != "frontend":
+        nodes.append(("CODE_BACKEND", "code"))
+    if surface != "backend":
+        nodes.append(("CODE_FRONTEND", "code"))
+    nodes.extend(
+        [
+            ("WRITE_TESTS", "test"),
+            ("REVIEW_DIFF", "review"),
+            ("RUN_TESTS", "test_run"),
+            ("REVIEW_INTEGRATION", "review"),
+        ]
+    )
     default_caps = {
         "plan": ["plan"],
         "code": ["code"],
@@ -118,7 +256,6 @@ async def generate_template_dag(
         "review": ["review"],
         "fix_test_failure": ["code"],
     }
-    task_payload = _task_payload_from_summary(run_summary)
 
     created: List[WorkItem] = []
     for idx, (stage_name, capability_key) in enumerate(nodes):
@@ -144,15 +281,20 @@ async def generate_template_dag(
 
     # edges
     key_to_id = {wi.key: wi.id for wi in created}
-    edges: list[tuple[str, str]] = [
-        ("PLAN_DAG", "CODE_BACKEND"),
-        ("PLAN_DAG", "CODE_FRONTEND"),
-        ("CODE_BACKEND", "WRITE_TESTS"),
-        ("CODE_FRONTEND", "WRITE_TESTS"),
-        ("WRITE_TESTS", "REVIEW_DIFF"),
-        ("REVIEW_DIFF", "RUN_TESTS"),
-        ("RUN_TESTS", "REVIEW_INTEGRATION"),
-    ]
+    edges: list[tuple[str, str]] = []
+    code_nodes = [stage for stage in ("CODE_BACKEND", "CODE_FRONTEND") if stage in key_to_id]
+    for code_stage in code_nodes:
+        edges.append(("PLAN_DAG", code_stage))
+        edges.append((code_stage, "WRITE_TESTS"))
+    if not code_nodes:
+        edges.append(("PLAN_DAG", "WRITE_TESTS"))
+    edges.extend(
+        [
+            ("WRITE_TESTS", "REVIEW_DIFF"),
+            ("REVIEW_DIFF", "RUN_TESTS"),
+            ("RUN_TESTS", "REVIEW_INTEGRATION"),
+        ]
+    )
     dependents_count: dict[uuid.UUID, int] = {}
     for src, dst in edges:
         session.add(

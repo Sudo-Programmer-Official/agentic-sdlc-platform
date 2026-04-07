@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from app.runtime.codex_executor import (
     _edit_budget_from_payload,
     _is_static_frontend_scope,
+    _stage_scope_violations,
     _target_files_from_payload,
     _verification_from_action_scope,
     CodexExecutor,
@@ -121,3 +122,13 @@ def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
     assert "This is a static frontend task." in instructions
     assert "Do not introduce new third-party imports such as BeautifulSoup or bs4" in instructions
     assert "html.parser" in instructions
+
+
+def test_write_tests_stage_rejects_non_test_file_mutations():
+    work_item = SimpleNamespace(type="WRITE_TESTS")
+
+    violations = _stage_scope_violations(work_item, ["index.html", "test_index_html.py"])
+
+    assert violations == [
+        "WRITE_TESTS may only modify Python test files; received out-of-scope file index.html."
+    ]

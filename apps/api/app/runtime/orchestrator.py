@@ -17,7 +17,7 @@ from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_work_item_status
 from app.runtime.recovery_policy import maybe_apply_recovery
-from app.runtime.dag import generate_template_dag
+from app.runtime.dag import TaskScopeError, generate_template_dag
 from app.runtime.plan_snapshot import persist_run_plan_snapshot
 from app.core.config import get_settings
 from app.services.run_delivery import publish_run_branch_if_ready
@@ -93,6 +93,45 @@ class RunOrchestrator:
             run.executor,
             run.workspace_status,
             run.workspace_error,
+        )
+
+    async def _fail_run_for_bootstrap_error(
+        self,
+        session: AsyncSession,
+        *,
+        run: Run,
+        actor_type: str,
+        actor_id: str | None,
+        message: str,
+    ) -> None:
+        previous = run.status
+        run.status = "FAILED"
+        run.finished_at = run.finished_at or datetime.now(timezone.utc)
+        summary = dict(run.summary or {})
+        summary["bootstrap_error"] = message
+        run.summary = summary
+        session.add(run)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="RUN_FAILED",
+            actor_type=actor_type,
+            actor_id=actor_id,
+            tenant_id=run.tenant_id,
+            payload={
+                "previous": previous,
+                "new": "FAILED",
+                "reason": "bootstrap_error",
+                "error": message,
+            },
+        )
+        log.warning(
+            "Run bootstrap failed run_id=%s project_id=%s executor=%s error=%s",
+            run.id,
+            run.project_id,
+            run.executor,
+            message,
         )
 
     async def bootstrap_in_session(
@@ -174,14 +213,25 @@ class RunOrchestrator:
         selected_task_id = None
         if isinstance(run.summary, dict):
             selected_task_id = run.summary.get("task_id")
-        work_item_count = await generate_template_dag(
-            session,
-            project_id=run.project_id,
-            run_id=run_id,
-            executor=self.executor.name,
-            tenant_id=run.tenant_id,
-            run_summary=run.summary,
-        )
+        try:
+            work_item_count = await generate_template_dag(
+                session,
+                project_id=run.project_id,
+                run_id=run_id,
+                executor=self.executor.name,
+                tenant_id=run.tenant_id,
+                run_summary=run.summary,
+            )
+        except TaskScopeError as exc:
+            await self._fail_run_for_bootstrap_error(
+                session,
+                run=run,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                message=str(exc),
+            )
+            await session.commit()
+            return False
         snapshot = await persist_run_plan_snapshot(session, run)
         decomposition = await persist_run_task_decomposition(session, run)
         await record_event(

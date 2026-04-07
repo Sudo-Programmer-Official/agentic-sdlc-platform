@@ -21,11 +21,19 @@ from app.services.workspace_supervisor import ensure_run_workspace
 log = logging.getLogger("app.run_launch")
 
 
-def _build_task_run_summary(task: Task) -> dict[str, str | None]:
+def _list_strings(value: object) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, list):
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _build_task_run_summary(task: Task) -> dict[str, object]:
     title = task.title.strip()
     description = (task.description or "").strip() or None
     goal = title if not description else f"{title}: {description}"
-    return {
+    summary: dict[str, str | list[str] | dict | None] = {
         "goal": goal,
         "task_id": str(task.id),
         "task_title": title,
@@ -35,8 +43,15 @@ def _build_task_run_summary(task: Task) -> dict[str, str | None]:
         "task_base_branch": clean_branch_value(task.base_branch),
         "task_requested_branch_name": clean_branch_value(task.branch_name),
     }
-
-
+    if isinstance(task.result_payload, dict):
+        for key in ("target_files", "expected_files", "files", "related_files"):
+            values = _list_strings(task.result_payload.get(key))
+            if values:
+                summary[key] = values
+        edit_budget = task.result_payload.get("edit_budget")
+        if isinstance(edit_budget, dict):
+            summary["edit_budget"] = dict(edit_budget)
+    return summary
 def _schedule_orchestrator_start(
     orchestrator: RunOrchestrator,
     *,
@@ -109,7 +124,7 @@ async def launch_run_for_project(
     if project is None:
         raise ValueError("Project not found")
     selected_task: Task | None = None
-    run_summary: dict[str, str | None] | None = None
+    run_summary: dict[str, object] | None = None
     branch_plan = None
     if task_id is not None:
         selected_task = await session.scalar(

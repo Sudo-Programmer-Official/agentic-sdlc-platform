@@ -129,6 +129,19 @@ def _is_static_frontend_scope(payload: dict[str, Any] | None) -> bool:
     return all(Path(path).suffix.lower() in frontend_suffixes for path in target_files)
 
 
+def _stage_scope_violations(work_item: WorkItem, touched_files: list[str]) -> list[str]:
+    if work_item.type != "WRITE_TESTS":
+        return []
+    violations: list[str] = []
+    for path in touched_files:
+        name = Path(path).name
+        if not (name.startswith("test_") and Path(path).suffix.lower() == ".py"):
+            violations.append(
+                f"WRITE_TESTS may only modify Python test files; received out-of-scope file {path}."
+            )
+    return violations
+
+
 class CodexExecutor(TaskExecutor):
     name = "codex"
 
@@ -430,6 +443,9 @@ class CodexExecutor(TaskExecutor):
             file_budget=int(edit_budget["file_budget"]),
             hard_file_budget=int(edit_budget["hard_file_budget"]),
         )
+        stage_violations = _stage_scope_violations(work_item, patch_guard.touched_files)
+        if stage_violations:
+            patch_guard.violations.extend(stage_violations)
         verification = await self._load_patch_verification(work_item, context)
         verification = _verification_from_action_scope(verification, patch_guard.touched_files)
         if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):

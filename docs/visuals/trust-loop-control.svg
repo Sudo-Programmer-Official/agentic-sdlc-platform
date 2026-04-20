@@ -1,0 +1,88 @@
+<svg width="1200" height="820" viewBox="0 0 1200 820" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgLoop" x1="110" y1="90" x2="1040" y2="740" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B132B"/>
+      <stop offset="1" stop-color="#12203A"/>
+    </linearGradient>
+    <linearGradient id="ringLoop" x1="320" y1="180" x2="880" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5EE4FF"/>
+      <stop offset="0.5" stop-color="#52F6C8"/>
+      <stop offset="1" stop-color="#F68A7D"/>
+    </linearGradient>
+    <filter id="shadowLoop" x="0" y="0" width="1200" height="820" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="20" stdDeviation="28" flood-color="#050B18" flood-opacity="0.48"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="820" rx="28" fill="url(#bgLoop)"/>
+
+  <text x="96" y="108" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="700">
+    The Trust Loop
+  </text>
+  <text x="96" y="146" fill="#9BB4D4" font-family="Inter, Arial, sans-serif" font-size="22">
+    The product wins when every AI run becomes visible, bounded, validated, and reviewable.
+  </text>
+
+  <g filter="url(#shadowLoop)">
+    <circle cx="600" cy="428" r="222" stroke="url(#ringLoop)" stroke-width="18" stroke-linecap="round" stroke-dasharray="960 60"/>
+  </g>
+
+  <circle cx="600" cy="428" r="124" fill="#111B31" stroke="#2E5078" stroke-width="2"/>
+  <text x="523" y="403" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Mission Control</text>
+  <text x="540" y="435" fill="#9BB4D4" font-family="Inter, Arial, sans-serif" font-size="16">Observe</text>
+  <text x="586" y="435" fill="#63D6F7" font-family="Inter, Arial, sans-serif" font-size="16">.</text>
+  <text x="594" y="435" fill="#9BB4D4" font-family="Inter, Arial, sans-serif" font-size="16">Steer</text>
+  <text x="632" y="435" fill="#63D6F7" font-family="Inter, Arial, sans-serif" font-size="16">.</text>
+  <text x="640" y="435" fill="#9BB4D4" font-family="Inter, Arial, sans-serif" font-size="16">Approve</text>
+  <rect x="542" y="456" width="116" height="30" rx="15" fill="#173A39"/>
+  <text x="566" y="476" fill="#8FF2D2" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Control Plane</text>
+
+  <g>
+    <circle cx="600" cy="180" r="72" fill="#121F36" stroke="#31567F" stroke-width="2"/>
+    <text x="565" y="174" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">Plan</text>
+    <text x="540" y="206" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">Turn a request into</text>
+    <text x="541" y="226" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">a reviewable intent</text>
+  </g>
+
+  <g>
+    <circle cx="822" cy="304" r="72" fill="#121F36" stroke="#31567F" stroke-width="2"/>
+    <text x="781" y="298" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">Scope</text>
+    <text x="760" y="330" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">Allowed files, paths,</text>
+    <text x="773" y="350" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">commands, budgets</text>
+  </g>
+
+  <g>
+    <circle cx="822" cy="554" r="72" fill="#121F36" stroke="#31567F" stroke-width="2"/>
+    <text x="772" y="548" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">Execute</text>
+    <text x="757" y="580" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">Workspaces, tools,</text>
+    <text x="759" y="600" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">bounded mutation</text>
+  </g>
+
+  <g>
+    <circle cx="600" cy="676" r="72" fill="#121F36" stroke="#31567F" stroke-width="2"/>
+    <text x="548" y="670" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">Validate</text>
+    <text x="553" y="702" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">Tests, build, review,</text>
+    <text x="553" y="722" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">evidence before trust</text>
+  </g>
+
+  <g>
+    <circle cx="378" cy="554" r="72" fill="#121F36" stroke="#31567F" stroke-width="2"/>
+    <text x="331" y="548" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">Review</text>
+    <text x="327" y="580" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">Approval gates and</text>
+    <text x="316" y="600" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">human decision points</text>
+  </g>
+
+  <g>
+    <circle cx="378" cy="304" r="72" fill="#121F36" stroke="#31567F" stroke-width="2"/>
+    <text x="338" y="298" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">Learn</text>
+    <text x="319" y="330" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">Memory, context, and</text>
+    <text x="319" y="350" fill="#99B0CF" font-family="Inter, Arial, sans-serif" font-size="14">future run guidance</text>
+  </g>
+
+  <path d="M668 188C732 198 786 227 822 268" stroke="#7DD3FC" stroke-width="4" stroke-linecap="round"/>
+  <path d="M860 372C873 417 873 453 860 500" stroke="#56ECC4" stroke-width="4" stroke-linecap="round"/>
+  <path d="M770 614C727 650 681 671 641 680" stroke="#F6A16B" stroke-width="4" stroke-linecap="round"/>
+  <path d="M558 680C510 671 461 648 423 614" stroke="#F68A7D" stroke-width="4" stroke-linecap="round"/>
+  <path d="M340 500C327 450 327 416 340 372" stroke="#63D6F7" stroke-width="4" stroke-linecap="round"/>
+  <path d="M423 268C468 227 520 198 560 188" stroke="#56ECC4" stroke-width="4" stroke-linecap="round"/>
+</svg>

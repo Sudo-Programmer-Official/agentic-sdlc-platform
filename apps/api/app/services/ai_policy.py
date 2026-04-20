@@ -706,6 +706,7 @@ class AIJobManager:
         *,
         input_tokens: int,
         output_tokens: int,
+        actual_cost_cents: float | None = None,
         confidence_score: float | None = None,
         details: dict[str, Any] | None = None,
         approval_state: str | None = None,
@@ -718,8 +719,10 @@ class AIJobManager:
                 return
             row.tokens_input = max(row.tokens_input, input_tokens)
             row.tokens_output = max(row.tokens_output, output_tokens)
-            row.actual_cost_cents = self.estimate_cost_cents(
-                row.selected_model_tier, row.tokens_input, row.tokens_output
+            row.actual_cost_cents = (
+                _round_cost(actual_cost_cents)
+                if actual_cost_cents is not None
+                else self.estimate_cost_cents(row.selected_model_tier, row.tokens_input, row.tokens_output)
             )
             row.confidence_score = confidence_score
             row.status = status
@@ -740,6 +743,7 @@ class AIJobManager:
         error_kind: str | None = None,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        actual_cost_cents: float | None = None,
         details: dict[str, Any] | None = None,
         approval_state: str | None = None,
         status: str = "failed",
@@ -751,8 +755,10 @@ class AIJobManager:
                 return
             row.tokens_input = max(row.tokens_input, input_tokens)
             row.tokens_output = max(row.tokens_output, output_tokens)
-            row.actual_cost_cents = self.estimate_cost_cents(
-                row.selected_model_tier, row.tokens_input, row.tokens_output
+            row.actual_cost_cents = (
+                _round_cost(actual_cost_cents)
+                if actual_cost_cents is not None
+                else self.estimate_cost_cents(row.selected_model_tier, row.tokens_input, row.tokens_output)
             )
             row.status = status
             row.stop_reason = reason

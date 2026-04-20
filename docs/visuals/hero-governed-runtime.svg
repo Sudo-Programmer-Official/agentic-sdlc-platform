@@ -1,0 +1,125 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgHero" x1="120" y1="80" x2="1320" y2="820" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B132B"/>
+      <stop offset="0.55" stop-color="#10203D"/>
+      <stop offset="1" stop-color="#0E1A2F"/>
+    </linearGradient>
+    <linearGradient id="panelHero" x1="300" y1="190" x2="1110" y2="720" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#182A4A" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#111C33" stop-opacity="0.9"/>
+    </linearGradient>
+    <linearGradient id="accentBlue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5EE4FF"/>
+      <stop offset="1" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="accentTeal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#52F6C8"/>
+      <stop offset="1" stop-color="#1FA7A3"/>
+    </linearGradient>
+    <linearGradient id="accentCoral" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF9D7A"/>
+      <stop offset="1" stop-color="#F25F5C"/>
+    </linearGradient>
+    <filter id="shadowHero" x="-40" y="-40" width="1520" height="980" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="30" flood-color="#07101F" flood-opacity="0.45"/>
+    </filter>
+    <filter id="blurOrb" x="0" y="0" width="1440" height="900" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="50"/>
+    </filter>
+    <marker id="arrowHero" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+      <path d="M0 0L14 7L0 14V0Z" fill="#7DD3FC"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="900" rx="32" fill="url(#bgHero)"/>
+
+  <g opacity="0.55" filter="url(#blurOrb)">
+    <circle cx="250" cy="190" r="120" fill="#1FA7A3"/>
+    <circle cx="1170" cy="190" r="140" fill="#2563EB"/>
+    <circle cx="1040" cy="740" r="130" fill="#F25F5C"/>
+  </g>
+
+  <text x="110" y="122" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="54" font-weight="700">
+    Governed AI Software Delivery
+  </text>
+  <text x="110" y="168" fill="#A8BCD8" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="500">
+    Visible plan, bounded scope, controlled execution, validation, review.
+  </text>
+
+  <g filter="url(#shadowHero)">
+    <rect x="90" y="212" width="1260" height="598" rx="34" fill="url(#panelHero)" stroke="#2A4A74" stroke-opacity="0.9"/>
+  </g>
+
+  <rect x="132" y="250" width="206" height="130" rx="24" fill="#101B31" stroke="#345A84"/>
+  <circle cx="174" cy="292" r="20" fill="url(#accentBlue)"/>
+  <text x="206" y="287" fill="#D8E7FF" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">User Goal</text>
+  <text x="154" y="326" fill="#91A7C7" font-family="Inter, Arial, sans-serif" font-size="15">"Ship a bounded feature"</text>
+  <text x="154" y="349" fill="#91A7C7" font-family="Inter, Arial, sans-serif" font-size="15">with validation and review</text>
+
+  <rect x="392" y="250" width="220" height="130" rx="24" fill="#101B31" stroke="#345A84"/>
+  <rect x="418" y="274" width="72" height="10" rx="5" fill="#63D6F7"/>
+  <rect x="418" y="297" width="150" height="10" rx="5" fill="#2E5078"/>
+  <rect x="418" y="320" width="124" height="10" rx="5" fill="#2E5078"/>
+  <rect x="418" y="343" width="138" height="10" rx="5" fill="#2E5078"/>
+  <text x="418" y="370" fill="#D8E7FF" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Visible Plan</text>
+
+  <rect x="666" y="250" width="248" height="130" rx="24" fill="#101B31" stroke="#345A84"/>
+  <text x="692" y="286" fill="#D8E7FF" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Execution Contract</text>
+  <rect x="692" y="303" width="92" height="24" rx="12" fill="#163552"/>
+  <text x="707" y="320" fill="#9DDFFF" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Allowed files</text>
+  <rect x="792" y="303" width="96" height="24" rx="12" fill="#173A39"/>
+  <text x="811" y="320" fill="#8FF2D2" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Validations</text>
+  <rect x="692" y="338" width="122" height="24" rx="12" fill="#4C2B29"/>
+  <text x="709" y="355" fill="#FFB19C" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Protected paths</text>
+  <rect x="824" y="338" width="72" height="24" rx="12" fill="#163552"/>
+  <text x="842" y="355" fill="#9DDFFF" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Budget</text>
+
+  <rect x="968" y="250" width="250" height="130" rx="24" fill="#101B31" stroke="#345A84"/>
+  <text x="994" y="286" fill="#D8E7FF" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Controlled Runtime</text>
+  <rect x="994" y="306" width="56" height="12" rx="6" fill="#56ECC4"/>
+  <rect x="994" y="329" width="118" height="12" rx="6" fill="#2A4A74"/>
+  <rect x="994" y="352" width="136" height="12" rx="6" fill="#2A4A74"/>
+  <circle cx="1166" cy="318" r="9" fill="#63D6F7"/>
+  <circle cx="1192" cy="318" r="9" fill="#56ECC4"/>
+  <circle cx="1218" cy="318" r="9" fill="#F68A7D"/>
+
+  <path d="M338 315H382" stroke="#7DD3FC" stroke-width="4" stroke-linecap="round" marker-end="url(#arrowHero)"/>
+  <path d="M612 315H656" stroke="#7DD3FC" stroke-width="4" stroke-linecap="round" marker-end="url(#arrowHero)"/>
+  <path d="M914 315H958" stroke="#7DD3FC" stroke-width="4" stroke-linecap="round" marker-end="url(#arrowHero)"/>
+
+  <rect x="158" y="444" width="1124" height="284" rx="28" fill="#0D1628" stroke="#274463"/>
+  <text x="196" y="490" fill="#E8F1FF" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="700">
+    Mission Control
+  </text>
+  <text x="196" y="520" fill="#8DA6C8" font-family="Inter, Arial, sans-serif" font-size="17">
+    Operators can inspect the run, see failures honestly, and decide before trust.
+  </text>
+
+  <rect x="198" y="553" width="328" height="135" rx="22" fill="#131F35" stroke="#2A4A74"/>
+  <text x="224" y="585" fill="#C8D9F4" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700">Run Plan</text>
+  <rect x="224" y="604" width="256" height="10" rx="5" fill="#274463"/>
+  <rect x="224" y="626" width="222" height="10" rx="5" fill="#274463"/>
+  <rect x="224" y="648" width="184" height="10" rx="5" fill="#274463"/>
+  <rect x="224" y="668" width="96" height="8" rx="4" fill="#63D6F7"/>
+
+  <rect x="554" y="553" width="300" height="135" rx="22" fill="#131F35" stroke="#2A4A74"/>
+  <text x="580" y="585" fill="#C8D9F4" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700">Validation and Review</text>
+  <rect x="580" y="607" width="82" height="24" rx="12" fill="#173A39"/>
+  <text x="596" y="624" fill="#8FF2D2" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Tests pass</text>
+  <rect x="673" y="607" width="94" height="24" rx="12" fill="#163552"/>
+  <text x="689" y="624" fill="#9DDFFF" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Build ready</text>
+  <rect x="580" y="644" width="128" height="24" rx="12" fill="#4C2B29"/>
+  <text x="597" y="661" fill="#FFB19C" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Review required</text>
+  <rect x="720" y="644" width="96" height="24" rx="12" fill="#173A39"/>
+  <text x="739" y="661" fill="#8FF2D2" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Approval</text>
+
+  <rect x="882" y="553" width="360" height="135" rx="22" fill="#131F35" stroke="#2A4A74"/>
+  <text x="908" y="585" fill="#C8D9F4" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700">Recent Signals</text>
+  <circle cx="918" cy="612" r="6" fill="#56ECC4"/>
+  <text x="936" y="617" fill="#9AB3D1" font-family="Inter, Arial, sans-serif" font-size="14">Current step visible</text>
+  <circle cx="918" cy="639" r="6" fill="#63D6F7"/>
+  <text x="936" y="644" fill="#9AB3D1" font-family="Inter, Arial, sans-serif" font-size="14">Commands and logs surfaced</text>
+  <circle cx="918" cy="666" r="6" fill="#F68A7D"/>
+  <text x="936" y="671" fill="#9AB3D1" font-family="Inter, Arial, sans-serif" font-size="14">Failures block downstream trust</text>
+</svg>

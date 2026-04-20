@@ -536,6 +536,7 @@ class CodexExecutor(TaskExecutor):
         current_completion_token_estimate = completion_token_estimate
         usage_input_tokens = 0
         usage_output_tokens = 0
+        usage_cost_cents = 0.0
         attempt_tiers: list[str] = []
         retry_reason: str | None = None
         effective_model_tier = prepared.policy.selected_model_tier
@@ -582,6 +583,15 @@ class CodexExecutor(TaskExecutor):
                 current_output_tokens = int(usage.get("output_tokens") or estimate_tokens(raw))
                 usage_input_tokens += current_input_tokens
                 usage_output_tokens += current_output_tokens
+                usage_cost_cents = round(
+                    usage_cost_cents
+                    + self._job_manager.estimate_cost_cents(
+                        current_model_tier,
+                        current_input_tokens,
+                        current_output_tokens,
+                    ),
+                    4,
+                )
                 usage = {
                     "input_tokens": usage_input_tokens,
                     "output_tokens": usage_output_tokens,
@@ -606,6 +616,7 @@ class CodexExecutor(TaskExecutor):
                         error_kind="run_budget_exhausted",
                         input_tokens=usage_input_tokens,
                         output_tokens=usage_output_tokens,
+                        actual_cost_cents=usage_cost_cents,
                         details={
                             "attempt_tiers": attempt_tiers,
                             "provider": self.settings.llm_provider,
@@ -662,6 +673,7 @@ class CodexExecutor(TaskExecutor):
                     error_kind=error_kind,
                     input_tokens=usage_input_tokens,
                     output_tokens=usage_output_tokens,
+                    actual_cost_cents=usage_cost_cents,
                     details={
                         "error_message": str(exc),
                         "exception_type": exc.__class__.__name__,
@@ -734,6 +746,7 @@ class CodexExecutor(TaskExecutor):
                 error_kind="low_confidence_reasoning",
                 input_tokens=usage_input_tokens,
                 output_tokens=usage_output_tokens,
+                actual_cost_cents=usage_cost_cents,
                 approval_state="pending",
                 status="blocked",
                 details={"confidence": plan.confidence, "attempt_tiers": attempt_tiers, "model_name": effective_model_name},
@@ -772,6 +785,7 @@ class CodexExecutor(TaskExecutor):
                     error_kind="human_review_required",
                     input_tokens=usage_input_tokens,
                     output_tokens=usage_output_tokens,
+                    actual_cost_cents=usage_cost_cents,
                     approval_state="pending",
                     status="blocked",
                     details={"verification": verification.model_dump()},
@@ -794,6 +808,7 @@ class CodexExecutor(TaskExecutor):
                     error_kind="patch_guard_violation",
                     input_tokens=usage_input_tokens,
                     output_tokens=usage_output_tokens,
+                    actual_cost_cents=usage_cost_cents,
                     details={"violations": patch_guard.violations},
                 )
                 return {
@@ -905,6 +920,15 @@ class CodexExecutor(TaskExecutor):
                         repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
                         usage_input_tokens += repair_input_tokens
                         usage_output_tokens += repair_output_tokens
+                        usage_cost_cents = round(
+                            usage_cost_cents
+                            + self._job_manager.estimate_cost_cents(
+                                repair_model_tier,
+                                repair_input_tokens,
+                                repair_output_tokens,
+                            ),
+                            4,
+                        )
                         usage = {
                             "input_tokens": usage_input_tokens,
                             "output_tokens": usage_output_tokens,
@@ -929,6 +953,7 @@ class CodexExecutor(TaskExecutor):
                                 error_kind="run_budget_exhausted",
                                 input_tokens=usage_input_tokens,
                                 output_tokens=usage_output_tokens,
+                                actual_cost_cents=usage_cost_cents,
                                 details={
                                     "attempt_tiers": attempt_tiers,
                                     "provider": self.settings.llm_provider,
@@ -949,6 +974,7 @@ class CodexExecutor(TaskExecutor):
                     error_kind="action_error",
                     input_tokens=usage_input_tokens,
                     output_tokens=usage_output_tokens,
+                    actual_cost_cents=usage_cost_cents,
                     details={"error": str(exc), "attempt_tiers": attempt_tiers, "model_name": effective_model_name},
                 )
                 return {
@@ -1005,6 +1031,7 @@ class CodexExecutor(TaskExecutor):
                 prepared.job_id,
                 input_tokens=usage_input_tokens,
                 output_tokens=usage_output_tokens,
+                actual_cost_cents=usage_cost_cents,
                 confidence_score=plan.confidence,
                 details={
                     "review_metrics": review_metrics,
@@ -1023,6 +1050,7 @@ class CodexExecutor(TaskExecutor):
                 error_kind="model_reported_failure",
                 input_tokens=usage_input_tokens,
                 output_tokens=usage_output_tokens,
+                actual_cost_cents=usage_cost_cents,
                 details={
                     "review_metrics": review_metrics,
                     "warnings": plan.warnings,

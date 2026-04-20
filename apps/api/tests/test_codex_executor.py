@@ -3,9 +3,11 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
+from app.db.models import AIJobRun
 from app.db.models import Project, Run, WorkItem
 from app.runtime.context import RunContext
 from app.runtime.codex_executor import (
@@ -1423,6 +1425,13 @@ async def test_fix_test_failure_retry_escalates_to_premium_model(
     assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
     assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
     assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+    async with db_session_factory() as session:
+        ai_job = (
+            await session.execute(select(AIJobRun).where(AIJobRun.run_id == run_id))
+        ).scalars().one()
+
+    assert ai_job.actual_cost_cents == pytest.approx(0.0065, rel=1e-6)
 
 
 @pytest.mark.anyio

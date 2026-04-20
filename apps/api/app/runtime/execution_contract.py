@@ -17,10 +17,19 @@ from app.services.work_item_state import is_blocking_failure, is_non_blocking_fa
 VALIDATION_WORK_ITEM_TYPES = {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
 DEFAULT_CONTRACT_VERSION = 1
 DEFAULT_CODEX_MAX_RUN_TOKENS = 200_000
-DEFAULT_CODEX_MAX_RUN_COST_CENTS = 30.0
+DEFAULT_CODEX_MAX_RUN_COST_CENTS = 50.0
 DEFAULT_CODEX_MAX_TOKENS = 1_200
 DEFAULT_ECONOMY_COMPLETION_TOKENS = 800
 DEFAULT_STANDARD_COMPLETION_TOKENS = 1_200
+AI_BUDGETED_WORK_ITEM_TYPES = {
+    "PLAN_DAG",
+    "CODE_BACKEND",
+    "CODE_FRONTEND",
+    "WRITE_TESTS",
+    "REVIEW_DIFF",
+    "REVIEW_INTEGRATION",
+    "FIX_TEST_FAILURE",
+}
 
 
 def _now_iso() -> str:
@@ -219,6 +228,28 @@ def _edit_budget(summary: dict[str, Any] | None, settings: Settings | None = Non
     file_budget = max(1, file_budget)
     hard_file_budget = max(file_budget, hard_file_budget)
     return scope_mode, file_budget, hard_file_budget
+
+
+def _planned_run_cost_budget(plan_snapshot: dict[str, Any] | None, settings: Settings | None = None) -> float:
+    cfg = settings or get_settings()
+    default_budget = float(getattr(cfg, "codex_max_run_cost_cents", DEFAULT_CODEX_MAX_RUN_COST_CENTS))
+    steps = plan_snapshot.get("steps") if isinstance(plan_snapshot, dict) else None
+    if not isinstance(steps, list):
+        return default_budget
+
+    per_step_budget = float(getattr(cfg, "ai_budget_standard_cents", 8.0))
+    planned_total = 0.0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        work_item_type = step.get("work_item_type")
+        if not isinstance(work_item_type, str):
+            continue
+        if work_item_type.strip().upper() not in AI_BUDGETED_WORK_ITEM_TYPES:
+            continue
+        planned_total += per_step_budget
+
+    return round(max(default_budget, planned_total), 4)
 
 
 def _default_allowed_prefixes(settings: Settings | None = None) -> list[str]:
@@ -540,10 +571,15 @@ def build_execution_contract(
             }
         )
     )
-    budget = previous.budget if previous is not None else ExecutionBudgetLedger(
-        max_tokens=int(getattr(cfg, "codex_max_run_tokens", DEFAULT_CODEX_MAX_RUN_TOKENS)),
-        max_cost_cents=float(getattr(cfg, "codex_max_run_cost_cents", DEFAULT_CODEX_MAX_RUN_COST_CENTS)),
-    )
+    planned_run_cost_budget = _planned_run_cost_budget(plan, cfg)
+    if previous is not None:
+        previous.budget.max_cost_cents = max(float(previous.budget.max_cost_cents), planned_run_cost_budget)
+        budget = previous.budget
+    else:
+        budget = ExecutionBudgetLedger(
+            max_tokens=int(getattr(cfg, "codex_max_run_tokens", DEFAULT_CODEX_MAX_RUN_TOKENS)),
+            max_cost_cents=planned_run_cost_budget,
+        )
     budget.refresh(cfg)
 
     validation_state = previous.validation_state if previous is not None else (ValidationState.PENDING if validation_steps else ValidationState.NOT_REQUIRED)

@@ -1,0 +1,76 @@
+<svg width="1280" height="760" viewBox="0 0 1280 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgInvestor" x1="110" y1="60" x2="1180" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B132B"/>
+      <stop offset="1" stop-color="#101C34"/>
+    </linearGradient>
+    <linearGradient id="cardInvestor" x1="200" y1="240" x2="1080" y2="560" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#13243F"/>
+      <stop offset="1" stop-color="#101A2F"/>
+    </linearGradient>
+    <marker id="arrowInvestor" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+      <path d="M0 0L14 7L0 14V0Z" fill="#7DD3FC"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="760" rx="28" fill="url(#bgInvestor)"/>
+
+  <text x="90" y="100" fill="#EEF5FF" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="700">
+    Category Wedge
+  </text>
+  <text x="90" y="138" fill="#A3B9D7" font-family="Inter, Arial, sans-serif" font-size="22">
+    Teams want AI speed, but they do not trust blind execution. The product sits in that gap.
+  </text>
+
+  <rect x="84" y="198" width="1112" height="470" rx="32" fill="url(#cardInvestor)" stroke="#2D4E75"/>
+
+  <rect x="126" y="266" width="218" height="336" rx="28" fill="#161D31" stroke="#A9544D"/>
+  <text x="156" y="314" fill="#FFB09E" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Pain</text>
+  <circle cx="168" cy="350" r="8" fill="#F68A7D"/>
+  <text x="188" y="355" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Hidden changes</text>
+  <circle cx="168" cy="390" r="8" fill="#F68A7D"/>
+  <text x="188" y="395" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Architecture drift</text>
+  <circle cx="168" cy="430" r="8" fill="#F68A7D"/>
+  <text x="188" y="435" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Weak validation</text>
+  <circle cx="168" cy="470" r="8" fill="#F68A7D"/>
+  <text x="188" y="475" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Low trust in AI runs</text>
+  <circle cx="168" cy="510" r="8" fill="#F68A7D"/>
+  <text x="188" y="515" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">No shared workflow</text>
+
+  <rect x="428" y="236" width="420" height="396" rx="30" fill="#131F35" stroke="#355D88"/>
+  <text x="466" y="286" fill="#EAF2FF" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Governed Runtime</text>
+  <text x="466" y="320" fill="#A0B7D6" font-family="Inter, Arial, sans-serif" font-size="17">
+    Control plane for AI-assisted software delivery
+  </text>
+
+  <rect x="466" y="356" width="160" height="76" rx="22" fill="#153653"/>
+  <text x="490" y="389" fill="#9DDEFF" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">Execution</text>
+  <text x="490" y="411" fill="#9DDEFF" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">Contracts</text>
+
+  <rect x="646" y="356" width="160" height="76" rx="22" fill="#173A39"/>
+  <text x="675" y="389" fill="#8CF2D3" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">Architecture</text>
+  <text x="693" y="411" fill="#8CF2D3" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">Profile</text>
+
+  <rect x="466" y="452" width="160" height="76" rx="22" fill="#153653"/>
+  <text x="494" y="485" fill="#9DDEFF" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">Validation</text>
+  <text x="510" y="507" fill="#9DDEFF" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">Layer</text>
+
+  <rect x="646" y="452" width="160" height="76" rx="22" fill="#4D292A"/>
+  <text x="685" y="485" fill="#FFB3A0" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">Review</text>
+  <text x="676" y="507" fill="#FFB3A0" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">and Gates</text>
+
+  <path d="M344 434H410" stroke="#7DD3FC" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowInvestor)"/>
+  <path d="M848 434H912" stroke="#7DD3FC" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowInvestor)"/>
+
+  <rect x="930" y="266" width="224" height="158" rx="28" fill="#161D31" stroke="#2E7B6F"/>
+  <text x="960" y="314" fill="#8CF2D3" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Outcomes</text>
+  <text x="960" y="356" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Faster delivery</text>
+  <text x="960" y="388" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Less rework</text>
+  <text x="960" y="420" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Higher operator trust</text>
+
+  <rect x="930" y="444" width="224" height="158" rx="28" fill="#161D31" stroke="#355D88"/>
+  <text x="960" y="492" fill="#9DDEFF" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Buyers</text>
+  <text x="960" y="534" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Startups</text>
+  <text x="960" y="566" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Engineering teams</text>
+  <text x="960" y="598" fill="#CFDDF4" font-family="Inter, Arial, sans-serif" font-size="16">Agencies and platform teams</text>
+</svg>

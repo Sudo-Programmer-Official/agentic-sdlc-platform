@@ -1,0 +1,72 @@
+<svg width="1280" height="900" viewBox="0 0 1280 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgArch" x1="120" y1="80" x2="1160" y2="820" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#091222"/>
+      <stop offset="1" stop-color="#14233D"/>
+    </linearGradient>
+    <linearGradient id="layerBlue" x1="260" y1="210" x2="1020" y2="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17385D"/>
+      <stop offset="1" stop-color="#24538A"/>
+    </linearGradient>
+    <linearGradient id="layerTeal" x1="260" y1="346" x2="1020" y2="396" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#124542"/>
+      <stop offset="1" stop-color="#1A7C71"/>
+    </linearGradient>
+    <linearGradient id="layerSlate" x1="260" y1="482" x2="1020" y2="532" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2B46"/>
+      <stop offset="1" stop-color="#304E7A"/>
+    </linearGradient>
+    <linearGradient id="layerCoral" x1="260" y1="618" x2="1020" y2="668" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#55322F"/>
+      <stop offset="1" stop-color="#8D4A45"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="900" rx="28" fill="url(#bgArch)"/>
+
+  <text x="94" y="102" fill="#EEF5FF" font-family="Inter, Arial, sans-serif" font-size="44" font-weight="700">
+    Control-Plane Architecture
+  </text>
+  <text x="94" y="140" fill="#A3B9D7" font-family="Inter, Arial, sans-serif" font-size="22">
+    A layered runtime for architecture-aware, contract-driven AI software delivery.
+  </text>
+
+  <rect x="180" y="188" width="920" height="102" rx="28" fill="url(#layerBlue)" stroke="#5B9BE8"/>
+  <text x="222" y="228" fill="#EAF2FF" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Experience Layer</text>
+  <text x="222" y="257" fill="#B8D4F4" font-family="Inter, Arial, sans-serif" font-size="18">Mission Control, operator workflow, approvals, review surfaces</text>
+  <text x="862" y="244" fill="#DFF1FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">apps/web</text>
+
+  <rect x="180" y="324" width="920" height="102" rx="28" fill="url(#layerTeal)" stroke="#58CBBE"/>
+  <text x="222" y="364" fill="#EDFFFA" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Control Plane</text>
+  <text x="222" y="393" fill="#C7F6EC" font-family="Inter, Arial, sans-serif" font-size="18">API, scheduler, orchestrator, execution graph, stage transitions</text>
+  <text x="826" y="380" fill="#EDFFFA" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">apps/api</text>
+
+  <rect x="180" y="460" width="920" height="102" rx="28" fill="url(#layerSlate)" stroke="#8AAEE0"/>
+  <text x="222" y="500" fill="#EAF2FF" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Policy and Context Layer</text>
+  <text x="222" y="529" fill="#C5D8F2" font-family="Inter, Arial, sans-serif" font-size="18">Execution contracts, AI policy, architecture profiles, engineering memory</text>
+  <text x="724" y="516" fill="#EAF2FF" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">control + guidance</text>
+
+  <rect x="180" y="596" width="920" height="102" rx="28" fill="url(#layerCoral)" stroke="#E69A86"/>
+  <text x="222" y="636" fill="#FFF2ED" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Execution and Evidence Layer</text>
+  <text x="222" y="665" fill="#F7C9BF" font-family="Inter, Arial, sans-serif" font-size="18">Workspaces, repo tools, codex and test executors, events, artifacts, summaries</text>
+  <text x="718" y="652" fill="#FFF2ED" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">bounded mutation</text>
+
+  <path d="M640 290V324" stroke="#7DD3FC" stroke-width="5" stroke-linecap="round"/>
+  <path d="M640 426V460" stroke="#7DD3FC" stroke-width="5" stroke-linecap="round"/>
+  <path d="M640 562V596" stroke="#7DD3FC" stroke-width="5" stroke-linecap="round"/>
+
+  <rect x="250" y="742" width="236" height="92" rx="24" fill="#121D31" stroke="#355D88"/>
+  <text x="278" y="776" fill="#C8D9F4" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700">Why it matters</text>
+  <text x="278" y="806" fill="#9CB4D2" font-family="Inter, Arial, sans-serif" font-size="14">Moves from prompt-based coding</text>
+  <text x="278" y="826" fill="#9CB4D2" font-family="Inter, Arial, sans-serif" font-size="14">to governed delivery.</text>
+
+  <rect x="522" y="742" width="236" height="92" rx="24" fill="#121D31" stroke="#2E7B6F"/>
+  <text x="550" y="776" fill="#CFFCF2" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700">Core strength</text>
+  <text x="550" y="806" fill="#A6DCD4" font-family="Inter, Arial, sans-serif" font-size="14">Visible plan, bounded scope,</text>
+  <text x="550" y="826" fill="#A6DCD4" font-family="Inter, Arial, sans-serif" font-size="14">validation and review.</text>
+
+  <rect x="794" y="742" width="236" height="92" rx="24" fill="#121D31" stroke="#A9544D"/>
+  <text x="822" y="776" fill="#FFD8CF" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700">Research wedge</text>
+  <text x="822" y="806" fill="#E7B4A9" font-family="Inter, Arial, sans-serif" font-size="14">Contract-driven autonomous</text>
+  <text x="822" y="826" fill="#E7B4A9" font-family="Inter, Arial, sans-serif" font-size="14">software delivery.</text>
+</svg>

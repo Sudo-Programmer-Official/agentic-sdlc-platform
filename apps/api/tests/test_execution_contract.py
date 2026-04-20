@@ -97,3 +97,22 @@ def test_execution_budget_ledger_blocks_when_remaining_budget_is_exhausted():
     assert ledger.budget_mode == "BLOCKED"
     assert ledger.model_tier_cap == "tier_none"
     assert ledger.completion_token_cap == 0
+
+
+def test_build_execution_contract_scales_run_cost_budget_with_ai_backed_steps():
+    contract = build_execution_contract(
+        run_summary={"goal": "Polish the landing page"},
+        architecture_profile=None,
+        plan_snapshot={
+            "steps": [
+                {"work_item_type": "PLAN_DAG"},
+                {"work_item_type": "CODE_FRONTEND"},
+                {"work_item_type": "WRITE_TESTS"},
+                {"work_item_type": "RUN_TESTS"},
+                {"work_item_type": "REVIEW_DIFF"},
+                {"work_item_type": "REVIEW_INTEGRATION"},
+            ]
+        },
+    )
+
+    assert contract.budget.max_cost_cents == 40.0

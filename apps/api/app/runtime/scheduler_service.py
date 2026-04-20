@@ -3,16 +3,53 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, exists
 
 from app.core.config import get_settings
-from app.db.models import Run, WorkItem
+from app.db.models import Run, WorkItem, WorkItemEdge
 from app.db.session import SessionLocal
 from app.runtime.leases import reclaim_expired_work_items
 from app.services.event_log import record_event
 from app.services.run_delivery import publish_run_branch_if_ready
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
+
+
+async def _cancel_terminally_blocked_items(session, run: Run) -> int:
+    blocked_items = (
+        await session.execute(
+            select(WorkItem)
+            .where(
+                WorkItem.run_id == run.id,
+                WorkItem.status == "QUEUED",
+            )
+            .order_by(WorkItem.priority.desc(), WorkItem.created_at)
+        )
+    ).scalars().all()
+    if not blocked_items:
+        return 0
+
+    finished_at = datetime.now(timezone.utc)
+    for wi in blocked_items:
+        wi.status = "CANCELED"
+        wi.finished_at = finished_at
+        session.add(wi)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            work_item_id=wi.id,
+            event_type="WORK_ITEM_CANCELED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            message="Canceled because an upstream failure left this work item blocked.",
+            payload={
+                "work_item_id": str(wi.id),
+                "reason": "blocked_by_terminal_failure",
+            },
+        )
+    await session.flush()
+    return len(blocked_items)
 
 
 async def tick(session):
@@ -101,6 +138,35 @@ async def tick(session):
                 )
             )
         ).scalar() or 0
+        if failed_non_superseded and active == 0 and queued:
+            from sqlalchemy.orm import aliased
+
+            parent = aliased(WorkItem)
+            blocking_exists = exists(
+                select(1)
+                .select_from(WorkItemEdge)
+                .join(parent, parent.id == WorkItemEdge.from_work_item_id)
+                .where(
+                    WorkItemEdge.run_id == run.id,
+                    WorkItemEdge.to_work_item_id == WorkItem.id,
+                    parent.status.notin_(["DONE", "SKIPPED"]),
+                )
+            )
+            runnable_queued = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(WorkItem)
+                    .where(
+                        WorkItem.run_id == run.id,
+                        WorkItem.status == "QUEUED",
+                        ~blocking_exists,
+                    )
+                )
+            ).scalar() or 0
+            if runnable_queued == 0:
+                canceled_count = await _cancel_terminally_blocked_items(session, run)
+                if canceled_count:
+                    queued = 0
 
         if failed_non_superseded and active == 0 and queued == 0:
             ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "FAILED", set_finished=True)

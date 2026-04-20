@@ -680,6 +680,91 @@ async def test_scheduler_does_not_complete_run_before_work_items_exist(monkeypat
 
 
 @pytest.mark.anyio
+async def test_external_scheduler_fails_run_when_only_blocked_work_items_remain(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Blocked queue scheduler project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="WRITE_TESTS",
+            key="WRITE_TESTS",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            result={"message": "generated test parser is invalid"},
+        )
+        blocked_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="QUEUED",
+            priority=9,
+            executor="test",
+            depends_on_count=1,
+        )
+        session.add_all([failed_item, blocked_item])
+        await session.flush()
+        session.add(
+            WorkItemEdge(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                from_work_item_id=failed_item.id,
+                to_work_item_id=blocked_item.id,
+            )
+        )
+        await session.commit()
+        run_id = run.id
+        blocked_item_id = blocked_item.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        blocked_item = await session.get(WorkItem, blocked_item_id)
+        assert run is not None
+        assert blocked_item is not None
+        assert run.status == "FAILED"
+        assert blocked_item.status == "CANCELED"
+
+        canceled_events = (
+            await session.execute(
+                select(RunEvent)
+                .where(RunEvent.run_id == run_id, RunEvent.event_type == "WORK_ITEM_CANCELED")
+                .order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        assert canceled_events
+        assert canceled_events[0].work_item_id == blocked_item_id
+        assert canceled_events[0].payload == {
+            "work_item_id": str(blocked_item_id),
+            "reason": "blocked_by_terminal_failure",
+        }
+        assert any(
+            event.event_type == "RUN_FAILED"
+            for event in (
+                await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+            ).scalars().all()
+        )
+
+
+@pytest.mark.anyio
 async def test_external_scheduler_publishes_branch_on_completion(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("OPENAI_API_KEY", "")

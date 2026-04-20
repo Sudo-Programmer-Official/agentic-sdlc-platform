@@ -295,11 +295,16 @@ class AIJobManager:
             max_tier: ModelTier = "tier_premium"
             selected_tier: ModelTier = "tier_standard"
         elif role == "coder":
-            max_tier = "tier_premium" if request.tests_failed or request.risk_level == "high" else "tier_standard"
+            frontend_implementation = request.task_type == "implementation" and request.surface == "frontend"
+            max_tier = (
+                "tier_premium"
+                if request.tests_failed or request.risk_level == "high" or request.task_type == "testing" or frontend_implementation
+                else "tier_standard"
+            )
             selected_tier = "tier_standard"
         elif role == "reviewer":
-            max_tier = "tier_premium" if request.risk_level == "high" else "tier_standard"
-            selected_tier = max_tier
+            max_tier = "tier_premium"
+            selected_tier = "tier_premium" if request.risk_level == "high" else "tier_standard"
         elif role in {"documenter", "classifier"}:
             max_tier = "tier_economy"
             selected_tier = "tier_economy"

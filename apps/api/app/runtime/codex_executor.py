@@ -41,6 +41,16 @@ Never use placeholder hunk headers such as @@ ... @@.
 Never return a hunk-only patch fragment that starts with @@ before file headers.
 Do not invent files outside the repo. Do not include explanations outside JSON."""
 
+REVIEW_SYSTEM_PROMPT = """You are an automated code review worker.
+You must output ONLY a valid JSON object matching the provided schema.
+This is a review stage, not an implementation stage.
+Return only note actions with concise review findings, approval guidance, risks, or follow-up recommendations.
+Never emit apply_patch, write_file, or delete_file actions.
+Do not reproduce full diffs or file contents.
+Do not invent files outside the repo. Do not include explanations outside JSON."""
+
+STRUCTURED_OUTPUT_RETRY_LIMIT = 1
+
 log = logging.getLogger("app.runtime.codex_executor")
 _UNIFIED_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$")
 
@@ -88,15 +98,24 @@ def _verification_from_action_scope(
 def _target_files_from_payload(payload: dict[str, Any] | None) -> list[str]:
     if not isinstance(payload, dict):
         return []
+    explicit_values: list[str] = []
+    fallback_values: list[str] = []
     scoped = payload.get("target_files")
     if isinstance(scoped, list):
-        values = scoped
-    elif isinstance(payload.get("files"), list):
-        values = payload.get("files")
-    elif isinstance(payload.get("expected_files"), list):
-        values = payload.get("expected_files")
-    else:
-        values = []
+        explicit_values.extend(item for item in scoped if isinstance(item, str))
+    elif isinstance(scoped, str) and scoped.strip():
+        explicit_values.append(scoped.strip())
+    for key in ("target_file", "file", "filepath", "path"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            explicit_values.append(raw.strip())
+        elif isinstance(raw, list):
+            explicit_values.extend(item for item in raw if isinstance(item, str) and item.strip())
+    if isinstance(payload.get("files"), list):
+        fallback_values.extend(item for item in payload["files"] if isinstance(item, str))
+    if isinstance(payload.get("expected_files"), list):
+        fallback_values.extend(item for item in payload["expected_files"] if isinstance(item, str))
+    values = explicit_values or fallback_values
     normalized: list[str] = []
     for value in values:
         if isinstance(value, str) and value.strip():
@@ -199,6 +218,8 @@ def _stage_scope_violations(
     violations: list[str] = []
     if "PLAN" in work_item.type and has_mutating_actions(actions):
         violations.append("PLAN work items may only return note actions; mutating file operations are out of scope.")
+    if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"} and has_mutating_actions(actions):
+        violations.append("REVIEW work items may only return note actions; mutating file operations are out of scope.")
     if work_item.type != "WRITE_TESTS":
         return violations
     for path in touched_files:
@@ -240,6 +261,11 @@ class CodexExecutor(TaskExecutor):
             # changed-lines/original-lines ratios for these bounded scopes.
             return float("inf")
         return ratio
+
+    def _system_prompt_for(self, work_item: WorkItem) -> str:
+        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+            return REVIEW_SYSTEM_PROMPT
+        return SYSTEM_PROMPT
 
     def _patch_change_ratio(
         self,
@@ -285,6 +311,8 @@ class CodexExecutor(TaskExecutor):
             return policy.selected_model_tier
         if retry_reason in {"rate_limit", "timeout", "transient_network_failure"}:
             return policy.selected_model_tier
+        if retry_reason == "structured_parser_failure" and work_item.type in {"PLAN_DAG", "WRITE_TESTS", "CODE_FRONTEND"}:
+            return policy.max_model_tier
         if work_item.type in {"FIX_TEST_FAILURE", "REVIEW_DIFF", "REVIEW_INTEGRATION"} or policy.risk_level == "high":
             return policy.max_model_tier
         return policy.selected_model_tier
@@ -440,18 +468,26 @@ class CodexExecutor(TaskExecutor):
                 "output_schema": CodexPlan.model_json_schema(),
             }
         )
+        system_prompt = self._system_prompt_for(work_item)
         filters_used = ["diff_narrowing", "stack_trace_extraction", "path_hint_lookup", "graph_context_lookup"]
         if context_pack.fragments:
             filters_used.append("context_pack_lookup")
+        initial_policy = self._job_manager.route_job(job_request)
         completion_token_estimate = min(
             self.settings.codex_max_tokens,
             contract.budget.completion_token_cap
             if contract is not None and contract.budget.completion_token_cap is not None
             else self.settings.codex_max_tokens,
         )
+        completion_token_estimate = self._initial_completion_token_estimate(
+            base_max_tokens=completion_token_estimate,
+            selected_model_tier=initial_policy.selected_model_tier,
+            work_item=work_item,
+            contract=contract,
+        )
         prepared = await self._job_manager.prepare_job(
             job_request,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             filters_used=filters_used,
             cache_hit_count=context_pack.cache_hits,
@@ -504,6 +540,7 @@ class CodexExecutor(TaskExecutor):
         retry_reason: str | None = None
         effective_model_tier = prepared.policy.selected_model_tier
         effective_model_name = prepared.model_name or self.settings.codex_model
+        model_retry_count = 0
         client = self._get_client()
         log.info(
             "AI execution starting run_id=%s work_item_id=%s task_id=%s ai_job_id=%s work_item_type=%s tier=%s model=%s provider=%s client_method=%s openai_sdk_version=%s policy=%s",
@@ -519,7 +556,8 @@ class CodexExecutor(TaskExecutor):
             client.sdk_version(),
             self._policy_payload(prepared.policy),
         )
-        for attempt in range(prepared.policy.max_retries + 1):
+        max_attempts = prepared.policy.max_retries + STRUCTURED_OUTPUT_RETRY_LIMIT + 1
+        for attempt in range(max_attempts):
             current_model_tier = self._effective_model_tier(
                 policy=prepared.policy,
                 work_item=work_item,
@@ -533,14 +571,14 @@ class CodexExecutor(TaskExecutor):
             await self._job_manager.record_attempt(prepared.job_id)
             try:
                 raw, usage = await client.generate(
-                    SYSTEM_PROMPT,
+                    system_prompt,
                     current_user_prompt,
                     model=current_model_name,
                     temperature=self.settings.codex_temperature,
                     max_tokens=current_completion_token_estimate,
                     timeout=self.settings.codex_timeout_seconds,
                 )
-                current_input_tokens = int(usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + current_user_prompt))
+                current_input_tokens = int(usage.get("input_tokens") or estimate_tokens(system_prompt + current_user_prompt))
                 current_output_tokens = int(usage.get("output_tokens") or estimate_tokens(raw))
                 usage_input_tokens += current_input_tokens
                 usage_output_tokens += current_output_tokens
@@ -586,12 +624,18 @@ class CodexExecutor(TaskExecutor):
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
                 retry_reason = "structured_parser_failure" if parse_failure else retry_error_kind(exc)
-                if parse_failure and attempt < prepared.policy.max_retries:
+                if parse_failure and parse_retry_count < STRUCTURED_OUTPUT_RETRY_LIMIT:
                     parse_retry_count += 1
                     await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
+                    next_retry_tier = self._effective_model_tier(
+                        policy=prepared.policy,
+                        work_item=work_item,
+                        attempt=attempt + 1,
+                        retry_reason=retry_reason,
+                    )
                     current_completion_token_estimate = self._parse_retry_max_tokens(
                         current_max_tokens=current_completion_token_estimate,
-                        selected_model_tier=effective_model_tier,
+                        selected_model_tier=next_retry_tier,
                         work_item=work_item,
                         contract=contract,
                     )
@@ -605,9 +649,10 @@ class CodexExecutor(TaskExecutor):
                     )
                     continue
                 error_kind = retry_reason
-                if not parse_failure and attempt < prepared.policy.max_retries and is_retryable_error(exc):
+                if not parse_failure and model_retry_count < prepared.policy.max_retries and is_retryable_error(exc):
                     await self._job_manager.record_retry(prepared.job_id, error_kind)
-                    await asyncio.sleep(min(2 ** attempt, 3))
+                    await asyncio.sleep(min(2 ** model_retry_count, 3))
+                    model_retry_count += 1
                     continue
                 failure_reason = "output_contract_invalid" if parse_failure else "model_call_failed"
                 await self._job_manager.fail_job(
@@ -855,7 +900,7 @@ class CodexExecutor(TaskExecutor):
                         exc = repair_exc
                     else:
                         repair_input_tokens = int(
-                            repair_usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + user_prompt)
+                            repair_usage.get("input_tokens") or estimate_tokens(system_prompt + user_prompt)
                         )
                         repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
                         usage_input_tokens += repair_input_tokens
@@ -1335,6 +1380,30 @@ class CodexExecutor(TaskExecutor):
             boosted = min(boosted, max(current_max_tokens, contract.budget.remaining_tokens))
         return max(current_max_tokens, boosted)
 
+    def _initial_completion_token_estimate(
+        self,
+        *,
+        base_max_tokens: int,
+        selected_model_tier: str,
+        work_item: WorkItem,
+        contract: ExecutionContract | None,
+    ) -> int:
+        if work_item.type == "WRITE_TESTS":
+            return self._parse_retry_max_tokens(
+                current_max_tokens=base_max_tokens,
+                selected_model_tier=selected_model_tier,
+                work_item=work_item,
+                contract=contract,
+            )
+        if work_item.type == "CODE_FRONTEND" and _is_static_frontend_scope(work_item.payload):
+            return self._parse_retry_max_tokens(
+                current_max_tokens=base_max_tokens,
+                selected_model_tier=selected_model_tier,
+                work_item=work_item,
+                contract=contract,
+            )
+        return base_max_tokens
+
     def _build_parse_retry_prompt(
         self,
         *,
@@ -1366,6 +1435,21 @@ class CodexExecutor(TaskExecutor):
             guidance.append(
                 "If a long apply_patch diff risks truncation, prefer write_file for a single targeted file or a shorter patch."
             )
+        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+            guidance.append(
+                "This is a review stage. Return only note actions with concise findings or approval guidance."
+            )
+            guidance.append(
+                "Never emit apply_patch, write_file, or delete_file actions, and do not reproduce the diff or file contents."
+            )
+        if work_item.type == "CODE_FRONTEND" and _is_static_frontend_scope(work_item.payload):
+            guidance.append(
+                "For a bounded static frontend file, prefer write_file with the full updated contents of the scoped file instead of apply_patch."
+            )
+        if work_item.type == "WRITE_TESTS":
+            guidance.append(
+                "For WRITE_TESTS, prefer write_file with the full updated contents of the scoped test file instead of apply_patch unless the diff is tiny and exact."
+            )
         guidance.append(f"This is structured output retry {retry_count}.")
         return f"{user_prompt}\n\n" + "\n".join(guidance)
 
@@ -1395,6 +1479,11 @@ class CodexExecutor(TaskExecutor):
             "For single-file HTML/CSS/JS edits, prefer write_file with the full updated file contents.\n"
             "Do not include prose outside the JSON object."
         )
+        if work_item.type == "WRITE_TESTS":
+            repair_prompt += (
+                "\nFor WRITE_TESTS, prefer write_file with the full updated contents of the target test file."
+                " Do not return another apply_patch diff unless it is tiny and exact."
+            )
         current_prompt = repair_prompt
         current_max_tokens = self.settings.codex_max_tokens
         raw = ""
@@ -1402,6 +1491,7 @@ class CodexExecutor(TaskExecutor):
         retry_reason = "patch_apply_error"
         effective_model_tier = prepared.policy.selected_model_tier
         effective_model_name = prepared.model_name or self.settings.codex_model
+        system_prompt = self._system_prompt_for(work_item)
         for retry_count in range(2):
             effective_model_tier = self._effective_model_tier(
                 policy=prepared.policy,
@@ -1414,7 +1504,7 @@ class CodexExecutor(TaskExecutor):
                 fallback=prepared.model_name or self.settings.codex_model,
             )
             raw, usage = await client.generate(
-                SYSTEM_PROMPT,
+                system_prompt,
                 current_prompt,
                 model=effective_model_name,
                 temperature=self.settings.codex_temperature,
@@ -1506,13 +1596,22 @@ class CodexExecutor(TaskExecutor):
             and all(Path(path).suffix.lower() in {".html", ".css", ".js", ".mjs", ".cjs"} for path in target_files)
         )
         architecture = context.architecture_profile if context and isinstance(context.architecture_profile, dict) else {}
-        base = (
-            "Produce JSON per schema. Prefer apply_patch with unified diff. "
-            "Use write_file for new files or complete replacements. Keep changes minimal. "
-            "If you use apply_patch, include full file headers such as --- a/path and +++ b/path before each hunk. "
-            "If you use apply_patch, emit exact unified diff hunk headers with numeric line ranges, "
-            "never use placeholder headers such as @@ ... @@, and never return a hunk-only fragment before file headers."
-        )
+        review_stage = work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}
+        if review_stage:
+            base = (
+                "Produce JSON per schema. This is a review task. "
+                "Return only note actions with concise findings, approval guidance, risks, or follow-up recommendations. "
+                "Do not mutate repository files. Never emit apply_patch, write_file, or delete_file actions. "
+                "Do not restate the full diff or copy large file contents into the response."
+            )
+        else:
+            base = (
+                "Produce JSON per schema. Prefer apply_patch with unified diff. "
+                "Use write_file for new files or complete replacements. Keep changes minimal. "
+                "If you use apply_patch, include full file headers such as --- a/path and +++ b/path before each hunk. "
+                "If you use apply_patch, emit exact unified diff hunk headers with numeric line ranges, "
+                "never use placeholder headers such as @@ ... @@, and never return a hunk-only fragment before file headers."
+            )
         if target_files:
             file_list = ", ".join(target_files[:4])
             base += (
@@ -1547,11 +1646,16 @@ class CodexExecutor(TaskExecutor):
             base += f" Current validation state: {contract.validation_state}."
         if contract is not None and contract.retry_state not in {"", "IDLE"}:
             base += f" Current retry state: {contract.retry_state}."
-        if static_frontend_scope:
+        if static_frontend_scope and not review_stage:
             base += (
                 " This is a static frontend task. Keep implementation inside the scoped HTML/CSS/JS files and "
                 "do not introduce Python helper modules or backend files unless the task explicitly asks for them. "
                 "For single-file HTML/CSS/JS edits, prefer write_file with the full updated file contents if generating an exact unified diff would be awkward."
+            )
+        if work_item.type == "CODE_FRONTEND" and static_frontend_scope:
+            base += (
+                " For a bounded static frontend file, prefer write_file with the full updated contents of that file"
+                " instead of apply_patch so the response stays compact and structurally valid."
             )
         test_dependency_guard = (
             " Tests must rely on the Python standard library or dependencies that are already declared in repo "
@@ -1569,13 +1673,27 @@ class CodexExecutor(TaskExecutor):
                   "Do not weaken or rewrite assertions just to make the suite pass."
                 + test_dependency_guard
             )
-        if work_item.type in {"WRITE_TESTS", "RUN_TESTS"}:
+        if work_item.type == "WRITE_TESTS":
+            return (
+                base
+                + " Keep validation lightweight and directly tied to the requested behavior."
+                  " When updating a bounded test file, prefer write_file with the full updated file contents over apply_patch."
+                  " Malformed unified diffs are treated as hard failures in this stage."
+                + test_dependency_guard
+            )
+        if work_item.type == "RUN_TESTS":
             return base + " Keep validation lightweight and directly tied to the requested behavior." + test_dependency_guard
         if "PLAN" in work_item.type:
             return (
                 base
                 + " This is a planning stage. Do not mutate repository files."
                   " Return only note actions that describe the intended patch and validation sequence."
+            )
+        if review_stage:
+            return (
+                base
+                + " Focus on whether the change matches the requested scope, whether it introduces regressions, and whether validation evidence is sufficient."
+                  " If there are no issues, return note actions confirming the review passed."
             )
         return base
 

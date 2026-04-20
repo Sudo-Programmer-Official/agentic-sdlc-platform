@@ -89,6 +89,26 @@ def test_repo_implementation_routes_standard_tier_to_mini_with_single_retry():
     assert manager.resolve_model_name(policy.selected_model_tier) == "gpt-4.1-mini"
 
 
+def test_frontend_implementation_allows_premium_escalation():
+    manager = AIJobManager()
+    policy = manager.route_job(
+        AIJobRequest(
+            workflow_type="repo_implementation_task",
+            role="coder",
+            task_type="implementation",
+            ambiguity_level="medium",
+            risk_level="medium",
+            tenant_id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
+            surface="frontend",
+        )
+    )
+
+    assert policy.selected_model_tier == "tier_standard"
+    assert policy.max_model_tier == "tier_premium"
+    assert policy.max_retries == 1
+
+
 def test_fix_failure_routes_to_mini_first_with_premium_escalation_available():
     manager = AIJobManager()
     policy = manager.route_job(
@@ -101,6 +121,25 @@ def test_fix_failure_routes_to_mini_first_with_premium_escalation_available():
             tenant_id=uuid.uuid4(),
             project_id=uuid.uuid4(),
             tests_failed=True,
+        )
+    )
+
+    assert policy.selected_model_tier == "tier_standard"
+    assert policy.max_model_tier == "tier_premium"
+    assert policy.max_retries == 1
+
+
+def test_write_tests_routes_to_mini_first_with_premium_escalation_available():
+    manager = AIJobManager()
+    policy = manager.route_job(
+        AIJobRequest(
+            workflow_type="repo_implementation_task",
+            role="coder",
+            task_type="testing",
+            ambiguity_level="medium",
+            risk_level="medium",
+            tenant_id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
         )
     )
 
@@ -127,3 +166,23 @@ def test_high_risk_reviewer_job_does_not_force_human_review():
     assert policy.max_model_tier == "tier_premium"
     assert policy.selected_model_tier == "tier_premium"
     assert policy.requires_human_review is False
+
+
+def test_medium_risk_reviewer_job_can_escalate_to_premium():
+    manager = AIJobManager()
+    policy = manager.route_job(
+        AIJobRequest(
+            workflow_type="pr_review",
+            role="reviewer",
+            task_type="review",
+            ambiguity_level="medium",
+            risk_level="medium",
+            tenant_id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
+            changed_files=["index.html"],
+        )
+    )
+
+    assert policy.selected_model_tier == "tier_standard"
+    assert policy.max_model_tier == "tier_premium"
+    assert policy.max_retries == 1

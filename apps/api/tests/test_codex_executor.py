@@ -28,6 +28,7 @@ class SequencePlanClient:
     def __init__(self, plans: list[dict]):
         self._plans = list(plans)
         self.prompts: list[str] = []
+        self.system_prompts: list[str] = []
 
     def method_name(self) -> str:
         return "sequence-plan-client"
@@ -36,6 +37,7 @@ class SequencePlanClient:
         return "test"
 
     async def generate(self, system_prompt, user_prompt, **_kwargs):
+        self.system_prompts.append(system_prompt)
         self.prompts.append(user_prompt)
         if not self._plans:
             raise AssertionError("No plan responses remaining")
@@ -46,6 +48,7 @@ class SequenceRawClient:
     def __init__(self, responses: list[str | dict]):
         self._responses = list(responses)
         self.prompts: list[str] = []
+        self.system_prompts: list[str] = []
         self.max_tokens: list[int | None] = []
         self.models: list[str | None] = []
 
@@ -56,6 +59,7 @@ class SequenceRawClient:
         return "test"
 
     async def generate(self, system_prompt, user_prompt, **kwargs):
+        self.system_prompts.append(system_prompt)
         self.prompts.append(user_prompt)
         self.max_tokens.append(kwargs.get("max_tokens"))
         self.models.append(kwargs.get("model"))
@@ -158,6 +162,17 @@ def test_target_files_from_payload_falls_back_to_expected_files():
     assert target_files == ["index.html"]
 
 
+def test_target_files_from_payload_includes_singular_scope_hints():
+    target_files = _target_files_from_payload(
+        {
+            "target_file": "index.html",
+            "path": "ignored.html",
+        }
+    )
+
+    assert target_files == ["index.html", "ignored.html"]
+
+
 def test_edit_budget_from_payload_uses_minimal_patch_limits():
     edit_budget = _edit_budget_from_payload(
         {
@@ -217,6 +232,7 @@ def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
     instructions = executor._instructions_for(work_item)
 
     assert "Restrict edits to these files unless validation proves a neighboring file is required: index.html." in instructions
+    assert "prefer write_file with the full updated file contents over apply_patch" in instructions
     assert "This is a static frontend task." in instructions
     assert "Do not introduce new third-party imports such as BeautifulSoup or bs4" in instructions
     assert "html.parser" in instructions
@@ -246,6 +262,31 @@ def test_instructions_for_plan_stage_forbid_mutations():
 
     assert "Do not mutate repository files." in instructions
     assert "Return only note actions" in instructions
+
+
+def test_instructions_for_review_stage_forbid_mutations():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="REVIEW_DIFF",
+        payload={"expected_files": ["index.html"]},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "This is a review task." in instructions
+    assert "Return only note actions" in instructions
+    assert "Do not mutate repository files." in instructions
+    assert "Never emit apply_patch, write_file, or delete_file actions." in instructions
+    assert "prefer write_file" not in instructions
+
+
+def test_system_prompt_for_review_stage_forbids_mutations():
+    executor = CodexExecutor()
+    prompt = executor._system_prompt_for(SimpleNamespace(type="REVIEW_DIFF"))
+
+    assert "automated code review worker" in prompt
+    assert "Return only note actions" in prompt
+    assert "Never emit apply_patch, write_file, or delete_file actions." in prompt
 
 
 def test_write_tests_stage_rejects_non_test_file_mutations():
@@ -281,6 +322,28 @@ def test_plan_stage_rejects_mutating_actions():
 
     assert violations == [
         "PLAN work items may only return note actions; mutating file operations are out of scope."
+    ]
+
+
+def test_review_stage_rejects_mutating_actions():
+    work_item = SimpleNamespace(type="REVIEW_DIFF")
+    patch = (
+        "diff --git a/index.html b/index.html\n"
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -1 +1 @@\n"
+        "-<body>Old</body>\n"
+        "+<body>New</body>\n"
+    )
+
+    violations = _stage_scope_violations(
+        work_item,
+        [Action(type="apply_patch", patch=patch)],
+        ["index.html"],
+    )
+
+    assert violations == [
+        "REVIEW work items may only return note actions; mutating file operations are out of scope."
     ]
 
 
@@ -711,8 +774,297 @@ async def test_codex_executor_retries_truncated_json_with_higher_token_cap(
     assert len(client.prompts) == 2
     assert "truncated" in client.prompts[1]
     assert "Do not reconsider the broader feature plan" in client.prompts[1]
-    assert client.max_tokens[0] == 1200
+    assert "prefer write_file with the full updated contents of the scoped file instead of apply_patch" in client.prompts[1]
+    assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
+    assert client.max_tokens[0] > 1200
     assert client.max_tokens[1] > client.max_tokens[0]
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+
+@pytest.mark.anyio
+async def test_review_diff_parse_retry_returns_note_actions_and_escalates(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    (tmp_path / "index.html").write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Review diff parse retry", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="REVIEW_DIFF",
+            key="REVIEW_DIFF",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "index.html"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            (
+                "{"
+                "\"status\":\"DONE\","
+                "\"message\":\"reviewed\","
+                "\"warnings\":[],"
+                "\"actions\":[{"
+                "\"type\":\"apply_patch\","
+                "\"patch\":\"diff --git a/index.html b/index.html\\n--- a/index.html\\n+++ b/index.html\\n@@ -1 +1 @@\\n-<main>Portfolio</main>\\n+<main>Reviewed"
+            ),
+            {
+                "status": "DONE",
+                "message": "reviewed after parse retry",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "note",
+                        "text": "Review passed. Navigation premium badge is scoped to index.html and no blocking issues were found.",
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Review the premium navigation change",
+                    "expected_files": ["index.html"],
+                    "steps": [
+                        {
+                            "title": "Review the bounded navigation update",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "REVIEW_DIFF",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert len(client.prompts) == 2
+    assert all("automated code review worker" in prompt for prompt in client.system_prompts)
+    assert "This is a review stage. Return only note actions" in client.prompts[1]
+    assert "Never emit apply_patch, write_file, or delete_file actions" in client.prompts[1]
+    assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+
+@pytest.mark.anyio
+async def test_plan_dag_parse_retry_runs_once_even_when_policy_disables_general_retries(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    (tmp_path / "index.html").write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Planner parse retry", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "index.html"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            "{\"status\":\"DONE\",\"message\":\"plan",
+            {
+                "status": "DONE",
+                "message": "planned after parse retry",
+                "warnings": [],
+                "actions": [{"type": "note", "text": "bounded plan confirmed"}],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Create a portfolio project",
+                    "expected_files": ["index.html"],
+                    "steps": [
+                        {
+                            "title": "Plan the bounded portfolio change",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "PLAN_DAG",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert len(client.prompts) == 2
+    assert "structured output retry 1" in client.prompts[1].lower()
+    assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
+    assert client.max_tokens[1] > client.max_tokens[0]
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+
+@pytest.mark.anyio
+async def test_write_tests_parse_retry_escalates_to_premium_model(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    (tmp_path / "index.html").write_text("<main>Portfolio</main>\n", encoding="utf-8")
+    test_path = tmp_path / "test_index_html.py"
+    test_path.write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Write tests parse retry", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="WRITE_TESTS",
+            key="WRITE_TESTS",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_files": ["test_index_html.py"], "related_files": ["index.html"]},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            "{\"status\":\"DONE\",\"message\":\"tests",
+            {
+                "status": "DONE",
+                "message": "tests after parse retry",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "test_index_html.py",
+                        "content": (
+                            "def test_index_html_exists():\n"
+                            "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "        assert '<main>' in handle.read()\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Write validation tests for the portfolio page",
+                    "expected_files": ["test_index_html.py"],
+                    "steps": [
+                        {
+                            "title": "Add bounded HTML validation tests",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "WRITE_TESTS",
+                            "expected_files": ["test_index_html.py"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "test_index_html_exists" in test_path.read_text(encoding="utf-8")
+    assert len(client.prompts) == 2
+    assert "structured output retry 1" in client.prompts[1].lower()
+    assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
+    assert client.max_tokens[1] > client.max_tokens[0]
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
 
 
 @pytest.mark.anyio
@@ -855,6 +1207,7 @@ async def test_codex_executor_repairs_unapplyable_patch_by_regenerating_plan(
     assert "test_index_html_has_theme_styles" in test_path.read_text(encoding="utf-8")
     assert len(client.prompts) == 2
     assert "patch does not apply" in client.prompts[1]
+    assert "prefer write_file with the full updated contents of the target test file" in client.prompts[1]
 
 
 @pytest.mark.anyio

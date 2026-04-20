@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     llm_temperature: float = 0.2
     ai_tier_premium_model: str = "gpt-4.1"
-    ai_tier_standard_model: str = "gpt-4.1"
+    ai_tier_standard_model: str = "gpt-4.1-mini"
     ai_tier_economy_model: str = "gpt-4.1-mini"
     ai_tier_premium_input_cents_per_1k_tokens: float = 1.0
     ai_tier_premium_output_cents_per_1k_tokens: float = 4.0

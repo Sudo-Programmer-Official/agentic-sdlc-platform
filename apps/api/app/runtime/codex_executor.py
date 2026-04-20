@@ -29,7 +29,7 @@ from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerif
 from app.services.patch_verification import build_run_patch_plan_and_verification
 from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_context, compact_graph_context
 from app.services.workspace_supervisor import workspace_uri
-from app.services.ai_policy import AIJobManager, AIJobRequest, contains_sensitive_paths, estimate_tokens, is_retryable_error, retry_error_kind
+from app.services.ai_policy import AIJobManager, AIJobRequest, TIER_ORDER, contains_sensitive_paths, estimate_tokens, is_retryable_error, retry_error_kind
 
 
 SYSTEM_PROMPT = """You are an automated code change worker.
@@ -142,13 +142,22 @@ def _fix_test_failure_writable_scope(
     if contract is not None and contract.target_files:
         preferred.extend(list(contract.target_files))
     preferred.extend(target_files)
+    failing_tests: list[str] = []
+    if contract is not None and contract.related_files:
+        failing_tests.extend(list(contract.related_files))
+    if isinstance(payload, dict):
+        if isinstance(payload.get("failing_test_files"), list):
+            failing_tests.extend([item for item in payload["failing_test_files"] if isinstance(item, str)])
+        if isinstance(payload.get("related_files"), list):
+            failing_tests.extend([item for item in payload["related_files"] if isinstance(item, str)])
+    scoped_tests = [path for path in _unique_paths(failing_tests) if _looks_like_test_path(path)]
     non_test_preferred = _non_test_paths(preferred)
     if non_test_preferred:
-        return non_test_preferred
+        return _unique_paths(non_test_preferred + scoped_tests)
     non_test_allowed = _non_test_paths(allowed_files)
     if non_test_allowed:
-        return non_test_allowed
-    return _unique_paths(preferred or allowed_files)
+        return _unique_paths(non_test_allowed + scoped_tests)
+    return _unique_paths(scoped_tests or preferred or allowed_files)
 
 
 def _edit_budget_from_payload(payload: dict[str, Any] | None) -> dict[str, int | str | None]:
@@ -258,6 +267,46 @@ class CodexExecutor(TaskExecutor):
         if self._client is None:
             self._client = OpenAIClient()
         return self._client
+
+    def _model_name_for_tier(self, tier: str, *, fallback: str | None = None) -> str:
+        return self._job_manager.resolve_model_name(tier) or fallback or self.settings.codex_model
+
+    def _effective_model_tier(
+        self,
+        *,
+        policy,
+        work_item: WorkItem,
+        attempt: int,
+        retry_reason: str | None,
+    ) -> str:
+        if attempt <= 0:
+            return policy.selected_model_tier
+        if TIER_ORDER.get(policy.max_model_tier, 0) <= TIER_ORDER.get(policy.selected_model_tier, 0):
+            return policy.selected_model_tier
+        if retry_reason in {"rate_limit", "timeout", "transient_network_failure"}:
+            return policy.selected_model_tier
+        if work_item.type in {"FIX_TEST_FAILURE", "REVIEW_DIFF", "REVIEW_INTEGRATION"} or policy.risk_level == "high":
+            return policy.max_model_tier
+        return policy.selected_model_tier
+
+    def _run_budget_exhausted_result(
+        self,
+        *,
+        contract: ExecutionContract | None,
+        prepared_job_id: str,
+        next_action: str,
+    ) -> TaskResult:
+        return {
+            "status": "FAILED",
+            "message": "run_budget_exhausted",
+            "payload": {
+                "ai_job_id": prepared_job_id,
+                "next_action": next_action,
+                "budget": contract.budget.to_dict() if contract is not None else None,
+                "execution_contract": contract.to_dict() if contract is not None else None,
+            },
+            "warnings": ["run_budget_exhausted"],
+        }
 
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
@@ -449,6 +498,12 @@ class CodexExecutor(TaskExecutor):
         current_user_prompt = user_prompt
         parse_retry_count = 0
         current_completion_token_estimate = completion_token_estimate
+        usage_input_tokens = 0
+        usage_output_tokens = 0
+        attempt_tiers: list[str] = []
+        retry_reason: str | None = None
+        effective_model_tier = prepared.policy.selected_model_tier
+        effective_model_name = prepared.model_name or self.settings.codex_model
         client = self._get_client()
         log.info(
             "AI execution starting run_id=%s work_item_id=%s task_id=%s ai_job_id=%s work_item_type=%s tier=%s model=%s provider=%s client_method=%s openai_sdk_version=%s policy=%s",
@@ -465,27 +520,78 @@ class CodexExecutor(TaskExecutor):
             self._policy_payload(prepared.policy),
         )
         for attempt in range(prepared.policy.max_retries + 1):
+            current_model_tier = self._effective_model_tier(
+                policy=prepared.policy,
+                work_item=work_item,
+                attempt=attempt,
+                retry_reason=retry_reason,
+            )
+            current_model_name = self._model_name_for_tier(
+                current_model_tier,
+                fallback=prepared.model_name or self.settings.codex_model,
+            )
             await self._job_manager.record_attempt(prepared.job_id)
             try:
                 raw, usage = await client.generate(
                     SYSTEM_PROMPT,
                     current_user_prompt,
-                    model=prepared.model_name or self.settings.codex_model,
+                    model=current_model_name,
                     temperature=self.settings.codex_temperature,
                     max_tokens=current_completion_token_estimate,
                     timeout=self.settings.codex_timeout_seconds,
                 )
+                current_input_tokens = int(usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + current_user_prompt))
+                current_output_tokens = int(usage.get("output_tokens") or estimate_tokens(raw))
+                usage_input_tokens += current_input_tokens
+                usage_output_tokens += current_output_tokens
+                usage = {
+                    "input_tokens": usage_input_tokens,
+                    "output_tokens": usage_output_tokens,
+                }
+                attempt_tiers.append(current_model_tier)
+                effective_model_tier = current_model_tier
+                effective_model_name = current_model_name
+                contract = await self._record_execution_budget(
+                    context,
+                    prepared_job_id=str(prepared.job_id),
+                    work_item_id=str(work_item.id),
+                    selected_model_tier=current_model_tier,
+                    input_tokens=current_input_tokens,
+                    output_tokens=current_output_tokens,
+                )
+                if contract is not None and contract.budget.budget_mode == "BLOCKED":
+                    next_action = "Split the run or reset the run budget before executing more autonomous work."
+                    await self._job_manager.fail_job(
+                        prepared.job_id,
+                        reason="run_budget_exhausted",
+                        next_action=next_action,
+                        error_kind="run_budget_exhausted",
+                        input_tokens=usage_input_tokens,
+                        output_tokens=usage_output_tokens,
+                        details={
+                            "attempt_tiers": attempt_tiers,
+                            "provider": self.settings.llm_provider,
+                            "model_name": current_model_name,
+                            "budget": contract.budget.to_dict(),
+                        },
+                    )
+                    return self._run_budget_exhausted_result(
+                        contract=contract,
+                        prepared_job_id=str(prepared.job_id),
+                        next_action=next_action,
+                    )
                 data = json.loads(raw)
                 plan = CodexPlan.model_validate(data)
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
+                retry_reason = "structured_parser_failure" if parse_failure else retry_error_kind(exc)
                 if parse_failure and attempt < prepared.policy.max_retries:
                     parse_retry_count += 1
                     await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
                     current_completion_token_estimate = self._parse_retry_max_tokens(
                         current_max_tokens=current_completion_token_estimate,
-                        selected_model_tier=prepared.policy.selected_model_tier,
+                        selected_model_tier=effective_model_tier,
                         work_item=work_item,
                         contract=contract,
                     )
@@ -498,7 +604,7 @@ class CodexExecutor(TaskExecutor):
                         retry_count=parse_retry_count,
                     )
                     continue
-                error_kind = "structured_parser_failure" if parse_failure else retry_error_kind(exc)
+                error_kind = retry_reason
                 if not parse_failure and attempt < prepared.policy.max_retries and is_retryable_error(exc):
                     await self._job_manager.record_retry(prepared.job_id, error_kind)
                     await asyncio.sleep(min(2 ** attempt, 3))
@@ -509,16 +615,17 @@ class CodexExecutor(TaskExecutor):
                     reason=failure_reason,
                     next_action="Reduce scope, tighten context, or request human review before retrying.",
                     error_kind=error_kind,
-                    input_tokens=int(usage.get("input_tokens") or 0),
-                    output_tokens=int(usage.get("output_tokens") or 0),
+                    input_tokens=usage_input_tokens,
+                    output_tokens=usage_output_tokens,
                     details={
                         "error_message": str(exc),
                         "exception_type": exc.__class__.__name__,
                         "provider": self.settings.llm_provider,
-                        "model_name": prepared.model_name or self.settings.codex_model,
+                        "model_name": current_model_name,
                         "client_method": client.method_name(),
                         "openai_sdk_version": client.sdk_version(),
-                        "selected_model_tier": prepared.policy.selected_model_tier,
+                        "selected_model_tier": current_model_tier,
+                        "attempt_tiers": attempt_tiers,
                         "policy": self._policy_payload(prepared.policy),
                         "run_id": str(work_item.run_id),
                         "work_item_id": str(work_item.id),
@@ -533,8 +640,8 @@ class CodexExecutor(TaskExecutor):
                     task_id,
                     prepared.job_id,
                     work_item.type,
-                    prepared.policy.selected_model_tier,
-                    prepared.model_name,
+                    current_model_tier,
+                    current_model_name,
                     self.settings.llm_provider,
                     client.method_name(),
                     client.sdk_version(),
@@ -557,10 +664,11 @@ class CodexExecutor(TaskExecutor):
                         "task_id": task_id,
                         "work_item_type": work_item.type,
                         "provider": self.settings.llm_provider,
-                        "model_name": prepared.model_name or self.settings.codex_model,
+                        "model_name": current_model_name,
                         "client_method": client.method_name(),
                         "openai_sdk_version": client.sdk_version(),
-                        "selected_model_tier": prepared.policy.selected_model_tier,
+                        "selected_model_tier": current_model_tier,
+                        "attempt_tiers": attempt_tiers,
                         "policy": self._policy_payload(prepared.policy),
                     },
                     "warnings": ["ai_policy_stop"],
@@ -573,17 +681,6 @@ class CodexExecutor(TaskExecutor):
                 "payload": {"ai_job_id": str(prepared.job_id)},
                 "warnings": ["ai_policy_stop"],
             }
-
-        usage_input_tokens = int(usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + current_user_prompt))
-        usage_output_tokens = int(usage.get("output_tokens") or estimate_tokens(raw))
-        contract = await self._record_execution_budget(
-            context,
-            prepared_job_id=str(prepared.job_id),
-            work_item_id=str(work_item.id),
-            selected_model_tier=prepared.policy.selected_model_tier,
-            input_tokens=usage_input_tokens,
-            output_tokens=usage_output_tokens,
-        )
         if plan.confidence is not None and plan.confidence < self.settings.ai_low_confidence_threshold:
             await self._job_manager.fail_job(
                 prepared.job_id,
@@ -594,7 +691,7 @@ class CodexExecutor(TaskExecutor):
                 output_tokens=usage_output_tokens,
                 approval_state="pending",
                 status="blocked",
-                details={"confidence": plan.confidence},
+                details={"confidence": plan.confidence, "attempt_tiers": attempt_tiers, "model_name": effective_model_name},
             )
             return {
                 "status": "FAILED",
@@ -745,25 +842,60 @@ class CodexExecutor(TaskExecutor):
                     repair_attempted = True
                     await self._job_manager.record_retry(prepared.job_id, "patch_apply_error")
                     try:
-                        plan, raw, repair_usage = await self._repair_plan_after_patch_failure(
+                        plan, raw, repair_usage, repair_model_tier, repair_model_name = await self._repair_plan_after_patch_failure(
                             client=client,
                             prepared=prepared,
                             user_prompt=user_prompt,
                             allowed_files=allowed_files,
                             error_message=str(exc),
                             work_item=work_item,
+                            contract=contract,
                         )
                     except Exception as repair_exc:
                         exc = repair_exc
                     else:
-                        usage_input_tokens += int(
+                        repair_input_tokens = int(
                             repair_usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + user_prompt)
                         )
-                        usage_output_tokens += int(repair_usage.get("output_tokens") or estimate_tokens(raw))
+                        repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
+                        usage_input_tokens += repair_input_tokens
+                        usage_output_tokens += repair_output_tokens
                         usage = {
                             "input_tokens": usage_input_tokens,
                             "output_tokens": usage_output_tokens,
                         }
+                        attempt_tiers.append(repair_model_tier)
+                        effective_model_tier = repair_model_tier
+                        effective_model_name = repair_model_name
+                        contract = await self._record_execution_budget(
+                            context,
+                            prepared_job_id=str(prepared.job_id),
+                            work_item_id=str(work_item.id),
+                            selected_model_tier=repair_model_tier,
+                            input_tokens=repair_input_tokens,
+                            output_tokens=repair_output_tokens,
+                        )
+                        if contract is not None and contract.budget.budget_mode == "BLOCKED":
+                            next_action = "Split the run or reset the run budget before executing more autonomous work."
+                            await self._job_manager.fail_job(
+                                prepared.job_id,
+                                reason="run_budget_exhausted",
+                                next_action=next_action,
+                                error_kind="run_budget_exhausted",
+                                input_tokens=usage_input_tokens,
+                                output_tokens=usage_output_tokens,
+                                details={
+                                    "attempt_tiers": attempt_tiers,
+                                    "provider": self.settings.llm_provider,
+                                    "model_name": repair_model_name,
+                                    "budget": contract.budget.to_dict(),
+                                },
+                            )
+                            return self._run_budget_exhausted_result(
+                                contract=contract,
+                                prepared_job_id=str(prepared.job_id),
+                                next_action=next_action,
+                            )
                         continue
                 await self._job_manager.fail_job(
                     prepared.job_id,
@@ -772,7 +904,7 @@ class CodexExecutor(TaskExecutor):
                     error_kind="action_error",
                     input_tokens=usage_input_tokens,
                     output_tokens=usage_output_tokens,
-                    details={"error": str(exc)},
+                    details={"error": str(exc), "attempt_tiers": attempt_tiers, "model_name": effective_model_name},
                 )
                 return {
                     "status": "FAILED",
@@ -829,7 +961,13 @@ class CodexExecutor(TaskExecutor):
                 input_tokens=usage_input_tokens,
                 output_tokens=usage_output_tokens,
                 confidence_score=plan.confidence,
-                details={"review_metrics": review_metrics, "warnings": plan.warnings},
+                details={
+                    "review_metrics": review_metrics,
+                    "warnings": plan.warnings,
+                    "attempt_tiers": attempt_tiers,
+                    "effective_model_tier": effective_model_tier,
+                    "model_name": effective_model_name,
+                },
                 status=final_status,
             )
         else:
@@ -840,7 +978,13 @@ class CodexExecutor(TaskExecutor):
                 error_kind="model_reported_failure",
                 input_tokens=usage_input_tokens,
                 output_tokens=usage_output_tokens,
-                details={"review_metrics": review_metrics, "warnings": plan.warnings},
+                details={
+                    "review_metrics": review_metrics,
+                    "warnings": plan.warnings,
+                    "attempt_tiers": attempt_tiers,
+                    "effective_model_tier": effective_model_tier,
+                    "model_name": effective_model_name,
+                },
             )
 
         return {
@@ -851,6 +995,8 @@ class CodexExecutor(TaskExecutor):
                 "warnings": plan.warnings,
                 "ai_job_id": str(prepared.job_id),
                 "ai_selected_tier": prepared.policy.selected_model_tier,
+                "ai_effective_tier": effective_model_tier,
+                "ai_attempt_tiers": attempt_tiers,
                 "ai_policy": self._policy_payload(prepared.policy),
                 "execution_contract": contract.to_dict() if contract is not None else None,
                 "patch_guard": {
@@ -1210,8 +1356,12 @@ class CodexExecutor(TaskExecutor):
             "Respond with EXACTLY one complete JSON object matching the schema.",
             "Do not include markdown fences, explanations, or any prose outside the JSON object.",
             "Do not omit closing quotes, braces, or brackets.",
+            "Do not reconsider the broader feature plan; repair the existing bounded plan only.",
             f"Stay within these files: {allowed_text}.",
         ]
+        primary_scope = _target_files_from_payload(work_item.payload) or allowed_files[:1]
+        if primary_scope:
+            guidance.append(f"Prefer touching only this primary file unless the schema requires otherwise: {', '.join(primary_scope[:2])}.")
         if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND", "WRITE_TESTS"}:
             guidance.append(
                 "If a long apply_patch diff risks truncation, prefer write_file for a single targeted file or a shorter patch."
@@ -1228,12 +1378,14 @@ class CodexExecutor(TaskExecutor):
         allowed_files: list[str],
         error_message: str,
         work_item: WorkItem,
-    ) -> tuple[CodexPlan, str, dict[str, Any]]:
+        contract: ExecutionContract | None,
+    ) -> tuple[CodexPlan, str, dict[str, Any], str, str]:
         allowed_text = ", ".join(allowed_files[:6]) if allowed_files else "the planned file scope"
         repair_prompt = (
             f"{user_prompt}\n\n"
             "The previous action plan failed while applying a generated patch.\n"
             f"Failure: {error_message}\n"
+            "Do not redesign the solution or broaden the run plan; repair the existing scoped change only.\n"
             f"Stay within these files: {allowed_text}.\n"
             "Return a new JSON object matching the schema.\n"
             "If you use apply_patch, include full file headers such as --- a/path and +++ b/path before each hunk.\n"
@@ -1247,11 +1399,24 @@ class CodexExecutor(TaskExecutor):
         current_max_tokens = self.settings.codex_max_tokens
         raw = ""
         usage: dict[str, Any] = {}
+        retry_reason = "patch_apply_error"
+        effective_model_tier = prepared.policy.selected_model_tier
+        effective_model_name = prepared.model_name or self.settings.codex_model
         for retry_count in range(2):
+            effective_model_tier = self._effective_model_tier(
+                policy=prepared.policy,
+                work_item=work_item,
+                attempt=retry_count + 1,
+                retry_reason=retry_reason,
+            )
+            effective_model_name = self._model_name_for_tier(
+                effective_model_tier,
+                fallback=prepared.model_name or self.settings.codex_model,
+            )
             raw, usage = await client.generate(
                 SYSTEM_PROMPT,
                 current_prompt,
-                model=prepared.model_name or self.settings.codex_model,
+                model=effective_model_name,
                 temperature=self.settings.codex_temperature,
                 max_tokens=current_max_tokens,
                 timeout=self.settings.codex_timeout_seconds,
@@ -1266,9 +1431,9 @@ class CodexExecutor(TaskExecutor):
                     await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
                     current_max_tokens = self._parse_retry_max_tokens(
                         current_max_tokens=current_max_tokens,
-                        selected_model_tier=prepared.policy.selected_model_tier,
+                        selected_model_tier=effective_model_tier,
                         work_item=work_item,
-                        contract=None,
+                        contract=contract,
                     )
                     current_prompt = self._build_parse_retry_prompt(
                         user_prompt=repair_prompt,
@@ -1287,7 +1452,7 @@ class CodexExecutor(TaskExecutor):
             prepared.job_id,
             work_item.type,
         )
-        return plan, raw, usage
+        return plan, raw, usage, effective_model_tier, effective_model_name
 
     async def _record_execution_budget(
         self,

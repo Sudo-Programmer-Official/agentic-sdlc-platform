@@ -17,6 +17,7 @@ from app.runtime.codex_executor import (
     _verification_from_action_scope,
     CodexExecutor,
 )
+from app.runtime.execution_contract import build_execution_contract
 from app.runtime.patch_guard import evaluate_patch_guard
 from app.runtime.schemas.executor_io import Action
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
@@ -46,6 +47,7 @@ class SequenceRawClient:
         self._responses = list(responses)
         self.prompts: list[str] = []
         self.max_tokens: list[int | None] = []
+        self.models: list[str | None] = []
 
     def method_name(self) -> str:
         return "sequence-raw-client"
@@ -56,6 +58,7 @@ class SequenceRawClient:
     async def generate(self, system_prompt, user_prompt, **kwargs):
         self.prompts.append(user_prompt)
         self.max_tokens.append(kwargs.get("max_tokens"))
+        self.models.append(kwargs.get("model"))
         if not self._responses:
             raise AssertionError("No raw responses remaining")
         response = self._responses.pop(0)
@@ -187,6 +190,21 @@ def test_fix_test_failure_writable_scope_prefers_non_test_files():
     )
 
     assert writable_scope == ["index.html"]
+
+
+def test_fix_test_failure_writable_scope_keeps_failing_tests_in_scope():
+    writable_scope = _fix_test_failure_writable_scope(
+        {
+            "target_files": ["index.html"],
+            "related_files": ["test_index_html.py"],
+            "failing_test_files": ["test_index_html.py"],
+        },
+        None,
+        ["index.html"],
+        ["index.html", "test_index_html.py"],
+    )
+
+    assert writable_scope == ["index.html", "test_index_html.py"]
 
 
 def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
@@ -692,6 +710,7 @@ async def test_codex_executor_retries_truncated_json_with_higher_token_cap(
     assert "Rethemed portfolio" in index_path.read_text(encoding="utf-8")
     assert len(client.prompts) == 2
     assert "truncated" in client.prompts[1]
+    assert "Do not reconsider the broader feature plan" in client.prompts[1]
     assert client.max_tokens[0] == 1200
     assert client.max_tokens[1] > client.max_tokens[0]
 
@@ -957,6 +976,206 @@ async def test_codex_executor_retries_truncated_patch_repair_output(
     assert "patch does not apply" in client.prompts[1]
     assert "structured output retry 1" in client.prompts[2].lower()
     assert client.max_tokens[2] > client.max_tokens[1]
+
+
+@pytest.mark.anyio
+async def test_fix_test_failure_retry_escalates_to_premium_model(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Fix failure escalation", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="FIX_TEST_FAILURE",
+            key="FIX_TEST_FAILURE",
+            status="QUEUED",
+            executor="codex",
+            payload={
+                "target_files": ["index.html"],
+                "related_files": ["test_index_html.py"],
+            },
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            "{\"status\":\"DONE\",\"message\":\"repair",
+            {
+                "status": "DONE",
+                "message": "repair after retry",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main class='fixed'>Portfolio</main>\n",
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Fix the failing portfolio markup",
+                    "expected_files": ["index.html", "test_index_html.py"],
+                    "steps": [
+                        {
+                            "title": "Repair failing portfolio validation",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "FIX_TEST_FAILURE",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "class='fixed'" in index_path.read_text(encoding="utf-8")
+    assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+
+@pytest.mark.anyio
+async def test_codex_executor_stops_before_mutation_when_run_budget_is_exhausted(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    contract = build_execution_contract(
+        run_summary={"target_files": ["index.html"]},
+        architecture_profile=None,
+        plan_snapshot={"expected_files": ["index.html"]},
+    )
+    contract.budget.max_cost_cents = 0.0001
+    contract.budget.refresh()
+
+    async with db_session_factory() as session:
+        project = Project(name="Budget exhausted before apply", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            summary={
+                "plan_snapshot": {"expected_files": ["index.html"]},
+                "execution_contract": contract.to_dict(),
+            },
+        )
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="THEME_PORTFOLIO",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "index.html"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            {
+                "status": "DONE",
+                "message": "patched",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main class='theme-shell'>Rethemed portfolio</main>\n",
+                    }
+                ],
+                "artifacts": [],
+            }
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Retheme the single-file portfolio",
+                    "expected_files": ["index.html"],
+                    "steps": [
+                        {
+                            "title": "Implement themed portfolio shell",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "CODE_FRONTEND",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+                execution_contract=contract,
+            ),
+        )
+
+    assert result["status"] == "FAILED"
+    assert result["message"] == "run_budget_exhausted"
+    assert "Rethemed portfolio" not in index_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.anyio

@@ -293,16 +293,19 @@ class AIJobManager:
         role = request.role
         if role == "planner":
             max_tier: ModelTier = "tier_premium"
+            selected_tier: ModelTier = "tier_standard"
         elif role == "coder":
-            max_tier = "tier_standard"
+            max_tier = "tier_premium" if request.tests_failed or request.risk_level == "high" else "tier_standard"
+            selected_tier = "tier_standard"
         elif role == "reviewer":
             max_tier = "tier_premium" if request.risk_level == "high" else "tier_standard"
+            selected_tier = max_tier
         elif role in {"documenter", "classifier"}:
             max_tier = "tier_economy"
+            selected_tier = "tier_economy"
         else:
             max_tier = "tier_none"
-
-        selected_tier: ModelTier = max_tier
+            selected_tier = "tier_none"
         if request.deterministic_preferred and role in {"documenter", "classifier", "formatter"}:
             selected_tier = "tier_none"
         if role == "formatter":
@@ -323,8 +326,8 @@ class AIJobManager:
             selected_tier = selected_override  # type: ignore[assignment]
 
         if request.workflow_type == "interactive_planning":
-            budget_cents = settings.ai_budget_premium_cents
-            max_context_tokens = settings.ai_max_context_premium_tokens
+            budget_cents = settings.ai_budget_standard_cents
+            max_context_tokens = settings.ai_max_context_standard_tokens
         elif request.workflow_type == "repo_implementation_task":
             budget_cents = settings.ai_budget_standard_cents
             max_context_tokens = settings.ai_max_context_standard_tokens
@@ -348,12 +351,15 @@ class AIJobManager:
                 "tier_none": settings.ai_max_context_economy_tokens,
             }[max_tier]
 
-        max_retries = {
-            "tier_premium": 1,
-            "tier_standard": 2,
-            "tier_economy": 1,
-            "tier_none": 0,
-        }[selected_tier]
+        if role == "planner":
+            max_retries = 0
+        else:
+            max_retries = {
+                "tier_premium": 1,
+                "tier_standard": 1,
+                "tier_economy": 1,
+                "tier_none": 0,
+            }[selected_tier]
 
         review_only_job = request.role == "reviewer" and request.task_type == "review"
         requires_human_review = (not review_only_job) and (

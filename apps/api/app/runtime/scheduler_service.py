@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 from sqlalchemy import select, func
 
 from app.core.config import get_settings
-from app.db.session import SessionLocal
 from app.db.models import Run, WorkItem
+from app.db.session import SessionLocal
 from app.runtime.leases import reclaim_expired_work_items
 from app.services.event_log import record_event
+from app.services.run_delivery import publish_run_branch_if_ready
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 
@@ -113,22 +114,57 @@ async def tick(session):
                 actor_type="SYSTEM",
             )
         elif failed_non_superseded == 0 and active == 0 and queued == 0:
-            ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "COMPLETED", set_finished=True)
-            if not ok:
+            locked = await session.scalar(
+                select(Run)
+                .where(Run.id == run.id, Run.status.in_(["RUNNING", "QUEUED"]))
+                .with_for_update()
+            )
+            if locked is None:
                 continue
+            final_status = "COMPLETED"
+            if settings.run_auto_push_branch_on_completion:
+                try:
+                    await publish_run_branch_if_ready(
+                        session,
+                        run=locked,
+                        actor_type="SYSTEM",
+                    )
+                except Exception as exc:
+                    final_status = "FAILED"
+                    summary = dict(locked.summary or {})
+                    summary["remote_branch_push_error"] = str(exc)
+                    locked.summary = summary
+                    await record_event(
+                        session,
+                        project_id=locked.project_id,
+                        run_id=locked.id,
+                        event_type="RUN_BRANCH_PUSH_FAILED",
+                        actor_type="SYSTEM",
+                        tenant_id=locked.tenant_id,
+                        message=str(exc),
+                        payload={
+                            "branch_name": locked.branch_name,
+                            "workspace_status": locked.workspace_status,
+                        },
+                    )
+
+            locked.status = final_status
+            locked.finished_at = datetime.now(timezone.utc)
+            session.add(locked)
             await record_event(
                 session,
-                project_id=run.project_id,
-                run_id=run.id,
-                event_type="RUN_COMPLETED",
+                project_id=locked.project_id,
+                run_id=locked.id,
+                event_type=f"RUN_{final_status}",
                 actor_type="SYSTEM",
             )
-            try:
-                from app.services import knowledge_service
+            if final_status == "COMPLETED":
+                try:
+                    from app.services import knowledge_service
 
-                await knowledge_service.ingest_agent_run_event(session, run_id=run.id, actor_id="system")
-            except Exception:
-                pass
+                    await knowledge_service.ingest_agent_run_event(session, run_id=locked.id, actor_id="system")
+                except Exception:
+                    pass
         else:
             continue
         try:

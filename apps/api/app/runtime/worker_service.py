@@ -10,7 +10,7 @@ from sqlalchemy import select, and_, exists
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.db.models import Agent, Run, WorkItem
+from app.db.models import Agent, Run, WorkItem, WorkItemEdge
 from app.runtime.leases import keep_work_item_lease_alive, lease_seconds_for_executor
 from app.runtime.registry import build_executor
 from app.runtime.recovery_policy import maybe_apply_recovery
@@ -124,10 +124,22 @@ async def tick_worker(agent_id: uuid.UUID):
         # Prevent multiple RUN_TESTS per run at once
         from sqlalchemy.orm import aliased
         other = aliased(WorkItem)
+        parent = aliased(WorkItem)
+        blocked_by_dependency = exists(
+            select(1)
+            .select_from(WorkItemEdge)
+            .join(parent, parent.id == WorkItemEdge.from_work_item_id)
+            .where(
+                WorkItemEdge.run_id == WorkItem.run_id,
+                WorkItemEdge.to_work_item_id == WorkItem.id,
+                parent.status.notin_(["DONE", "SKIPPED"]),
+            )
+        )
         result = await session.execute(
             select(WorkItem)
             .where(
                 WorkItem.status == "QUEUED",
+                ~blocked_by_dependency,
                 ~exists().where(
                     and_(
                         other.run_id == WorkItem.run_id,

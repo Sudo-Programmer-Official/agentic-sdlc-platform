@@ -13,6 +13,7 @@ from app.db.models import Agent, Artifact, Project, Run, RunEvent, Task, Trace, 
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.runtime import orchestrator as orchestrator_module
+from app.runtime import scheduler_service as scheduler_module
 from app.runtime.orchestrator import RunOrchestrator
 from app.runtime.leases import keep_work_item_lease_alive
 from app.runtime.scheduler_service import tick as scheduler_tick
@@ -246,6 +247,102 @@ async def test_external_worker_claims_and_executes_dummy_work_item(monkeypatch, 
         assert "WORK_ITEM_CLAIMED" in event_types
         assert "WORK_ITEM_DONE" in event_types
         assert all(event.work_item_id is not None for event in events if event.payload and event.payload.get("work_item_id"))
+
+
+@pytest.mark.anyio
+async def test_external_worker_respects_dependency_edges_before_claiming(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Dependency ordered worker project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="dummy")
+        session.add(run)
+        await session.flush()
+
+        agent = Agent(
+            tenant_id=tenant_id,
+            name="runtime-worker",
+            kind="worker",
+            executors=["dummy"],
+            capabilities=["runtime-worker"],
+            max_concurrency=1,
+            status="ACTIVE",
+            last_heartbeat_at=datetime.now(timezone.utc),
+        )
+        session.add(agent)
+        await session.flush()
+
+        parent_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="QUEUED",
+            priority=1,
+            executor="dummy",
+            required_capabilities=["runtime-worker"],
+        )
+        child_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="REVIEW_INTEGRATION",
+            key="REVIEW_INTEGRATION",
+            status="QUEUED",
+            priority=10_000,
+            executor="dummy",
+            required_capabilities=["runtime-worker"],
+            depends_on_count=1,
+        )
+        session.add_all([parent_item, child_item])
+        await session.flush()
+        session.add(
+            WorkItemEdge(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                from_work_item_id=parent_item.id,
+                to_work_item_id=child_item.id,
+            )
+        )
+        await session.commit()
+        agent_id = agent.id
+        parent_item_id = parent_item.id
+        child_item_id = child_item.id
+        run_id = run.id
+
+    await tick_worker(agent_id)
+
+    async with runtime_db() as session:
+        parent_item = await session.get(WorkItem, parent_item_id)
+        child_item = await session.get(WorkItem, child_item_id)
+        assert parent_item is not None
+        assert child_item is not None
+        assert parent_item.status == "DONE"
+        assert child_item.status == "QUEUED"
+
+        claimed_events = (
+            await session.execute(
+                select(RunEvent)
+                .where(RunEvent.run_id == run_id, RunEvent.event_type == "WORK_ITEM_CLAIMED")
+                .order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        assert claimed_events
+        assert claimed_events[0].work_item_id == parent_item_id
+
+    await tick_worker(agent_id)
+
+    async with runtime_db() as session:
+        child_item = await session.get(WorkItem, child_item_id)
+        assert child_item is not None
+        assert child_item.status == "DONE"
 
 
 @pytest.mark.anyio
@@ -579,6 +676,154 @@ async def test_scheduler_does_not_complete_run_before_work_items_exist(monkeypat
                 await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
             ).scalars().all()
         ]
+        assert "RUN_COMPLETED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_external_scheduler_publishes_branch_on_completion(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("RUN_AUTO_PUSH_BRANCH_ON_COMPLETION", "true")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+    published: dict[str, str] = {}
+
+    async def _publish(_session, *, run, actor_type="SYSTEM", actor_id=None):
+        summary = dict(run.summary or {})
+        summary.update(
+            {
+                "remote_branch_pushed": True,
+                "remote_branch_name": run.branch_name,
+                "remote_branch_commit_sha": "abc1234",
+            }
+        )
+        run.summary = summary
+        published["run_id"] = str(run.id)
+        return {
+            "branch_name": run.branch_name,
+            "commit_sha": "abc1234",
+            "created_commit": True,
+        }
+
+    monkeypatch.setattr(scheduler_module, "publish_run_branch_if_ready", _publish)
+
+    async with runtime_db() as session:
+        project = Project(name="External publish success project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            workspace_status="SEEDED",
+            workspace_root="/tmp/run-workspace",
+            repo_path="/tmp/run-workspace/repo",
+            branch_name="run/publish-success",
+        )
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="DONE",
+            priority=10_000,
+            executor="codex",
+        )
+        session.add(work_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+        assert run.summary["remote_branch_pushed"] is True
+        assert run.summary["remote_branch_name"] == "run/publish-success"
+        assert published["run_id"] == str(run_id)
+
+        event_types = [
+            event.event_type
+            for event in (
+                await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+            ).scalars().all()
+        ]
+        assert "RUN_COMPLETED" in event_types
+        assert "RUN_BRANCH_PUSH_FAILED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_external_scheduler_marks_run_failed_when_branch_publish_fails(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("RUN_AUTO_PUSH_BRANCH_ON_COMPLETION", "true")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async def _fail_publish(*_args, **_kwargs):
+        raise RuntimeError("push failed")
+
+    monkeypatch.setattr(scheduler_module, "publish_run_branch_if_ready", _fail_publish)
+
+    async with runtime_db() as session:
+        project = Project(name="External publish failure project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            workspace_status="SEEDED",
+            workspace_root="/tmp/run-workspace",
+            repo_path="/tmp/run-workspace/repo",
+            branch_name="run/publish-fail",
+        )
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="DONE",
+            priority=10_000,
+            executor="codex",
+        )
+        session.add(work_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "FAILED"
+        assert run.summary["remote_branch_push_error"] == "push failed"
+
+        event_types = [
+            event.event_type
+            for event in (
+                await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+            ).scalars().all()
+        ]
+        assert "RUN_BRANCH_PUSH_FAILED" in event_types
+        assert "RUN_FAILED" in event_types
         assert "RUN_COMPLETED" not in event_types
 
 

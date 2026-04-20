@@ -92,12 +92,8 @@ def _paths_from_diff(diff: str) -> list[str]:
         path = line.split(maxsplit=1)[1]
         if path.strip() == "/dev/null":
             continue
-        if path.startswith("+++ b/"):
-            path = path[6:]
-        elif path.startswith("+++ a/"):
-            path = path[6:]
-        else:
-            path = path[4:]
+        if path.startswith(("b/", "a/")):
+            path = path[2:]
         paths.append(_normalize_path(path))
     return paths
 

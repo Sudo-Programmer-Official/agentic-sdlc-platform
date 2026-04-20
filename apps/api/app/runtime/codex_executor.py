@@ -660,12 +660,8 @@ class CodexExecutor(TaskExecutor):
                     current = None
                     continue
                 # strip leading a/ or b/
-                if path.startswith("+++ b/"):
-                    path = path[6:]
-                elif path.startswith("+++ a/"):
-                    path = path[6:]
-                else:
-                    path = path[4:]
+                if path.startswith(("b/", "a/")):
+                    path = path[2:]
                 current = path.strip()
                 changes.setdefault(current, 0)
                 continue
@@ -856,12 +852,8 @@ class CodexExecutor(TaskExecutor):
                 path = line.split(maxsplit=1)[1]
                 if path.strip() == "/dev/null":
                     continue
-                if path.startswith("+++ b/"):
-                    path = path[6:]
-                elif path.startswith("+++ a/"):
-                    path = path[6:]
-                else:
-                    path = path[4:]
+                if path.startswith(("b/", "a/")):
+                    path = path[2:]
                 paths.append(path.strip())
         return paths
 

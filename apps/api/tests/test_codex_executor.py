@@ -8,6 +8,8 @@ from app.runtime.codex_executor import (
     _verification_from_action_scope,
     CodexExecutor,
 )
+from app.runtime.patch_guard import evaluate_patch_guard
+from app.runtime.schemas.executor_io import Action
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
 
 
@@ -132,3 +134,37 @@ def test_write_tests_stage_rejects_non_test_file_mutations():
     assert violations == [
         "WRITE_TESTS may only modify Python test files; received out-of-scope file index.html."
     ]
+
+
+def test_patch_guard_accepts_index_html_apply_patch_scope():
+    patch = (
+        "diff --git a/index.html b/index.html\n"
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -1 +1 @@\n"
+        "-<body>Old</body>\n"
+        "+<body>New</body>\n"
+    )
+
+    decision = evaluate_patch_guard(
+        actions=[Action(type="apply_patch", patch=patch)],
+        allowed_files=["index.html"],
+    )
+
+    assert decision.touched_files == ["index.html"]
+    assert decision.ok is True
+
+
+def test_codex_executor_patch_parsers_preserve_index_html_paths():
+    executor = CodexExecutor()
+    patch = (
+        "diff --git a/index.html b/index.html\n"
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -1 +1 @@\n"
+        "-<body>Old</body>\n"
+        "+<body>New</body>\n"
+    )
+
+    assert executor._paths_from_diff(patch) == ["index.html"]
+    assert executor._parse_patch_changes(patch) == {"index.html": 2}

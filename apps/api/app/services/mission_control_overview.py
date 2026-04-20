@@ -351,6 +351,7 @@ def _build_preview_panel(
         preview_status = "PENDING"
     file_count = len(change_impact.files_changed) if change_impact and change_impact.patch_artifact else 0
     return MissionControlPreviewAndPrs(
+        run_id=summary.run_id if summary else None,
         repository_connected=project_repo is not None,
         profile_configured=preview_profile_available(preview_profile, repository_connected=project_repo is not None),
         provider=project_repo.provider if project_repo else None,
@@ -376,6 +377,27 @@ def _build_preview_panel(
         file_count=file_count,
         additions=change_impact.additions if change_impact else 0,
         deletions=change_impact.deletions if change_impact else 0,
+    )
+
+
+def _is_delivery_candidate(
+    summary: RunSummary | None,
+    run: Run | None,
+    patch_artifact: Artifact | None,
+) -> bool:
+    if summary is None or summary.status != "COMPLETED":
+        return False
+    summary_payload = run.summary if run is not None and isinstance(run.summary, dict) else {}
+    preview_summary = summary_payload.get("preview") if isinstance(summary_payload.get("preview"), dict) else {}
+    preview_status = str(preview_summary.get("status") or "NOT_CONFIGURED").upper()
+    return any(
+        (
+            patch_artifact is not None,
+            bool(summary.pr_url),
+            bool(summary.changed_files),
+            bool(summary_payload.get("remote_branch_pushed")),
+            preview_status != "NOT_CONFIGURED",
+        )
     )
 
 
@@ -476,8 +498,23 @@ async def build_mission_control_overview(
     latest_summary = summaries[0] if summaries else None
     latest_run = run_by_id.get(latest_summary.run_id) if latest_summary else None
     latest_patch = patch_artifacts.get(latest_summary.run_id) if latest_summary else None
+    delivery_summary = next(
+        (
+            summary
+            for summary in summaries
+            if _is_delivery_candidate(
+                summary,
+                run_by_id.get(summary.run_id),
+                patch_artifacts.get(summary.run_id),
+            )
+        ),
+        latest_summary,
+    )
+    delivery_run = run_by_id.get(delivery_summary.run_id) if delivery_summary else None
+    delivery_patch = patch_artifacts.get(delivery_summary.run_id) if delivery_summary else None
     related_docs = await _load_recent_documents(session, tenant_id=tenant_id, project_id=project_id)
     change_impact = _build_change_impact(latest_summary, latest_run, latest_patch, related_docs)
+    delivery_change_impact = _build_change_impact(delivery_summary, delivery_run, delivery_patch, related_docs)
     project_repo = await session.scalar(
         select(ProjectRepository).where(
             ProjectRepository.project_id == project_id,
@@ -491,7 +528,14 @@ async def build_mission_control_overview(
         )
     )
     runs = list(run_by_id.values())
-    preview_panel = _build_preview_panel(project_repo, preview_profile, latest_summary, latest_patch, change_impact, latest_run)
+    preview_panel = _build_preview_panel(
+        project_repo,
+        preview_profile,
+        delivery_summary,
+        delivery_patch,
+        delivery_change_impact,
+        delivery_run,
+    )
     return MissionControlOverviewResponse(
         work_intake=work_intake,
         recent_runs=recent_runs,

@@ -1,5 +1,13 @@
+import json
+import uuid
 from types import SimpleNamespace
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.db.base import Base
+from app.db.models import Project, Run, WorkItem
+from app.runtime.context import RunContext
 from app.runtime.codex_executor import (
     _edit_budget_from_payload,
     _is_static_frontend_scope,
@@ -11,6 +19,42 @@ from app.runtime.codex_executor import (
 from app.runtime.patch_guard import evaluate_patch_guard
 from app.runtime.schemas.executor_io import Action
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
+from app.services.ai_policy import AIJobManager
+
+
+class SequencePlanClient:
+    def __init__(self, plans: list[dict]):
+        self._plans = list(plans)
+        self.prompts: list[str] = []
+
+    def method_name(self) -> str:
+        return "sequence-plan-client"
+
+    def sdk_version(self) -> str:
+        return "test"
+
+    async def generate(self, system_prompt, user_prompt, **_kwargs):
+        self.prompts.append(user_prompt)
+        if not self._plans:
+            raise AssertionError("No plan responses remaining")
+        return json.dumps(self._plans.pop(0)), {"input_tokens": 1, "output_tokens": 1}
+
+
+@pytest.fixture
+async def db_session_factory(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'codex-executor.db'}", future=True)
+    session_factory = async_sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+        class_=AsyncSession,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield session_factory
+    finally:
+        await engine.dispose()
 
 
 def _no_scope_verification() -> RunPatchVerificationSummary:
@@ -126,13 +170,65 @@ def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
     assert "html.parser" in instructions
 
 
+def test_instructions_for_static_frontend_prefer_write_file_when_exact_diff_is_awkward():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"expected_files": ["index.html"]},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "prefer write_file with the full updated file contents" in instructions
+    assert "never use placeholder headers such as @@ ... @@" in instructions
+
+
+def test_instructions_for_plan_stage_forbid_mutations():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="PLAN_DAG",
+        payload={"expected_files": ["index.html"]},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "Do not mutate repository files." in instructions
+    assert "Return only note actions" in instructions
+
+
 def test_write_tests_stage_rejects_non_test_file_mutations():
     work_item = SimpleNamespace(type="WRITE_TESTS")
 
-    violations = _stage_scope_violations(work_item, ["index.html", "test_index_html.py"])
+    violations = _stage_scope_violations(
+        work_item,
+        [],
+        ["index.html", "test_index_html.py"],
+    )
 
     assert violations == [
         "WRITE_TESTS may only modify Python test files; received out-of-scope file index.html."
+    ]
+
+
+def test_plan_stage_rejects_mutating_actions():
+    work_item = SimpleNamespace(type="PLAN_DAG")
+    patch = (
+        "diff --git a/index.html b/index.html\n"
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -1 +1 @@\n"
+        "-<body>Old</body>\n"
+        "+<body>New</body>\n"
+    )
+
+    violations = _stage_scope_violations(
+        work_item,
+        [Action(type="apply_patch", patch=patch)],
+        ["index.html"],
+    )
+
+    assert violations == [
+        "PLAN work items may only return note actions; mutating file operations are out of scope."
     ]
 
 
@@ -168,3 +264,298 @@ def test_codex_executor_patch_parsers_preserve_index_html_paths():
 
     assert executor._paths_from_diff(patch) == ["index.html"]
     assert executor._parse_patch_changes(patch) == {"index.html": 2}
+
+
+def test_patch_structure_error_detects_hunk_without_file_headers():
+    executor = CodexExecutor()
+    patch = (
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    assert executor._patch_structure_error(patch) == "Patch is missing file headers (---/+++) before diff hunks."
+
+
+def test_patch_ratio_for_single_file_static_frontend_scope_is_unbounded():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="PLAN_DAG",
+        payload={"expected_files": ["index.html"]},
+    )
+
+    assert executor._patch_ratio_for(work_item) == float("inf")
+
+
+def test_patch_ratio_for_write_tests_scope_is_unbounded():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="WRITE_TESTS",
+        payload={"expected_files": ["test_index_html.py"]},
+    )
+
+    assert executor._patch_ratio_for(work_item) == float("inf")
+
+
+def test_patch_ratio_for_non_frontend_plan_scope_preserves_default_plan_limit():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="PLAN_DAG",
+        payload={"expected_files": ["app.py"]},
+    )
+
+    assert executor._patch_ratio_for(work_item) == 0.6
+
+
+def test_patch_guard_uses_apply_patch_path_when_diff_headers_are_missing():
+    decision = evaluate_patch_guard(
+        actions=[
+            Action(
+                type="apply_patch",
+                path="test_index_html.py",
+                patch=(
+                    "@@ -1 +1 @@\n"
+                    "-old\n"
+                    "+new\n"
+                ),
+            )
+        ],
+        allowed_files=["test_index_html.py"],
+    )
+
+    assert decision.touched_files == ["test_index_html.py"]
+    assert decision.ok is True
+
+
+@pytest.mark.anyio
+async def test_codex_executor_repairs_placeholder_patch_by_regenerating_plan(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main><section id='projects'><p>Projects section coming soon.</p></section></main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Frontend patch repair", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="SHOWCASE_PROJECTS",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "index.html"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequencePlanClient(
+        [
+            {
+                "status": "DONE",
+                "message": "patched",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "patch": (
+                            "diff --git a/index.html b/index.html\n"
+                            "--- a/index.html\n"
+                            "+++ b/index.html\n"
+                            "@@ ... @@\n"
+                            "-<p>Projects section coming soon.</p>\n"
+                            "+<div class='projects-list'><article>Portfolio Website</article></div>\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+            {
+                "status": "DONE",
+                "message": "patched after repair",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": (
+                            "<main>\n"
+                            "  <section id='projects'>\n"
+                            "    <h2>Projects</h2>\n"
+                            "    <div class='projects-list'>\n"
+                            "      <article>Portfolio Website</article>\n"
+                            "      <article>Task Tracker App</article>\n"
+                            "      <article>Weather Dashboard</article>\n"
+                            "    </div>\n"
+                            "  </section>\n"
+                            "</main>\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    def fake_apply_patch(self, patch: str):
+        raise ValueError("Patch apply error: Patch check failed: error: patch with only garbage at line 5")
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+    monkeypatch.setattr("app.runtime.codex_executor.RepoTools.apply_patch", fake_apply_patch)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Add showcase projects section",
+                    "expected_files": ["index.html"],
+                    "steps": [
+                        {
+                            "title": "Implement showcase projects section",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "CODE_FRONTEND",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "Task Tracker App" in index_path.read_text(encoding="utf-8")
+    assert len(client.prompts) == 2
+    assert "Do not use placeholder hunk headers such as @@ ... @@." in client.prompts[1]
+
+
+@pytest.mark.anyio
+async def test_codex_executor_repairs_hunk_only_patch_by_regenerating_plan(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main><p>Portfolio</p></main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Write tests patch repair", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="WRITE_TESTS",
+            key="WRITE_TESTS",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "test_index_html.py"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequencePlanClient(
+        [
+            {
+                "status": "DONE",
+                "message": "patched",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "path": "test_index_html.py",
+                        "patch": (
+                            "@@ -1 +1,8 @@\n"
+                            "+def test_index_html_contains_main():\n"
+                            "+    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "+        assert '<main>' in handle.read()\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+            {
+                "status": "DONE",
+                "message": "patched after repair",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "test_index_html.py",
+                        "content": (
+                            "def test_index_html_contains_main():\n"
+                            "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "        assert '<main>' in handle.read()\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Add tests for contact section",
+                    "expected_files": ["test_index_html.py"],
+                    "steps": [
+                        {
+                            "title": "Add tests for contact section",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "WRITE_TESTS",
+                            "expected_files": ["test_index_html.py"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "test_index_html_contains_main" in (tmp_path / "test_index_html.py").read_text(encoding="utf-8")
+    assert len(client.prompts) == 2
+    assert "Do not return hunk-only patch fragments that start with @@ before file headers." in client.prompts[1]

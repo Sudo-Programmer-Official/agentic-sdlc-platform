@@ -34,9 +34,14 @@ from app.services.ai_policy import AIJobManager, AIJobRequest, contains_sensitiv
 SYSTEM_PROMPT = """You are an automated code change worker.
 You must output ONLY a valid JSON object matching the provided schema.
 Prefer apply_patch with unified diff (git format) for edits; use write_file for new files or full replacements.
+If you use apply_patch, include full file headers such as --- a/path and +++ b/path before each hunk.
+If you use apply_patch, every hunk header must use exact unified diff line numbers like @@ -10,2 +10,6 @@.
+Never use placeholder hunk headers such as @@ ... @@.
+Never return a hunk-only patch fragment that starts with @@ before file headers.
 Do not invent files outside the repo. Do not include explanations outside JSON."""
 
 log = logging.getLogger("app.runtime.codex_executor")
+_UNIFIED_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$")
 
 
 def _verification_from_action_scope(
@@ -129,10 +134,16 @@ def _is_static_frontend_scope(payload: dict[str, Any] | None) -> bool:
     return all(Path(path).suffix.lower() in frontend_suffixes for path in target_files)
 
 
-def _stage_scope_violations(work_item: WorkItem, touched_files: list[str]) -> list[str]:
-    if work_item.type != "WRITE_TESTS":
-        return []
+def _stage_scope_violations(
+    work_item: WorkItem,
+    actions: list[Any],
+    touched_files: list[str],
+) -> list[str]:
     violations: list[str] = []
+    if "PLAN" in work_item.type and has_mutating_actions(actions):
+        violations.append("PLAN work items may only return note actions; mutating file operations are out of scope.")
+    if work_item.type != "WRITE_TESTS":
+        return violations
     for path in touched_files:
         name = Path(path).name
         if not (name.startswith("test_") and Path(path).suffix.lower() == ".py"):
@@ -154,6 +165,46 @@ class CodexExecutor(TaskExecutor):
         self.max_patch_lines = 2000
         self.max_patch_files = 50
         self.max_patch_ratio_default = 0.4  # per file changed_lines / original_lines
+        self.static_frontend_min_lines_single_file = 200
+        self.static_frontend_min_lines_multi_file = 120
+
+    def _patch_ratio_for(self, work_item: WorkItem) -> float:
+        payload = work_item.payload or {}
+        ratio = self.max_patch_ratio_default
+        if "PLAN" in work_item.type:
+            ratio = 0.6
+        if "FIX" in work_item.type:
+            ratio = 0.25
+        if work_item.type == "WRITE_TESTS":
+            return float("inf")
+        if _is_static_frontend_scope(payload):
+            # Static frontend tasks often replace most of a tiny document. Keep the
+            # total patch line and file-count guards, but do not block on per-file
+            # changed-lines/original-lines ratios for these bounded scopes.
+            return float("inf")
+        return ratio
+
+    def _patch_change_ratio(
+        self,
+        work_item: WorkItem,
+        rel_path: str,
+        *,
+        additions: int,
+        deletions: int,
+    ) -> float:
+        orig_lines = self._file_line_count(rel_path)
+        baseline = max(orig_lines, 1)
+        payload = work_item.payload or {}
+        if _is_static_frontend_scope(payload):
+            target_files = _target_files_from_payload(payload)
+            min_lines = (
+                self.static_frontend_min_lines_single_file
+                if len(target_files) <= 1
+                else self.static_frontend_min_lines_multi_file
+            )
+            new_lines = max(orig_lines + additions - deletions, 0)
+            baseline = max(baseline, new_lines, min_lines)
+        return (additions + deletions) / baseline
 
     def _get_client(self) -> OpenAIClient:
         if self._client is None:
@@ -229,11 +280,7 @@ class CodexExecutor(TaskExecutor):
         }
 
         # Adaptive patch ratio based on stage
-        ratio = self.max_patch_ratio_default
-        if "PLAN" in work_item.type:
-            ratio = 0.6
-        if "FIX" in work_item.type:
-            ratio = 0.25
+        ratio = self._patch_ratio_for(work_item)
 
         # Build minimal context (future: fetch relevant files)
         user_prompt = json.dumps(
@@ -443,124 +490,179 @@ class CodexExecutor(TaskExecutor):
                 "warnings": ["requires_confirmation"],
             }
 
-        patch_guard = evaluate_patch_guard(
-            actions=plan.actions,
-            allowed_files=allowed_files,
-            file_budget=int(edit_budget["file_budget"]),
-            hard_file_budget=int(edit_budget["hard_file_budget"]),
-        )
-        stage_violations = _stage_scope_violations(work_item, patch_guard.touched_files)
-        if stage_violations:
-            patch_guard.violations.extend(stage_violations)
-        verification = await self._load_patch_verification(work_item, context)
-        verification = _verification_from_action_scope(verification, patch_guard.touched_files)
-        if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):
-            await self._job_manager.fail_job(
-                prepared.job_id,
-                reason="human_review_required",
-                next_action="Confirm the patch plan before allowing mutating actions.",
-                error_kind="human_review_required",
-                input_tokens=usage_input_tokens,
-                output_tokens=usage_output_tokens,
-                approval_state="pending",
-                status="blocked",
-                details={"verification": verification.model_dump()},
+        patch_guard = None
+        repair_attempted = False
+        while True:
+            patch_guard = evaluate_patch_guard(
+                actions=plan.actions,
+                allowed_files=allowed_files,
+                file_budget=int(edit_budget["file_budget"]),
+                hard_file_budget=int(edit_budget["hard_file_budget"]),
             )
-            return {
-                "status": "FAILED",
-                "message": "Patch execution requires operator confirmation before mutating the repository.",
-                "payload": {
-                    "actions": [a.model_dump() for a in plan.actions],
-                    "verification": verification.model_dump(),
-                    "touched_files": patch_guard.touched_files,
-                },
-                "warnings": ["requires_confirmation"],
-            }
-        if not patch_guard.ok:
-            await self._job_manager.fail_job(
-                prepared.job_id,
-                reason="patch_guard_violation",
-                next_action="Reduce the touched file set or adjust the scoped plan before retrying.",
-                error_kind="patch_guard_violation",
-                input_tokens=usage_input_tokens,
-                output_tokens=usage_output_tokens,
-                details={"violations": patch_guard.violations},
-            )
-            return {
-                "status": "FAILED",
-                "message": "; ".join(patch_guard.violations),
-                "payload": {
-                    "actions": [a.model_dump() for a in plan.actions],
-                    "allowed_files": patch_guard.allowed_files,
-                    "touched_files": patch_guard.touched_files,
-                },
-                "warnings": ["patch_guard_violation"],
-            }
+            stage_violations = _stage_scope_violations(work_item, plan.actions, patch_guard.touched_files)
+            if stage_violations:
+                patch_guard.violations.extend(stage_violations)
+            verification = await self._load_patch_verification(work_item, context)
+            verification = _verification_from_action_scope(verification, patch_guard.touched_files)
+            if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):
+                await self._job_manager.fail_job(
+                    prepared.job_id,
+                    reason="human_review_required",
+                    next_action="Confirm the patch plan before allowing mutating actions.",
+                    error_kind="human_review_required",
+                    input_tokens=usage_input_tokens,
+                    output_tokens=usage_output_tokens,
+                    approval_state="pending",
+                    status="blocked",
+                    details={"verification": verification.model_dump()},
+                )
+                return {
+                    "status": "FAILED",
+                    "message": "Patch execution requires operator confirmation before mutating the repository.",
+                    "payload": {
+                        "actions": [a.model_dump() for a in plan.actions],
+                        "verification": verification.model_dump(),
+                        "touched_files": patch_guard.touched_files,
+                    },
+                    "warnings": ["requires_confirmation"],
+                }
+            if not patch_guard.ok:
+                await self._job_manager.fail_job(
+                    prepared.job_id,
+                    reason="patch_guard_violation",
+                    next_action="Reduce the touched file set or adjust the scoped plan before retrying.",
+                    error_kind="patch_guard_violation",
+                    input_tokens=usage_input_tokens,
+                    output_tokens=usage_output_tokens,
+                    details={"violations": patch_guard.violations},
+                )
+                return {
+                    "status": "FAILED",
+                    "message": "; ".join(patch_guard.violations),
+                    "payload": {
+                        "actions": [a.model_dump() for a in plan.actions],
+                        "allowed_files": patch_guard.allowed_files,
+                        "touched_files": patch_guard.touched_files,
+                    },
+                    "warnings": ["patch_guard_violation"],
+                }
 
-        # Apply actions
-        total_written = 0
-        try:
-            for act in plan.actions:
-                if act.type == "write_file":
-                    if not act.path or act.content is None:
-                        raise ValueError("write_file requires path and content")
-                    # output redaction check
-                    for pat in SECRET_PATTERNS:
-                        if pat.lower() in act.content.lower():
-                            raise ValueError("secret_pattern_detected_in_output")
-                    b = act.content.encode()
-                    total_written += len(b)
-                    if total_written > self.settings.codex_max_write_bytes_total:
-                        raise ValueError("Write exceeds max total bytes")
-                    repo.write_file(act.path, act.content)
-                elif act.type == "delete_file":
-                    if not act.path:
-                        raise ValueError("delete_file requires path")
-                    repo.delete_file(act.path)
-                elif act.type == "apply_patch":
-                    if not act.patch:
-                        raise ValueError("apply_patch requires patch")
-                    lower_patch = act.patch.lower()
-                    for pat in SECRET_PATTERNS:
-                        if pat.lower() in lower_patch:
-                            raise ValueError("secret_pattern_detected_in_output")
-                    b = act.patch.encode()
-                    total_written += len(b)
-                    if total_written > self.settings.codex_max_write_bytes_total:
-                        raise ValueError("Write exceeds max total bytes")
-                    # Heuristic guard: file count, line count, per-file change ratio
-                    file_headers = [ln for ln in act.patch.splitlines() if ln.startswith("diff --git")]
-                    if len(file_headers) > self.max_patch_files:
-                        raise ValueError("Patch touches too many files")
-                    changed_lines = sum(1 for ln in act.patch.splitlines() if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---")))
-                    if changed_lines > self.max_patch_lines:
-                        raise ValueError("Patch changes too many lines")
-                    per_file_changes = self._parse_patch_changes(act.patch)
-                    for rel_path, delta_lines in per_file_changes.items():
-                        orig_lines = self._file_line_count(rel_path)
-                        if orig_lines and delta_lines / orig_lines > ratio:
-                            raise ValueError(f"Patch too large for {rel_path} (>{int(ratio*100)}% change)")
-                    repo.apply_patch(act.patch)
-                elif act.type == "note":
-                    continue
-        except Exception as exc:
-            await self._job_manager.fail_job(
-                prepared.job_id,
-                reason="action_error",
-                next_action="Inspect the generated patch and rerun with a narrower scope.",
-                error_kind="action_error",
-                input_tokens=usage_input_tokens,
-                output_tokens=usage_output_tokens,
-                details={"error": str(exc)},
-            )
-            return {
-                "status": "FAILED",
-                "message": f"Action error: {exc}",
-                "payload": {"actions": [a.model_dump() for a in plan.actions]},
-            }
+            total_written = 0
+            changed_lines = 0
+            current_action = None
+            mutations_applied = False
+            try:
+                for current_action in plan.actions:
+                    if current_action.type == "write_file":
+                        if not current_action.path or current_action.content is None:
+                            raise ValueError("write_file requires path and content")
+                        for pat in SECRET_PATTERNS:
+                            if pat.lower() in current_action.content.lower():
+                                raise ValueError("secret_pattern_detected_in_output")
+                        b = current_action.content.encode()
+                        total_written += len(b)
+                        if total_written > self.settings.codex_max_write_bytes_total:
+                            raise ValueError("Write exceeds max total bytes")
+                        repo.write_file(current_action.path, current_action.content)
+                        mutations_applied = True
+                    elif current_action.type == "delete_file":
+                        if not current_action.path:
+                            raise ValueError("delete_file requires path")
+                        repo.delete_file(current_action.path)
+                        mutations_applied = True
+                    elif current_action.type == "apply_patch":
+                        if not current_action.patch:
+                            raise ValueError("apply_patch requires patch")
+                        lower_patch = current_action.patch.lower()
+                        for pat in SECRET_PATTERNS:
+                            if pat.lower() in lower_patch:
+                                raise ValueError("secret_pattern_detected_in_output")
+                        invalid_headers = self._invalid_patch_hunk_headers(current_action.patch)
+                        if invalid_headers:
+                            raise ValueError(
+                                "Patch uses invalid unified diff hunk headers: "
+                                + ", ".join(invalid_headers[:2])
+                            )
+                        structure_error = self._patch_structure_error(current_action.patch)
+                        if structure_error:
+                            raise ValueError(structure_error)
+                        b = current_action.patch.encode()
+                        total_written += len(b)
+                        if total_written > self.settings.codex_max_write_bytes_total:
+                            raise ValueError("Write exceeds max total bytes")
+                        file_headers = [ln for ln in current_action.patch.splitlines() if ln.startswith("diff --git")]
+                        if len(file_headers) > self.max_patch_files:
+                            raise ValueError("Patch touches too many files")
+                        changed_lines = sum(
+                            1
+                            for ln in current_action.patch.splitlines()
+                            if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))
+                        )
+                        if changed_lines > self.max_patch_lines:
+                            raise ValueError("Patch changes too many lines")
+                        per_file_changes = self._parse_patch_file_stats(current_action.patch)
+                        for rel_path, stats in per_file_changes.items():
+                            if self._patch_change_ratio(
+                                work_item,
+                                rel_path,
+                                additions=stats["added"],
+                                deletions=stats["deleted"],
+                            ) > ratio:
+                                raise ValueError(f"Patch too large for {rel_path} (>{int(ratio*100)}% change)")
+                        repo.apply_patch(current_action.patch)
+                        mutations_applied = True
+                    elif current_action.type == "note":
+                        continue
+            except Exception as exc:
+                if (
+                    not repair_attempted
+                    and self._is_patch_repair_candidate(
+                        action=current_action,
+                        error=exc,
+                        mutations_applied=mutations_applied,
+                    )
+                ):
+                    repair_attempted = True
+                    await self._job_manager.record_retry(prepared.job_id, "patch_apply_error")
+                    try:
+                        plan, raw, repair_usage = await self._repair_plan_after_patch_failure(
+                            client=client,
+                            prepared=prepared,
+                            user_prompt=user_prompt,
+                            allowed_files=allowed_files,
+                            error_message=str(exc),
+                            work_item=work_item,
+                        )
+                    except Exception as repair_exc:
+                        exc = repair_exc
+                    else:
+                        usage_input_tokens += int(
+                            repair_usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + user_prompt)
+                        )
+                        usage_output_tokens += int(repair_usage.get("output_tokens") or estimate_tokens(raw))
+                        usage = {
+                            "input_tokens": usage_input_tokens,
+                            "output_tokens": usage_output_tokens,
+                        }
+                        continue
+                await self._job_manager.fail_job(
+                    prepared.job_id,
+                    reason="action_error",
+                    next_action="Inspect the generated patch and rerun with a narrower scope.",
+                    error_kind="action_error",
+                    input_tokens=usage_input_tokens,
+                    output_tokens=usage_output_tokens,
+                    details={"error": str(exc)},
+                )
+                return {
+                    "status": "FAILED",
+                    "message": f"Action error: {exc}",
+                    "payload": {"actions": [a.model_dump() for a in plan.actions]},
+                }
+            break
 
         # Budget enforcement
-        total_tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+        total_tokens = usage_input_tokens + usage_output_tokens
         if total_tokens and total_tokens > self.settings.codex_max_run_tokens:
             await self._job_manager.fail_job(
                 prepared.job_id,
@@ -647,11 +749,8 @@ class CodexExecutor(TaskExecutor):
             },
         }
 
-    def _parse_patch_changes(self, patch: str) -> dict[str, int]:
-        """
-        Returns mapping of rel_path -> changed lines (add+del) from a unified diff.
-        """
-        changes: dict[str, int] = {}
+    def _parse_patch_file_stats(self, patch: str) -> dict[str, dict[str, int]]:
+        stats: dict[str, dict[str, int]] = {}
         current: str | None = None
         for line in patch.splitlines():
             if line.startswith("+++ "):
@@ -663,14 +762,24 @@ class CodexExecutor(TaskExecutor):
                 if path.startswith(("b/", "a/")):
                     path = path[2:]
                 current = path.strip()
-                changes.setdefault(current, 0)
+                stats.setdefault(current, {"added": 0, "deleted": 0})
                 continue
             if line.startswith("diff --git"):
                 # new file header will be handled on +++ line
                 continue
             if current and line and line[0] in {"+", "-"} and not line.startswith(("+++", "---")):
-                changes[current] = changes.get(current, 0) + 1
-        return changes
+                key = "added" if line.startswith("+") else "deleted"
+                stats[current][key] = stats[current].get(key, 0) + 1
+        return stats
+
+    def _parse_patch_changes(self, patch: str) -> dict[str, int]:
+        """
+        Returns mapping of rel_path -> changed lines (add+del) from a unified diff.
+        """
+        return {
+            rel_path: file_stats["added"] + file_stats["deleted"]
+            for rel_path, file_stats in self._parse_patch_file_stats(patch).items()
+        }
 
     def _file_line_count(self, rel_path: str) -> int:
         p = (self.repo_root / rel_path).resolve()
@@ -857,6 +966,91 @@ class CodexExecutor(TaskExecutor):
                 paths.append(path.strip())
         return paths
 
+    def _invalid_patch_hunk_headers(self, patch: str) -> list[str]:
+        invalid_headers: list[str] = []
+        for line in patch.splitlines():
+            if line.startswith("@@") and not _UNIFIED_DIFF_HUNK_RE.match(line):
+                invalid_headers.append(line.strip())
+        return invalid_headers
+
+    def _patch_structure_error(self, patch: str) -> str | None:
+        lines = patch.splitlines()
+        has_old_header = any(line.startswith("--- ") for line in lines)
+        has_new_header = any(line.startswith("+++ ") for line in lines)
+        has_hunks = any(line.startswith("@@") for line in lines)
+        if has_hunks and not (has_old_header and has_new_header):
+            return "Patch is missing file headers (---/+++) before diff hunks."
+        return None
+
+    def _is_patch_repair_candidate(
+        self,
+        *,
+        action: Any | None,
+        error: Exception,
+        mutations_applied: bool,
+    ) -> bool:
+        if mutations_applied or action is None or getattr(action, "type", None) != "apply_patch":
+            return False
+        patch = getattr(action, "patch", None)
+        if not isinstance(patch, str) or not patch.strip():
+            return False
+        if self._patch_structure_error(patch):
+            return True
+        if self._invalid_patch_hunk_headers(patch):
+            return True
+        lowered = str(error).lower()
+        return (
+            "patch with only garbage" in lowered
+            or "corrupt patch" in lowered
+            or "patch fragment without header" in lowered
+        )
+
+    async def _repair_plan_after_patch_failure(
+        self,
+        *,
+        client: OpenAIClient,
+        prepared,
+        user_prompt: str,
+        allowed_files: list[str],
+        error_message: str,
+        work_item: WorkItem,
+    ) -> tuple[CodexPlan, str, dict[str, Any]]:
+        allowed_text = ", ".join(allowed_files[:6]) if allowed_files else "the planned file scope"
+        repair_prompt = (
+            f"{user_prompt}\n\n"
+            "The previous action plan failed while applying a generated patch.\n"
+            f"Failure: {error_message}\n"
+            f"Stay within these files: {allowed_text}.\n"
+            "Return a new JSON object matching the schema.\n"
+            "If you use apply_patch, include full file headers such as --- a/path and +++ b/path before each hunk.\n"
+            "If you use apply_patch, every hunk header must use exact unified diff line numbers like @@ -10,2 +10,6 @@.\n"
+            "Do not use placeholder hunk headers such as @@ ... @@.\n"
+            "Do not return hunk-only patch fragments that start with @@ before file headers.\n"
+            "For single-file HTML/CSS/JS edits, prefer write_file with the full updated file contents.\n"
+            "Do not include prose outside the JSON object."
+        )
+        raw, usage = await client.generate(
+            SYSTEM_PROMPT,
+            repair_prompt,
+            model=prepared.model_name or self.settings.codex_model,
+            temperature=self.settings.codex_temperature,
+            max_tokens=self.settings.codex_max_tokens,
+            timeout=self.settings.codex_timeout_seconds,
+        )
+        try:
+            data = json.loads(raw)
+            plan = CodexPlan.model_validate(data)
+        except Exception as exc:
+            raise ValueError(f"Patch repair output was invalid: {exc}") from exc
+        log.warning(
+            "AI patch repair retry run_id=%s work_item_id=%s ai_job_id=%s work_item_type=%s",
+            work_item.run_id,
+            work_item.id,
+            prepared.job_id,
+            work_item.type,
+        )
+        return plan, raw, usage
+
     def _instructions_for(self, work_item: WorkItem) -> str:
         payload = work_item.payload or {}
         target_files = _target_files_from_payload(payload)
@@ -864,7 +1058,10 @@ class CodexExecutor(TaskExecutor):
         static_frontend_scope = _is_static_frontend_scope(payload)
         base = (
             "Produce JSON per schema. Prefer apply_patch with unified diff. "
-            "Use write_file for new files or complete replacements. Keep changes minimal."
+            "Use write_file for new files or complete replacements. Keep changes minimal. "
+            "If you use apply_patch, include full file headers such as --- a/path and +++ b/path before each hunk. "
+            "If you use apply_patch, emit exact unified diff hunk headers with numeric line ranges, "
+            "never use placeholder headers such as @@ ... @@, and never return a hunk-only fragment before file headers."
         )
         if target_files:
             file_list = ", ".join(target_files[:4])
@@ -875,7 +1072,8 @@ class CodexExecutor(TaskExecutor):
         if static_frontend_scope:
             base += (
                 " This is a static frontend task. Keep implementation inside the scoped HTML/CSS/JS files and "
-                "do not introduce Python helper modules or backend files unless the task explicitly asks for them."
+                "do not introduce Python helper modules or backend files unless the task explicitly asks for them. "
+                "For single-file HTML/CSS/JS edits, prefer write_file with the full updated file contents if generating an exact unified diff would be awkward."
             )
         test_dependency_guard = (
             " Tests must rely on the Python standard library or dependencies that are already declared in repo "
@@ -893,7 +1091,11 @@ class CodexExecutor(TaskExecutor):
         if work_item.type in {"WRITE_TESTS", "RUN_TESTS"}:
             return base + " Keep validation lightweight and directly tied to the requested behavior." + test_dependency_guard
         if "PLAN" in work_item.type:
-            return base + " You may propose broader changes here, but still minimize diff where possible."
+            return (
+                base
+                + " This is a planning stage. Do not mutate repository files."
+                  " Return only note actions that describe the intended patch and validation sequence."
+            )
         return base
 
     def _build_ai_job_request(self, work_item: WorkItem, context_bundle: dict[str, Any], allowed_files: list[str]) -> AIJobRequest:

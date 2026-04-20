@@ -62,6 +62,7 @@ class MissionControlChangeImpact(BaseModel):
 
 
 class MissionControlPreviewAndPrs(BaseModel):
+    run_id: uuid.UUID | None = None
     repository_connected: bool = False
     profile_configured: bool = False
     provider: str | None = None

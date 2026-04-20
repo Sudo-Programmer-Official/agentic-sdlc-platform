@@ -856,7 +856,7 @@
               plain
               size="small"
               :loading="previewLaunchLoading"
-              :disabled="!latestRun?.id || !previewsAndPrs.profile_configured || previewsAndPrs.requires_verification"
+              :disabled="!previewRunId || !previewsAndPrs.profile_configured || previewsAndPrs.requires_verification"
               @click="startPreviewLaunch"
             >
               {{ previewsAndPrs.preview_url ? "Refresh Preview" : "Launch Preview" }}
@@ -866,7 +866,7 @@
               size="small"
               type="danger"
               :loading="previewLaunchLoading"
-              :disabled="!latestRun?.id || !['STARTING', 'READY', 'FAILED', 'STOPPED'].includes(previewsAndPrs.preview_status)"
+              :disabled="!previewRunId || !['STARTING', 'READY', 'FAILED', 'STOPPED'].includes(previewsAndPrs.preview_status)"
               @click="stopPreviewLaunch"
             >
               Stop Preview
@@ -884,7 +884,7 @@
               plain
               size="small"
               type="success"
-              @click="openCreatePrDialog(previewsAndPrs.patch_artifact)"
+              @click="openCreatePrDialog(previewsAndPrs.patch_artifact, previewRunId)"
             >
               Open PR Flow
             </el-button>
@@ -1958,6 +1958,7 @@ const createPrLoading = ref(false);
 const createPrError = ref("");
 const createPrResult = ref<any | null>(null);
 const selectedPrArtifact = ref<any | null>(null);
+const selectedPrRunId = ref("");
 const createPrTitle = ref("");
 const createPrBody = ref("");
 const createPrBranch = ref("");
@@ -2048,6 +2049,9 @@ const intakeItems = computed(() => missionOverview.value?.work_intake || []);
 const recentRunCards = computed(() => missionOverview.value?.recent_runs || []);
 const latestChangeImpact = computed(() => missionOverview.value?.latest_change_impact || null);
 const previewsAndPrs = computed(() => missionOverview.value?.previews_and_prs || null);
+const previewRunId = computed(
+  () => previewsAndPrs.value?.run_id || latestChangeImpact.value?.run_id || latestRun.value?.id || ""
+);
 const strategyLearning = computed(() => missionOverview.value?.strategy_learning || []);
 const systemInsights = computed(() => missionOverview.value?.system_insights || null);
 const latestArtifactApproval = computed(() => createPrApprovals.value[0] || null);
@@ -2253,6 +2257,11 @@ const reviewSurfaceApprovalNote = computed(
 const reviewSurfacePullRequestUrl = computed(
   () => createPrResult.value?.pull_request_url || previewsAndPrs.value?.pull_request_url || null
 );
+
+function findRunById(runId: string) {
+  return runs.value.find((run) => run.id === runId) || null;
+}
+
 const latestLogMessageByTask = computed(() => {
   const map = new Map<string, string>();
   for (const log of timelineLogs.value) {
@@ -2478,11 +2487,11 @@ async function loadMissionOverview() {
 }
 
 async function startPreviewLaunch() {
-  if (!latestRun.value?.id) return;
+  if (!previewRunId.value) return;
   previewLaunchLoading.value = true;
   previewLaunchError.value = "";
   try {
-    await launchRunPreview(latestRun.value.id, { reuse_if_healthy: true });
+    await launchRunPreview(previewRunId.value, { reuse_if_healthy: true });
     await loadMissionOverview();
   } catch (err: any) {
     previewLaunchError.value = err?.message || "Failed to launch preview.";
@@ -2492,11 +2501,11 @@ async function startPreviewLaunch() {
 }
 
 async function stopPreviewLaunch() {
-  if (!latestRun.value?.id) return;
+  if (!previewRunId.value) return;
   previewLaunchLoading.value = true;
   previewLaunchError.value = "";
   try {
-    await deleteRunPreview(latestRun.value.id);
+    await deleteRunPreview(previewRunId.value);
     await loadMissionOverview();
   } catch (err: any) {
     previewLaunchError.value = err?.message || "Failed to stop preview.";
@@ -2972,14 +2981,20 @@ async function ensureSelectedPrArtifact(artifact: any) {
   }
 }
 
-async function openCreatePrDialog(artifact: any) {
+async function openCreatePrDialog(artifact: any, runId = latestRun.value?.id || "") {
   selectedPrArtifact.value = artifact;
+  selectedPrRunId.value = runId;
   createPrDialogOpen.value = true;
   createPrError.value = "";
   createPrResult.value = null;
-  createPrTitle.value = `Agentic SDLC run ${latestRun.value?.id || ""}`;
-  createPrBody.value = `Automated patch generated from run ${latestRun.value?.id || "unknown"}.`;
-  createPrBranch.value = latestRun.value?.branch_name || "";
+  const selectedRun = runId ? findRunById(runId) : null;
+  createPrTitle.value = `Agentic SDLC run ${runId || latestRun.value?.id || ""}`;
+  createPrBody.value = `Automated patch generated from run ${runId || latestRun.value?.id || "unknown"}.`;
+  createPrBranch.value =
+    (selectedRun?.branch_name as string | undefined) ||
+    (previewsAndPrs.value?.run_id === runId ? previewsAndPrs.value?.branch_name : "") ||
+    latestRun.value?.branch_name ||
+    "";
   createPrDiffPreview.value = null;
   await loadCreatePrReviewState(artifact);
 }
@@ -3069,11 +3084,11 @@ async function openWorkbenchPrFlow() {
 }
 
 async function submitCreatePr() {
-  if (!latestRun.value?.id || !selectedPrArtifact.value?.id) return;
+  if (!selectedPrRunId.value || !selectedPrArtifact.value?.id) return;
   createPrLoading.value = true;
   createPrError.value = "";
   try {
-    createPrResult.value = await createRunPullRequest(latestRun.value.id, {
+    createPrResult.value = await createRunPullRequest(selectedPrRunId.value, {
       artifact_id: selectedPrArtifact.value.id,
       title: createPrTitle.value.trim() || undefined,
       body: createPrBody.value.trim() || undefined,

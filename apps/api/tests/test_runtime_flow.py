@@ -341,6 +341,49 @@ async def test_scheduler_requeues_expired_running_items_and_run_can_finish(monke
 
 
 @pytest.mark.anyio
+async def test_scheduler_does_not_complete_run_before_work_items_exist(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Bootstrap race project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            started_at=datetime.now(timezone.utc),
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        assert run.finished_at is None
+
+        event_types = [
+            event.event_type
+            for event in (
+                await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+            ).scalars().all()
+        ]
+        assert "RUN_COMPLETED" not in event_types
+        assert "RUN_FAILED" not in event_types
+
+
+@pytest.mark.anyio
 async def test_keep_work_item_lease_alive_refreshes_running_item(runtime_db):
     tenant_id = uuid.uuid4()
 

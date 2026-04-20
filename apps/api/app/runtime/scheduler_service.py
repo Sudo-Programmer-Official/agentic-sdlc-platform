@@ -27,6 +27,16 @@ async def tick(session):
     ).scalars().all()
     from app.services.state_guard import update_run_status
     for run in runs:
+        total_items = (
+            await session.execute(
+                select(func.count()).where(WorkItem.run_id == run.id)
+            )
+        ).scalar() or 0
+        if total_items == 0:
+            # Fresh runs are bootstrapped in phases: the run row can briefly exist before the DAG is seeded.
+            # Do not finalize until at least one work item exists for the run.
+            continue
+
         # Hard stop: reviewer rejection is terminal
         failed_review = (
             await session.execute(

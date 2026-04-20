@@ -259,3 +259,89 @@ async def test_mission_control_overview_surfaces_default_preview_contract_for_re
     assert data["previews_and_prs"]["profile_configured"] is True
     assert data["previews_and_prs"]["preview_mode"] == "local"
     assert data["previews_and_prs"]["preview_status"] == "NOT_CONFIGURED"
+
+
+@pytest.mark.anyio
+async def test_mission_control_overview_preview_panel_prefers_latest_deliverable_run(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Deliverable selection", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    started = datetime.utcnow() - timedelta(minutes=10)
+
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/static-site.git",
+            repo_full_name="acme/static-site",
+            default_branch="main",
+        )
+    )
+
+    deliverable_run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/deliverable",
+        workspace_status="SEEDED",
+        started_at=started,
+        finished_at=started + timedelta(seconds=75),
+        summary={
+            "goal": "Ship a deliverable patch",
+            "remote_branch_pushed": True,
+            "remote_branch_name": "run/deliverable",
+            "preview": {
+                "status": "READY",
+                "mode": "local",
+                "preview_url": "http://127.0.0.1:3100",
+                "frontend": {"url": "http://127.0.0.1:3100"},
+            },
+        },
+    )
+    latest_noop_run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="dummy",
+        branch_name="run/noop",
+        workspace_status="SEEDED",
+        started_at=started + timedelta(minutes=3),
+        finished_at=started + timedelta(minutes=3, seconds=20),
+        summary={"goal": "No-op run"},
+    )
+    session.add_all([deliverable_run, latest_noop_run])
+    await session.flush()
+
+    patch_artifact = Artifact(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        run_id=deliverable_run.id,
+        type="git_diff",
+        uri="workspace://patches/deliverable.patch",
+        version=1,
+        extra_metadata={
+            "content": (
+                "diff --git a/index.html b/index.html\n"
+                "--- a/index.html\n"
+                "+++ b/index.html\n"
+                "@@ -1 +1 @@\n-old\n+new\n"
+            )
+        },
+    )
+    session.add(patch_artifact)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/mission-control/overview")
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["recent_runs"][0]["run_id"] == str(latest_noop_run.id)
+    assert data["previews_and_prs"]["run_id"] == str(deliverable_run.id)
+    assert data["previews_and_prs"]["branch_name"] == "run/deliverable"
+    assert data["previews_and_prs"]["preview_status"] == "READY"
+    assert data["previews_and_prs"]["preview_url"] == "http://127.0.0.1:3100"
+    assert data["previews_and_prs"]["file_count"] == 1

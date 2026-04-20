@@ -266,7 +266,13 @@
         <div class="flex items-center justify-between">
           <div class="text-xs uppercase tracking-wide text-slate-400">Runs</div>
           <div class="flex gap-2">
-            <el-select v-model="selectedExecutor" size="small" style="width: 140px" placeholder="Executor">
+            <el-select
+              v-model="selectedExecutor"
+              size="small"
+              style="width: 140px"
+              placeholder="Executor"
+              @change="markExecutorSelection"
+            >
               <el-option label="Dummy" value="dummy" />
               <el-option label="Codex" value="codex" />
             </el-select>
@@ -790,6 +796,7 @@ const runs = ref<any[]>([]);
 const runsLoading = ref(false);
 const runError = ref("");
 const selectedExecutor = ref("dummy");
+const executorSelectionDirty = ref(false);
 const workItems = ref<any[]>([]);
 const workItemsLoading = ref(false);
 const workItemError = ref("");
@@ -853,6 +860,10 @@ function taskBranchDetail(task: any) {
     return task?.branch_name || "Branch required";
   }
   return "System-generated isolated branch";
+}
+
+function markExecutorSelection() {
+  executorSelectionDirty.value = true;
 }
 
 function goToRun() {
@@ -1132,8 +1143,14 @@ async function loadProjectRepo() {
   if (!projectId.value) return;
   try {
     projectRepo.value = await fetchProjectRepo(projectId.value);
+    if (!executorSelectionDirty.value) {
+      selectedExecutor.value = projectRepo.value ? "codex" : "dummy";
+    }
   } catch (err: any) {
     projectRepo.value = null;
+    if (!executorSelectionDirty.value) {
+      selectedExecutor.value = "dummy";
+    }
     if (err?.message && !String(err.message).includes("Project repository not connected")) {
       repoError.value = err.message;
     }
@@ -1160,6 +1177,9 @@ async function submitConnectRepo() {
         : null,
       created_by: "ui-user",
     });
+    if (!executorSelectionDirty.value) {
+      selectedExecutor.value = "codex";
+    }
     showConnectRepoDialog.value = false;
     repoMessage.value = "Repository connected.";
   } catch (err: any) {

@@ -64,7 +64,7 @@ class RepoTools:
         try:
             # dry-run check first
             check_res = run_workspace_command(
-                ["git", "apply", "--check", "-"],
+                ["git", "apply", "--recount", "--check", "-"],
                 cwd=self.root,
                 log_dir=self.logs_path,
                 label="git-apply-check",
@@ -78,7 +78,7 @@ class RepoTools:
                 raise ValueError(f"Patch check failed: {check_res.stderr.strip() or check_res.stdout.strip()}")
 
             res = run_workspace_command(
-                ["git", "apply", "--whitespace=nowarn", "--reject", "-"],
+                ["git", "apply", "--recount", "--whitespace=nowarn", "--reject", "-"],
                 cwd=self.root,
                 log_dir=self.logs_path,
                 label="git-apply",

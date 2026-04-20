@@ -103,8 +103,12 @@ def extract_action_paths(actions: list[Action]) -> list[str]:
     for action in actions:
         if action.type in {"write_file", "delete_file"} and action.path:
             touched.append(_normalize_path(action.path))
-        elif action.type == "apply_patch" and action.patch:
-            touched.extend(_paths_from_diff(action.patch))
+        elif action.type == "apply_patch":
+            patch_paths = _paths_from_diff(action.patch) if action.patch else []
+            if patch_paths:
+                touched.extend(patch_paths)
+            elif action.path:
+                touched.append(_normalize_path(action.path))
     return list(dict.fromkeys(touched))
 
 

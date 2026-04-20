@@ -41,6 +41,16 @@
         <div class="execution-console__env-value">{{ runtimeGitAuthValue }}</div>
         <div class="execution-console__env-meta">{{ runtimeGitAuthMeta }}</div>
       </div>
+      <div class="execution-console__env-card">
+        <div class="execution-console__env-label">Contract State</div>
+        <div class="execution-console__env-value">{{ contractStateValue }}</div>
+        <div class="execution-console__env-meta">{{ contractStateMeta }}</div>
+      </div>
+      <div class="execution-console__env-card">
+        <div class="execution-console__env-label">Run Budget</div>
+        <div class="execution-console__env-value">{{ contractBudgetValue }}</div>
+        <div class="execution-console__env-meta">{{ contractBudgetMeta }}</div>
+      </div>
     </div>
 
     <div class="execution-console__grid">
@@ -173,6 +183,8 @@ const summary = computed(() => props.consoleData?.summary || {});
 const environment = computed(() => props.consoleData?.environment || {});
 const commandRows = computed(() => (Array.isArray(props.consoleData?.commands) ? props.consoleData.commands : []));
 const stepRows = computed(() => (Array.isArray(props.consoleData?.steps) ? props.consoleData.steps : []));
+const executionContract = computed(() => summary.value.execution_contract || null);
+const executionBudget = computed(() => executionContract.value?.budget || null);
 const primaryCommand = computed(() => commandRows.value.find((command: any) => command.status === "RUNNING") || commandRows.value[0] || null);
 const primaryStatus = computed(() => String(primaryCommand.value?.status || summary.value.run_status || props.runStatus || "IDLE"));
 const primaryStatusLabel = computed(() => humanizeStatus(primaryStatus.value));
@@ -238,6 +250,29 @@ const runtimeGitAuthMeta = computed(() => {
     `git ${formatPresence(Boolean(environment.value.git_binary))}`,
   ].join(" · ");
 });
+const contractStateValue = computed(() => {
+  if (!executionContract.value) return "Contract pending";
+  return humanizeStatus(executionContract.value.lifecycle_state || "PENDING");
+});
+const contractStateMeta = computed(() => {
+  if (!executionContract.value) return "No execution contract has been attached to this run yet.";
+  return [
+    `validation ${humanizeStatus(executionContract.value.validation_state || "NOT_STARTED")}`,
+    `retry ${humanizeStatus(executionContract.value.retry_state || "IDLE")}`,
+    `scope ${humanizeStatus(executionContract.value.scope_mode || "minimal_patch")}`,
+  ].join(" · ");
+});
+const contractBudgetValue = computed(() => {
+  if (!executionBudget.value) return "No budget";
+  return humanizeStatus(executionBudget.value.budget_mode || "NORMAL");
+});
+const contractBudgetMeta = computed(() => {
+  if (!executionBudget.value) return "No contract budget ledger attached.";
+  const tokenUsage = formatTokenBudget(executionBudget.value.used_tokens, executionBudget.value.max_tokens);
+  const costUsage = `${formatBudgetCents(executionBudget.value.used_cost_cents)}/${formatBudgetCents(executionBudget.value.max_cost_cents)}`;
+  const cap = executionBudget.value.model_tier_cap ? `cap ${executionBudget.value.model_tier_cap}` : "cap open";
+  return [tokenUsage, costUsage, cap].join(" · ");
+});
 
 const headline = computed(() => {
   if (primaryCommand.value?.status === "RUNNING") {
@@ -281,6 +316,17 @@ function humanizeStatus(value: string) {
     .toLowerCase()
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatBudgetCents(value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(2)}c`;
+}
+
+function formatTokenBudget(used?: number | null, max?: number | null) {
+  if (typeof max !== "number" || Number.isNaN(max)) return "tokens —";
+  const safeUsed = typeof used === "number" && !Number.isNaN(used) ? used : 0;
+  return `tokens ${safeUsed}/${max}`;
 }
 
 function formatPresence(value?: boolean | null) {

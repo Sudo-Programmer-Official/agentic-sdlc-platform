@@ -1,4 +1,5 @@
 from app.db.models.project import Project
+from app.db.models.architecture_profile import ArchitectureProfile
 from app.db.models.document import Document
 from app.db.models.task import Task
 from app.db.models.artifact import Artifact
@@ -6,6 +7,7 @@ from app.db.models.trace import Trace
 from app.db.models.approval import Approval
 from app.db.models.activity_log import ActivityLog
 from app.db.models.run import Run
+from app.db.models.run_checkpoint import RunCheckpoint
 from app.db.models.run_event import RunEvent
 from app.db.models.work_item import WorkItem
 from app.db.models.work_item_edge import WorkItemEdge
@@ -32,6 +34,7 @@ from app.db.models.knowledge import (
 
 __all__ = [
     "Project",
+    "ArchitectureProfile",
     "Document",
     "Task",
     "Artifact",
@@ -39,6 +42,7 @@ __all__ = [
     "Approval",
     "ActivityLog",
     "Run",
+    "RunCheckpoint",
     "RunEvent",
     "WorkItem",
     "WorkItemEdge",

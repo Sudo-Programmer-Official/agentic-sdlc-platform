@@ -35,6 +35,9 @@
           <el-button plain :disabled="!forkEnabled" @click="openReplayDialog()">
             Replay Run
           </el-button>
+          <el-button plain :disabled="!resumeEnabled" :loading="resumeLoading" @click="resumeLatestRun">
+            Resume Run
+          </el-button>
           <el-button plain :disabled="!forkEnabled" @click="openStrategyDialog">
             Strategy Lab
           </el-button>
@@ -488,6 +491,83 @@
             <strong>Files touched:</strong>
             {{ runNarrative.working_context.files_touched?.join(", ") || "—" }}
           </div>
+          <div v-if="architectureProfile" class="mission-subcard p-3 text-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div class="text-xs uppercase tracking-wide text-slate-400">Architecture Contract</div>
+                <div class="mt-1 font-semibold text-slate-900">
+                  {{ architectureProfile.repo_layout_label || "Repository" }}
+                  <span class="text-slate-500">· {{ architectureProfile.status || "MISSING" }}</span>
+                </div>
+              </div>
+              <el-tag
+                size="small"
+                effect="light"
+                :type="architectureProfile.protected_zones_touched?.length ? 'danger' : 'success'"
+              >
+                {{ architectureProfile.protected_zones_touched?.length ? "Protected zone touched" : "Bounded slice" }}
+              </el-tag>
+            </div>
+            <div class="mt-2 text-slate-600">
+              {{ architectureProfile.summary || "No architecture contract summary recorded." }}
+            </div>
+            <div class="mt-2 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+              <div><strong>Execution slice:</strong> {{ architectureProfile.execution_slice?.join(", ") || "—" }}</div>
+              <div><strong>Validation recipes:</strong> {{ architectureProfile.validation_recipes?.join(", ") || "—" }}</div>
+              <div><strong>Protected zones:</strong> {{ architectureProfile.protected_zones?.join(", ") || "—" }}</div>
+              <div><strong>Safe zones:</strong> {{ architectureProfile.safe_zones?.join(", ") || "—" }}</div>
+            </div>
+            <div v-if="architectureProfile.assumptions_used?.length" class="mt-2 text-xs text-slate-500">
+              <strong>Assumptions:</strong> {{ architectureProfile.assumptions_used.join(" · ") }}
+            </div>
+          </div>
+          <div v-if="latestExecutionContract" class="mission-subcard p-3 text-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div class="text-xs uppercase tracking-wide text-slate-400">Execution Contract</div>
+                <div class="mt-1 font-semibold text-slate-900">
+                  {{ humanizeToken(latestExecutionContract.lifecycle_state) }}
+                  <span class="text-slate-500">· {{ humanizeToken(latestExecutionContract.scope_mode) }}</span>
+                </div>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <el-tag size="small" effect="light" :type="budgetModeTagType(latestExecutionContract.budget?.budget_mode)">
+                  {{ latestExecutionContract.budget?.budget_mode || "NORMAL" }}
+                </el-tag>
+                <el-tag size="small" effect="light" :type="impactRiskTagType(latestExecutionContract.risk_level)">
+                  {{ latestExecutionContract.risk_level || "LOW" }}
+                </el-tag>
+              </div>
+            </div>
+            <div class="mt-2 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+              <div><strong>Validation:</strong> {{ humanizeToken(latestExecutionContract.validation_state) }}</div>
+              <div><strong>Retry:</strong> {{ humanizeToken(latestExecutionContract.retry_state) }}</div>
+              <div><strong>File budget:</strong> {{ latestExecutionContract.file_budget }}/{{ latestExecutionContract.hard_file_budget }}</div>
+              <div><strong>Allowed files:</strong> {{ latestExecutionContract.allowed_file_count }}</div>
+              <div><strong>Token budget:</strong> {{ formatBudgetTokenUsage(latestExecutionContract.budget?.used_tokens, latestExecutionContract.budget?.max_tokens) }}</div>
+              <div><strong>Cost budget:</strong> {{ formatBudgetCents(latestExecutionContract.budget?.used_cost_cents) }} / {{ formatBudgetCents(latestExecutionContract.budget?.max_cost_cents) }}</div>
+              <div><strong>Model cap:</strong> {{ latestExecutionContract.budget?.model_tier_cap || "open" }}</div>
+              <div><strong>Completion cap:</strong> {{ latestExecutionContract.budget?.completion_token_cap ?? "—" }}</div>
+            </div>
+            <div class="mt-2 text-slate-600">
+              <strong>Target files:</strong>
+              {{ latestExecutionContract.target_files?.join(", ") || "—" }}
+            </div>
+            <div class="mt-2 text-slate-600">
+              <strong>Validation steps:</strong>
+              {{ latestExecutionContract.validation_steps?.join(", ") || "—" }}
+            </div>
+            <div class="mt-2 text-slate-600">
+              <strong>Commands:</strong>
+              {{ executionContractCommands(latestExecutionContract) }}
+            </div>
+            <div
+              v-if="latestExecutionContract.budget?.escalation_reason"
+              class="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700"
+            >
+              {{ humanizeToken(latestExecutionContract.budget.escalation_reason) }}
+            </div>
+          </div>
           <div class="text-sm text-slate-600">
             <strong>Latest failure:</strong>
             {{ runNarrative.working_context.latest_failure || "None recorded." }}
@@ -760,6 +840,14 @@
                   <div><strong>Recoveries:</strong> {{ card.recovery_count }}</div>
                   <div><strong>Artifacts:</strong> {{ card.artifact_count }}</div>
                   <div><strong>Confidence:</strong> {{ formatConfidence(card.confidence_score) }}</div>
+                </div>
+                <div v-if="card.execution_contract" class="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+                  <div><strong>Contract:</strong> {{ humanizeToken(card.execution_contract.lifecycle_state) }}</div>
+                  <div><strong>Budget mode:</strong> {{ card.execution_contract.budget?.budget_mode || "NORMAL" }}</div>
+                  <div><strong>Validation:</strong> {{ humanizeToken(card.execution_contract.validation_state) }}</div>
+                  <div><strong>Retry:</strong> {{ humanizeToken(card.execution_contract.retry_state) }}</div>
+                  <div><strong>Token budget:</strong> {{ formatBudgetTokenUsage(card.execution_contract.budget?.used_tokens, card.execution_contract.budget?.max_tokens) }}</div>
+                  <div><strong>Commands:</strong> {{ executionContractCommands(card.execution_contract) }}</div>
                 </div>
               </div>
               <div class="flex flex-col gap-2">
@@ -1914,6 +2002,7 @@ import {
   listRuns,
   listWorkItems,
   reportRunIssue,
+  resumeRun,
   updateRunStatus,
 } from "../api/lifecycle";
 import { updateProjectContext } from "../state/projectContext";
@@ -2012,6 +2101,7 @@ const replayLoading = ref(false);
 const replayError = ref("");
 const replayResult = ref<any | null>(null);
 const replayRunId = ref("");
+const resumeLoading = ref(false);
 const runNarrativeLoading = ref(false);
 const runNarrativeError = ref("");
 const runNarrative = ref<any | null>(null);
@@ -2020,6 +2110,7 @@ const projectId = computed(() => (route.params.projectId as string) || "");
 const latestRun = computed(() => runs.value[0] || null);
 const hasRun = computed(() => Boolean(latestRun.value?.id));
 const forkEnabled = computed(() => Boolean(latestRun.value?.id));
+const resumeEnabled = computed(() => Boolean(latestRun.value?.id && latestRun.value?.summary?.resume_state?.can_resume));
 const compareEnabled = computed(() => runs.value.length >= 2);
 const currentStage = computed(() => project.value?.status || "UNKNOWN");
 const lifecycleWarnings = computed<string[]>(() => lifecycleScore.value?.warnings || []);
@@ -2049,6 +2140,10 @@ const intakeItems = computed(() => missionOverview.value?.work_intake || []);
 const recentRunCards = computed(() => missionOverview.value?.recent_runs || []);
 const latestChangeImpact = computed(() => missionOverview.value?.latest_change_impact || null);
 const previewsAndPrs = computed(() => missionOverview.value?.previews_and_prs || null);
+const architectureProfile = computed(() => missionOverview.value?.architecture_profile || null);
+const latestExecutionContract = computed(
+  () => missionOverview.value?.latest_execution_contract || executionConsole.value?.summary?.execution_contract || null
+);
 const previewRunId = computed(
   () => previewsAndPrs.value?.run_id || latestChangeImpact.value?.run_id || latestRun.value?.id || ""
 );
@@ -2403,6 +2498,7 @@ function resetState() {
   replayError.value = "";
   replayResult.value = null;
   replayRunId.value = "";
+  resumeLoading.value = false;
   runNarrativeLoading.value = false;
   runNarrativeError.value = "";
   runNarrative.value = null;
@@ -2666,6 +2762,21 @@ async function cancelLatestRun() {
     await loadAll();
   } catch (err: any) {
     error.value = err?.message || "Failed to cancel run.";
+  }
+}
+
+async function resumeLatestRun() {
+  if (!latestRun.value?.id || !resumeEnabled.value) return;
+  resumeLoading.value = true;
+  error.value = "";
+  try {
+    await resumeRun(latestRun.value.id, { start_now: true });
+    await loadAll();
+    ElMessage.success("Run resumed from the last safe checkpoint.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to resume run.";
+  } finally {
+    resumeLoading.value = false;
   }
 }
 
@@ -3146,6 +3257,13 @@ function impactRiskTagType(riskTier?: string | null) {
   return "success";
 }
 
+function budgetModeTagType(mode?: string | null) {
+  if (mode === "BLOCKED") return "danger";
+  if (mode === "CONSTRAINED") return "warning";
+  if (mode === "NORMAL") return "success";
+  return "info";
+}
+
 function verificationStatusTagType(status?: string | null) {
   if (status === "REQUIRES_CONFIRMATION") return "warning";
   if (status === "READY") return "success";
@@ -3263,6 +3381,23 @@ function formatElapsed(seconds?: number | null) {
 function formatConfidence(score?: number | null) {
   if (typeof score !== "number") return "—";
   return `${Math.round(score * 100)}%`;
+}
+
+function formatBudgetCents(value?: number | null) {
+  if (typeof value !== "number") return "—";
+  return `${value.toFixed(2)}c`;
+}
+
+function formatBudgetTokenUsage(used?: number | null, max?: number | null) {
+  if (typeof max !== "number") return "—";
+  return `${typeof used === "number" ? used : 0}/${max}`;
+}
+
+function executionContractCommands(contract?: any) {
+  const commands = [contract?.build_command, contract?.test_command, contract?.lint_command].filter(
+    (value) => typeof value === "string" && value.trim()
+  );
+  return commands.length ? commands.join(" · ") : "—";
 }
 
 function normalizeRuntimeGitAuthMode(value?: string | null) {

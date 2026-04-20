@@ -313,6 +313,15 @@ class AIJobManager:
             max_tier = _cap_tier(max_tier, "tier_economy")
             selected_tier = _cap_tier(selected_tier, "tier_economy")
 
+        max_tier_cap = self._metadata_value(request, "max_model_tier_cap")
+        if max_tier_cap in TIER_ORDER:
+            max_tier = _cap_tier(max_tier, max_tier_cap)  # type: ignore[arg-type]
+            selected_tier = _cap_tier(selected_tier, max_tier_cap)  # type: ignore[arg-type]
+
+        selected_override = self._metadata_value(request, "selected_model_tier_override")
+        if selected_override in TIER_ORDER and TIER_ORDER[selected_override] <= TIER_ORDER[max_tier]:
+            selected_tier = selected_override  # type: ignore[assignment]
+
         if request.workflow_type == "interactive_planning":
             budget_cents = settings.ai_budget_premium_cents
             max_context_tokens = settings.ai_max_context_premium_tokens

@@ -14,6 +14,7 @@ from app.runtime.orchestrator import RunOrchestrator
 from app.db.session import SessionLocal
 from app.services.activity_log import log_activity
 from app.services.event_log import record_event
+from app.services.run_resume import capture_run_checkpoint, sync_run_resume_state
 from app.services.run_launch import _schedule_orchestrator_start
 from app.services.workspace_supervisor import ensure_run_workspace
 
@@ -78,6 +79,8 @@ async def fork_run(
         require_repo=target_executor in {"codex", "test"},
         repo_source_path=repo_source,
     )
+    await capture_run_checkpoint(session, forked_run, checkpoint_kind="baseline")
+    await sync_run_resume_state(session, forked_run)
 
     source_items = (
         await session.execute(

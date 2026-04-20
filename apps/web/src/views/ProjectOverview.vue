@@ -46,6 +46,28 @@
         <div class="text-xs text-slate-500">Default branch: {{ projectRepo?.default_branch || "—" }}</div>
         <div v-if="repoError" class="mt-2 text-xs text-rose-600">{{ repoError }}</div>
       </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Architecture Contract</div>
+          <el-button size="small" plain :disabled="!projectId" @click="openArchitectureDialog">
+            Manage
+          </el-button>
+        </div>
+        <div class="mt-2 text-sm font-semibold" :class="architectureStatusTone">
+          {{ architectureSummary?.status || "MISSING" }}
+        </div>
+        <div class="mt-1 text-xs text-slate-600">
+          {{ architectureSummary?.summary || "No architecture profile saved yet." }}
+        </div>
+        <div class="mt-2 text-xs text-slate-500">
+          Layout: {{ architectureSummary?.repo_layout_label || "Repository" }}
+          · Packages: {{ architectureSummary?.package_count ?? 0 }}
+        </div>
+        <div class="text-xs text-slate-500">
+          Protected zones: {{ architectureSummary?.protected_zone_count ?? 0 }}
+          · Validation recipes: {{ architectureSummary?.validation_recipe_count ?? 0 }}
+        </div>
+      </div>
     </div>
 
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -208,6 +230,9 @@
         </el-button>
         <el-button type="primary" plain :disabled="!projectId" @click="openConnectRepoDialog">
           Connect Repo
+        </el-button>
+        <el-button type="primary" plain :disabled="!projectId" @click="openArchitectureDialog">
+          Architecture Contract
         </el-button>
         <el-button type="success" plain :disabled="!projectId || !documents.length" @click="showRegenDialog = true">
           Regenerate Tasks
@@ -515,6 +540,80 @@
       </div>
     </el-dialog>
 
+    <el-dialog v-model="showArchitectureDialog" title="Architecture Contract" width="760px">
+      <div class="space-y-4">
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold text-slate-900">
+                {{ architectureSummary?.repo_layout_label || "Repository" }}
+                <span class="text-slate-500">· {{ architectureSummary?.status || "MISSING" }}</span>
+              </div>
+              <div class="mt-1 text-xs text-slate-600">
+                {{ architectureSummary?.summary || "No architecture profile saved yet." }}
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <el-button
+                size="small"
+                :loading="architectureBootstrapLoading"
+                :disabled="!projectId"
+                @click="bootstrapArchitectureProfile(true)"
+              >
+                Bootstrap
+              </el-button>
+              <el-button
+                size="small"
+                plain
+                :loading="architectureDeriveLoading"
+                :disabled="!projectId"
+                @click="deriveArchitectureProfile(true)"
+              >
+                Derive
+              </el-button>
+            </div>
+          </div>
+          <div class="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+            <div><strong>Packages:</strong> {{ architectureSummary?.packages?.join(", ") || "—" }}</div>
+            <div><strong>Execution slice:</strong> {{ architectureSummary?.execution_slice?.join(", ") || "—" }}</div>
+            <div><strong>Protected zones:</strong> {{ architectureSummary?.protected_zones?.join(", ") || "—" }}</div>
+            <div><strong>Safe zones:</strong> {{ architectureSummary?.safe_zones?.join(", ") || "—" }}</div>
+            <div><strong>Commands:</strong> {{ architectureSummary?.commands?.join(", ") || "—" }}</div>
+            <div><strong>Validation recipes:</strong> {{ architectureSummary?.validation_recipes?.join(", ") || "—" }}</div>
+          </div>
+          <div v-if="architectureSummary?.assumptions_used?.length" class="mt-3 text-xs text-slate-500">
+            <strong>Assumptions:</strong> {{ architectureSummary.assumptions_used.join(" · ") }}
+          </div>
+        </div>
+
+        <div v-if="architectureLoading" class="text-sm text-slate-500">Loading architecture profile…</div>
+        <template v-else>
+          <el-input
+            v-model="architectureSummaryText"
+            placeholder="Architecture summary"
+            type="textarea"
+            :rows="3"
+          />
+          <el-input
+            v-model="architectureEditorValue"
+            type="textarea"
+            :rows="18"
+            placeholder='{"repo_layout": {...}}'
+            class="font-mono"
+          />
+        </template>
+
+        <div v-if="architectureError" class="text-sm text-rose-600">{{ architectureError }}</div>
+
+        <div class="flex justify-end gap-2">
+          <el-button @click="showArchitectureDialog = false">Close</el-button>
+          <el-button type="primary" :loading="architectureSaveLoading" @click="saveArchitectureProfileDraft">
+            Save Contract
+          </el-button>
+        </div>
+      </div>
+    </el-dialog>
+
     <el-dialog v-model="showTasksDialog" title="Tasks" width="640px">
       <div class="mb-3 flex items-center justify-between gap-3">
         <div class="text-xs text-slate-500">
@@ -660,6 +759,11 @@ import StageBadge from "../components/StageBadge.vue";
 import { projectContext, updateProjectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
 import {
+  createEmptyArchitectureProfileSummary,
+  fetchProjectArchitectureProfile,
+  bootstrapProjectArchitectureProfile,
+  deriveProjectArchitectureProfile,
+  saveProjectArchitectureProfile,
   previewImpact,
   regenerateTasks,
   listTasks,
@@ -701,6 +805,16 @@ const planRefreshNeeded = computed(() => projectContext.planRefreshNeeded);
 const testRefreshNeeded = computed(() => projectContext.testRefreshNeeded);
 const planMeta = ref<any | null>(null);
 const latestDelivery = ref<any | null>(null);
+const architectureSummary = ref<any>(createEmptyArchitectureProfileSummary());
+const architectureProfile = ref<any | null>(null);
+const showArchitectureDialog = ref(false);
+const architectureLoading = ref(false);
+const architectureBootstrapLoading = ref(false);
+const architectureDeriveLoading = ref(false);
+const architectureSaveLoading = ref(false);
+const architectureError = ref("");
+const architectureEditorValue = ref("{}");
+const architectureSummaryText = ref("");
 const planHistory = ref<any[]>([]);
 const health = ref<any | null>(null);
 const healthError = ref("");
@@ -829,6 +943,18 @@ const latestDeliveryTone = computed(() => {
   if (latestDelivery.value.pull_request_url || latestDelivery.value.delivery_pushed) return "text-emerald-600";
   return "text-slate-700";
 });
+const architectureStatusTone = computed(() => {
+  const status = String(architectureSummary.value?.status || "MISSING").toUpperCase();
+  if (status === "ACTIVE" || status === "READY") return "text-emerald-600";
+  if (status === "MISSING") return "text-amber-600";
+  return "text-slate-700";
+});
+
+function syncArchitectureEditor(profile: any | null) {
+  architectureProfile.value = profile;
+  architectureSummaryText.value = profile?.summary || architectureSummary.value?.summary || "";
+  architectureEditorValue.value = JSON.stringify(profile?.profile_json || {}, null, 2);
+}
 
 function goHome() {
   router.push("/");
@@ -1331,6 +1457,7 @@ async function loadProjectSummary() {
       requirements_version: data.requirements_version,
     };
     latestDelivery.value = data.latest_run || null;
+    architectureSummary.value = data.architecture_profile || createEmptyArchitectureProfileSummary();
     updateProjectContext({
       projectId: data.project_id,
       projectName: data.name,
@@ -1345,6 +1472,87 @@ async function loadProjectSummary() {
     });
   } catch {
     /* ignore */
+  }
+}
+
+async function openArchitectureDialog() {
+  if (!projectId.value) return;
+  showArchitectureDialog.value = true;
+  architectureLoading.value = true;
+  architectureError.value = "";
+  try {
+    const profile = await fetchProjectArchitectureProfile(projectId.value);
+    syncArchitectureEditor(profile);
+  } catch (err: any) {
+    architectureProfile.value = null;
+    architectureSummaryText.value = architectureSummary.value?.summary || "";
+    architectureEditorValue.value = JSON.stringify({}, null, 2);
+    architectureError.value = err?.message || "No saved architecture profile yet.";
+  } finally {
+    architectureLoading.value = false;
+  }
+}
+
+async function bootstrapArchitectureProfile(refreshRepoMap = false) {
+  if (!projectId.value) return;
+  architectureBootstrapLoading.value = true;
+  architectureError.value = "";
+  try {
+    const profile = await bootstrapProjectArchitectureProfile(projectId.value, {
+      refresh_repo_map: refreshRepoMap,
+      created_by: "ui-user",
+    });
+    syncArchitectureEditor(profile);
+    await loadProjectSummary();
+    ElMessage.success("Architecture profile bootstrapped.");
+  } catch (err: any) {
+    architectureError.value = err?.message || "Failed to bootstrap architecture profile";
+  } finally {
+    architectureBootstrapLoading.value = false;
+  }
+}
+
+async function deriveArchitectureProfile(refreshRepoMap = false) {
+  if (!projectId.value) return;
+  architectureDeriveLoading.value = true;
+  architectureError.value = "";
+  try {
+    const profile = await deriveProjectArchitectureProfile(projectId.value, {
+      refresh_repo_map: refreshRepoMap,
+      bootstrap_if_missing: true,
+      updated_by: "ui-user",
+    });
+    syncArchitectureEditor(profile);
+    await loadProjectSummary();
+    ElMessage.success("Architecture profile derived.");
+  } catch (err: any) {
+    architectureError.value = err?.message || "Failed to derive architecture profile";
+  } finally {
+    architectureDeriveLoading.value = false;
+  }
+}
+
+async function saveArchitectureProfileDraft() {
+  if (!projectId.value) return;
+  architectureSaveLoading.value = true;
+  architectureError.value = "";
+  try {
+    const profileJson = JSON.parse(architectureEditorValue.value || "{}");
+    const profile = await saveProjectArchitectureProfile(projectId.value, {
+      status: architectureProfile.value?.status || "ACTIVE",
+      source: architectureProfile.value?.source || "MANUAL",
+      summary: architectureSummaryText.value.trim() || null,
+      profile_json: profileJson,
+      created_by: architectureProfile.value?.created_by || "ui-user",
+      updated_by: "ui-user",
+    });
+    syncArchitectureEditor(profile);
+    await loadProjectSummary();
+    ElMessage.success("Architecture profile saved.");
+  } catch (err: any) {
+    architectureError.value = err?.message || "Failed to save architecture profile";
+  } finally {
+    architectureSaveLoading.value = false;
   }
 }
 

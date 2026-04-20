@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -11,14 +12,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Project, Run, Task
 from app.db.session import SessionLocal
+from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
+from app.runtime.execution_contract import build_execution_contract
 from app.runtime.orchestrator import RunOrchestrator
 from app.services.activity_log import log_activity
+from app.services.architecture_profile_service import summarize_architecture_profile
 from app.services.event_log import record_event
 from app.services.repo_connector import get_project_repository
+from app.services.run_resume import capture_run_checkpoint, sync_run_resume_state
 from app.services.task_branching import clean_branch_value, resolve_task_branch_plan
 from app.services.workspace_supervisor import ensure_run_workspace
 
 log = logging.getLogger("app.run_launch")
+_TASK_SCOPE_HINT_RE = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,12})(?![\w./-])")
+_FRONTEND_SCOPE_HINTS = {
+    "homepage",
+    "landing page",
+    "hero section",
+    "footer",
+    "navbar",
+    "navigation",
+    "section",
+    "layout",
+    "responsive",
+    "portfolio",
+    "ui",
+    "frontend",
+    "css",
+    "style",
+}
 
 
 def _list_strings(value: object) -> list[str]:
@@ -27,6 +49,27 @@ def _list_strings(value: object) -> list[str]:
     if isinstance(value, list):
         return [item.strip() for item in value if isinstance(item, str) and item.strip()]
     return []
+
+
+def _has_task_file_scope(summary: dict[str, object] | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    for key in ("target_files", "expected_files", "files", "related_files"):
+        if _list_strings(summary.get(key)):
+            return True
+    return False
+
+
+def _has_text_scope_hints(summary: dict[str, object] | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    text = " ".join(
+        str(summary.get(key) or "").strip()
+        for key in ("goal", "task_title", "task_description")
+        if str(summary.get(key) or "").strip()
+    )
+    lowered = text.lower()
+    return bool(_TASK_SCOPE_HINT_RE.search(text)) or any(keyword in lowered for keyword in _FRONTEND_SCOPE_HINTS)
 
 
 def _build_task_run_summary(task: Task) -> dict[str, object]:
@@ -52,6 +95,36 @@ def _build_task_run_summary(task: Task) -> dict[str, object]:
         if isinstance(edit_budget, dict):
             summary["edit_budget"] = dict(edit_budget)
     return summary
+
+
+async def _resolve_architecture_payload(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    touched_files: list[str],
+) -> dict[str, object]:
+    try:
+        summary = await summarize_architecture_profile(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            touched_files=touched_files,
+        )
+    except Exception:
+        log.warning(
+            "Architecture profile summary unavailable during run launch project_id=%s tenant_id=%s",
+            project_id,
+            tenant_id,
+            exc_info=True,
+        )
+        summary = ArchitectureProfileSummaryOut(
+            summary="Architecture profile unavailable during run launch.",
+            assumptions_used=["Execution contract derived from runtime defaults because architecture summary lookup failed."],
+        )
+    return summary.model_dump(mode="json")
+
+
 def _schedule_orchestrator_start(
     orchestrator: RunOrchestrator,
     *,
@@ -150,6 +223,33 @@ async def launch_run_for_project(
         raise ValueError(
             "A run is already in progress for this project; finish or cancel it before starting another."
         )
+
+    if run_summary is None:
+        run_summary = {}
+    if (
+        selected_task is not None
+        and executor_name.lower() == "dummy"
+        and not _has_task_file_scope(run_summary)
+        and not _has_text_scope_hints(run_summary)
+    ):
+        # Keep dummy task-bound runs operable in local/dev environments even when
+        # a manual task has not been scoped to explicit files yet.
+        run_summary["expected_files"] = ["app.py", "index.html"]
+    touched_files = _list_strings((run_summary or {}).get("target_files")) or _list_strings(
+        (run_summary or {}).get("expected_files")
+    )
+    architecture_payload = await _resolve_architecture_payload(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        touched_files=touched_files,
+    )
+    run_summary["architecture_profile"] = architecture_payload
+    run_summary["execution_contract"] = build_execution_contract(
+        run_summary=run_summary,
+        architecture_profile=architecture_payload,
+        plan_snapshot=None,
+    ).to_dict()
 
     project_repo = await get_project_repository(session, project_id=project_id, tenant_id=tenant_id)
     default_repo_branch = project_repo.default_branch if project_repo else None
@@ -260,6 +360,8 @@ async def launch_run_for_project(
         await session.refresh(run)
         return run
 
+    await capture_run_checkpoint(session, run, checkpoint_kind="baseline")
+    await sync_run_resume_state(session, run)
     await session.commit()
     await session.refresh(run)
 

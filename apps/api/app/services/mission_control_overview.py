@@ -25,6 +25,8 @@ from app.services.artifact_diff import parse_unified_diff, resolve_artifact_cont
 from app.services.preview_service import preview_profile_available, resolve_preview_profile
 from app.services.run_memory import find_similar_runs
 from app.services.run_summary_builder import ensure_project_run_summaries
+from app.services.architecture_profile_service import summarize_architecture_profile
+from app.services.execution_contract_telemetry import build_execution_contract_telemetry
 
 _HTTP_ROUTE_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[A-Za-z0-9_./:-]+)")
 
@@ -270,10 +272,12 @@ async def _load_recent_runs_and_artifacts(
 
 def _build_recent_runs(
     summaries: list[RunSummary],
+    runs: dict[uuid.UUID, Run],
     patch_artifacts: dict[uuid.UUID, Artifact | None],
 ) -> list[MissionControlRunCard]:
     cards: list[MissionControlRunCard] = []
     for summary in summaries:
+        run = runs.get(summary.run_id)
         cards.append(
             MissionControlRunCard(
                 run_id=summary.run_id,
@@ -290,6 +294,9 @@ def _build_recent_runs(
                 approval_status=summary.approval_status,
                 created_at=summary.run_created_at or summary.created_at,
                 patch_artifact=_artifact_ref(patch_artifacts.get(summary.run_id)),
+                execution_contract=build_execution_contract_telemetry(
+                    run.summary if run is not None and isinstance(run.summary, dict) else None
+                ),
             )
         )
     return cards
@@ -494,7 +501,7 @@ async def build_mission_control_overview(
         project_id=project_id,
         limit=20,
     )
-    recent_runs = _build_recent_runs(summaries[:6], patch_artifacts)
+    recent_runs = _build_recent_runs(summaries[:6], run_by_id, patch_artifacts)
     latest_summary = summaries[0] if summaries else None
     latest_run = run_by_id.get(latest_summary.run_id) if latest_summary else None
     latest_patch = patch_artifacts.get(latest_summary.run_id) if latest_summary else None
@@ -536,11 +543,21 @@ async def build_mission_control_overview(
         delivery_change_impact,
         delivery_run,
     )
+    architecture_summary = await summarize_architecture_profile(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        touched_files=change_impact.files_changed if change_impact else [],
+    )
     return MissionControlOverviewResponse(
         work_intake=work_intake,
         recent_runs=recent_runs,
         latest_change_impact=change_impact,
         previews_and_prs=preview_panel,
+        architecture_profile=architecture_summary,
+        latest_execution_contract=build_execution_contract_telemetry(
+            latest_run.summary if latest_run is not None and isinstance(latest_run.summary, dict) else None
+        ),
         strategy_learning=_build_strategy_learning(runs),
         system_insights=_build_system_insights(summaries),
     )

@@ -5,6 +5,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
+
 
 class MissionControlArtifactRef(BaseModel):
     id: uuid.UUID
@@ -43,6 +45,7 @@ class MissionControlRunCard(BaseModel):
     approval_status: str | None = None
     created_at: datetime
     patch_artifact: MissionControlArtifactRef | None = None
+    execution_contract: MissionControlExecutionContractTelemetry | None = None
 
 
 class MissionControlChangeImpact(BaseModel):
@@ -179,6 +182,42 @@ class MissionControlExecutionSummary(BaseModel):
     current_executor: str | None = None
     active_command_count: int = 0
     last_updated_at: datetime | None = None
+    execution_contract: MissionControlExecutionContractTelemetry | None = None
+
+
+class MissionControlExecutionBudgetTelemetry(BaseModel):
+    max_tokens: int = 0
+    used_tokens: int = 0
+    remaining_tokens: int = 0
+    max_cost_cents: float = 0.0
+    used_cost_cents: float = 0.0
+    remaining_cost_cents: float = 0.0
+    budget_mode: str = "NORMAL"
+    model_tier_cap: str | None = None
+    completion_token_cap: int | None = None
+    escalation_reason: str | None = None
+    last_model_tier: str | None = None
+    updated_at: datetime | None = None
+
+
+class MissionControlExecutionContractTelemetry(BaseModel):
+    lifecycle_state: str
+    validation_state: str
+    retry_state: str
+    scope_mode: str
+    risk_level: str
+    file_budget: int
+    hard_file_budget: int
+    target_files: list[str] = Field(default_factory=list)
+    allowed_file_count: int = 0
+    protected_paths: list[str] = Field(default_factory=list)
+    safe_paths: list[str] = Field(default_factory=list)
+    validation_steps: list[str] = Field(default_factory=list)
+    allowed_command_prefixes: list[str] = Field(default_factory=list)
+    build_command: str | None = None
+    test_command: str | None = None
+    lint_command: str | None = None
+    budget: MissionControlExecutionBudgetTelemetry
 
 
 class MissionControlExecutionConsoleResponse(BaseModel):
@@ -193,5 +232,7 @@ class MissionControlOverviewResponse(BaseModel):
     recent_runs: list[MissionControlRunCard] = Field(default_factory=list)
     latest_change_impact: MissionControlChangeImpact | None = None
     previews_and_prs: MissionControlPreviewAndPrs
+    architecture_profile: ArchitectureProfileSummaryOut | None = None
+    latest_execution_contract: MissionControlExecutionContractTelemetry | None = None
     strategy_learning: list[MissionControlStrategyInsight] = Field(default_factory=list)
     system_insights: MissionControlSystemInsights

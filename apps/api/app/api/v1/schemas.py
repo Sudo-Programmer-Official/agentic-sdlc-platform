@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
+
 
 class CreateProjectRequest(BaseModel):
     name: str = Field(..., min_length=1)
@@ -113,6 +115,7 @@ class ProjectSummaryResponse(BaseModel):
     name: str
     current_stage: str
     latest_run: Optional[RunSummary] = None
+    architecture_profile: ArchitectureProfileSummaryOut | None = None
     task_counts: TaskCounts
     architecture_refresh_needed: bool = False
     plan_refresh_needed: bool = False

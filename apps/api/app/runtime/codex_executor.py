@@ -11,6 +11,7 @@ from app.db.models import Run, WorkItem
 from app.db.session import SessionLocal
 from app.runtime.executor import TaskExecutor, TaskResult
 from app.runtime.context import RunContext
+from app.runtime.execution_contract import ExecutionContract, record_run_budget_usage
 from app.runtime.patch_guard import (
     DEFAULT_MAX_PATCH_FILES,
     HARD_MAX_PATCH_FILES,
@@ -101,6 +102,53 @@ def _target_files_from_payload(payload: dict[str, Any] | None) -> list[str]:
         if isinstance(value, str) and value.strip():
             normalized.append(value.strip())
     return list(dict.fromkeys(normalized))
+
+
+def _unique_paths(values: list[str]) -> list[str]:
+    ordered: list[str] = []
+    for value in values:
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in ordered:
+            ordered.append(cleaned)
+    return ordered
+
+
+def _looks_like_test_path(value: str) -> bool:
+    normalized = value.replace("\\", "/").strip()
+    if not normalized:
+        return False
+    pure = Path(normalized)
+    name = pure.name.lower()
+    return (
+        "tests" in pure.parts
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
+def _non_test_paths(values: list[str]) -> list[str]:
+    return [path for path in _unique_paths(values) if not _looks_like_test_path(path)]
+
+
+def _fix_test_failure_writable_scope(
+    payload: dict[str, Any] | None,
+    contract: ExecutionContract | None,
+    target_files: list[str],
+    allowed_files: list[str],
+) -> list[str]:
+    preferred: list[str] = []
+    if contract is not None and contract.target_files:
+        preferred.extend(list(contract.target_files))
+    preferred.extend(target_files)
+    non_test_preferred = _non_test_paths(preferred)
+    if non_test_preferred:
+        return non_test_preferred
+    non_test_allowed = _non_test_paths(allowed_files)
+    if non_test_allowed:
+        return non_test_allowed
+    return _unique_paths(preferred or allowed_files)
 
 
 def _edit_budget_from_payload(payload: dict[str, Any] | None) -> dict[str, int | str | None]:
@@ -214,22 +262,48 @@ class CodexExecutor(TaskExecutor):
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
         self.repo_root = repo_root
-        repo = RepoTools(repo_root, logs_path=Path(context.logs_path) if context.logs_path else None)
+        contract = context.execution_contract
+        repo = RepoTools(
+            repo_root,
+            logs_path=Path(context.logs_path) if context.logs_path else None,
+            execution_contract=contract,
+        )
         payload = work_item.payload or {}
         task_id = payload.get("task_id") if isinstance(payload.get("task_id"), str) else None
 
-        context_bundle = self._build_context(repo, work_item)
+        context_bundle = self._build_context(repo, work_item, contract)
         context_bundle.setdefault("meta", {})
-        target_files = _target_files_from_payload(work_item.payload)
-        allowed_files = derive_allowed_files(
-            work_item_id=str(work_item.id),
-            work_item_type=work_item.type,
-            payload=work_item.payload,
-            plan_snapshot=context.plan_snapshot,
+        target_files = (
+            list(contract.target_files)
+            if contract is not None and contract.target_files
+            else _target_files_from_payload(work_item.payload)
         )
-        if target_files:
+        allowed_files = (
+            list(contract.allowed_files)
+            if contract is not None and contract.allowed_files
+            else derive_allowed_files(
+                work_item_id=str(work_item.id),
+                work_item_type=work_item.type,
+                payload=work_item.payload,
+                plan_snapshot=context.plan_snapshot,
+            )
+        )
+        if work_item.type == "FIX_TEST_FAILURE":
+            writable_scope = _fix_test_failure_writable_scope(work_item.payload, contract, target_files, allowed_files)
+            if writable_scope:
+                target_files = writable_scope
+                allowed_files = list(writable_scope)
+        elif target_files:
             allowed_files = list(dict.fromkeys(target_files + allowed_files))
-        edit_budget = _edit_budget_from_payload(work_item.payload)
+        edit_budget = (
+            {
+                "mode": contract.scope_mode,
+                "file_budget": contract.file_budget,
+                "hard_file_budget": contract.hard_file_budget,
+            }
+            if contract is not None
+            else _edit_budget_from_payload(work_item.payload)
+        )
         context_bundle["meta"]["workspace"] = {
             "workspace_root": context.workspace_root,
             "repo_path": context.repo_path,
@@ -242,6 +316,10 @@ class CodexExecutor(TaskExecutor):
             "command_audit_path": context.command_audit_path,
             "cleanup_policy": context.cleanup_policy,
         }
+        if isinstance(context.architecture_profile, dict):
+            context_bundle["meta"]["architecture_profile"] = context.architecture_profile
+        if contract is not None:
+            context_bundle["meta"]["execution_contract"] = contract.to_dict()
         if isinstance(context.plan_snapshot, dict):
             context_bundle["meta"]["run_plan"] = {
                 "goal": context.plan_snapshot.get("goal"),
@@ -269,7 +347,7 @@ class CodexExecutor(TaskExecutor):
         graph_context = await self._load_graph_context(work_item)
         if graph_context:
             context_bundle["graph_context"] = graph_context
-        job_request = self._build_ai_job_request(work_item, context_bundle, allowed_files)
+        job_request = self._build_ai_job_request(work_item, context_bundle, allowed_files, contract)
         context_pack = await self._job_manager.load_context_pack(job_request)
         if context_pack.fragments:
             context_bundle["meta"]["cached_context"] = context_pack.fragments
@@ -282,6 +360,19 @@ class CodexExecutor(TaskExecutor):
         # Adaptive patch ratio based on stage
         ratio = self._patch_ratio_for(work_item)
 
+        if contract is not None and contract.budget.budget_mode == "BLOCKED":
+            return {
+                "status": "FAILED",
+                "message": "run_budget_exhausted",
+                "payload": {
+                    "next_action": "Split the run or reset the run budget before executing more autonomous work.",
+                    "budget": contract.budget.to_dict(),
+                    "validation_state": contract.validation_state,
+                    "retry_state": contract.retry_state,
+                },
+                "warnings": ["run_budget_exhausted"],
+            }
+
         # Build minimal context (future: fetch relevant files)
         user_prompt = json.dumps(
             {
@@ -292,7 +383,7 @@ class CodexExecutor(TaskExecutor):
                     "payload": work_item.payload or {},
                     "required_capabilities": work_item.required_capabilities or [],
                 },
-                "instructions": self._instructions_for(work_item),
+                "instructions": self._instructions_for(work_item, context),
                 "context_files": context_bundle.get("files", {}),
                 "meta": context_bundle.get("meta", {}),
                 "artifacts": context_bundle.get("artifacts", {}),
@@ -303,6 +394,12 @@ class CodexExecutor(TaskExecutor):
         filters_used = ["diff_narrowing", "stack_trace_extraction", "path_hint_lookup", "graph_context_lookup"]
         if context_pack.fragments:
             filters_used.append("context_pack_lookup")
+        completion_token_estimate = min(
+            self.settings.codex_max_tokens,
+            contract.budget.completion_token_cap
+            if contract is not None and contract.budget.completion_token_cap is not None
+            else self.settings.codex_max_tokens,
+        )
         prepared = await self._job_manager.prepare_job(
             job_request,
             system_prompt=SYSTEM_PROMPT,
@@ -310,7 +407,7 @@ class CodexExecutor(TaskExecutor):
             filters_used=filters_used,
             cache_hit_count=context_pack.cache_hits,
             context_pack=context_pack,
-            completion_token_estimate=self.settings.codex_max_tokens,
+            completion_token_estimate=completion_token_estimate,
             block_on_human_review=True,
         )
         if prepared.stop_reason:
@@ -350,7 +447,8 @@ class CodexExecutor(TaskExecutor):
         raw = ""
         usage: dict[str, Any] = {}
         current_user_prompt = user_prompt
-        parse_retry_used = False
+        parse_retry_count = 0
+        current_completion_token_estimate = completion_token_estimate
         client = self._get_client()
         log.info(
             "AI execution starting run_id=%s work_item_id=%s task_id=%s ai_job_id=%s work_item_type=%s tier=%s model=%s provider=%s client_method=%s openai_sdk_version=%s policy=%s",
@@ -374,7 +472,7 @@ class CodexExecutor(TaskExecutor):
                     current_user_prompt,
                     model=prepared.model_name or self.settings.codex_model,
                     temperature=self.settings.codex_temperature,
-                    max_tokens=self.settings.codex_max_tokens,
+                    max_tokens=current_completion_token_estimate,
                     timeout=self.settings.codex_timeout_seconds,
                 )
                 data = json.loads(raw)
@@ -382,11 +480,22 @@ class CodexExecutor(TaskExecutor):
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
-                if parse_failure and not parse_retry_used and attempt < prepared.policy.max_retries:
-                    parse_retry_used = True
+                if parse_failure and attempt < prepared.policy.max_retries:
+                    parse_retry_count += 1
                     await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
-                    current_user_prompt = (
-                        f"{user_prompt}\nYour previous output was invalid. Respond with EXACTLY one JSON object matching the schema. No prose."
+                    current_completion_token_estimate = self._parse_retry_max_tokens(
+                        current_max_tokens=current_completion_token_estimate,
+                        selected_model_tier=prepared.policy.selected_model_tier,
+                        work_item=work_item,
+                        contract=contract,
+                    )
+                    current_user_prompt = self._build_parse_retry_prompt(
+                        user_prompt=user_prompt,
+                        raw=raw,
+                        error=exc,
+                        work_item=work_item,
+                        allowed_files=allowed_files,
+                        retry_count=parse_retry_count,
                     )
                     continue
                 error_kind = "structured_parser_failure" if parse_failure else retry_error_kind(exc)
@@ -467,6 +576,14 @@ class CodexExecutor(TaskExecutor):
 
         usage_input_tokens = int(usage.get("input_tokens") or estimate_tokens(SYSTEM_PROMPT + current_user_prompt))
         usage_output_tokens = int(usage.get("output_tokens") or estimate_tokens(raw))
+        contract = await self._record_execution_budget(
+            context,
+            prepared_job_id=str(prepared.job_id),
+            work_item_id=str(work_item.id),
+            selected_model_tier=prepared.policy.selected_model_tier,
+            input_tokens=usage_input_tokens,
+            output_tokens=usage_output_tokens,
+        )
         if plan.confidence is not None and plan.confidence < self.settings.ai_low_confidence_threshold:
             await self._job_manager.fail_job(
                 prepared.job_id,
@@ -498,6 +615,7 @@ class CodexExecutor(TaskExecutor):
                 allowed_files=allowed_files,
                 file_budget=int(edit_budget["file_budget"]),
                 hard_file_budget=int(edit_budget["hard_file_budget"]),
+                contract=contract,
             )
             stage_violations = _stage_scope_violations(work_item, plan.actions, patch_guard.touched_files)
             if stage_violations:
@@ -543,6 +661,8 @@ class CodexExecutor(TaskExecutor):
                         "actions": [a.model_dump() for a in plan.actions],
                         "allowed_files": patch_guard.allowed_files,
                         "touched_files": patch_guard.touched_files,
+                        "protected_zones": patch_guard.protected_zones,
+                        "safe_zones": patch_guard.safe_zones,
                     },
                     "warnings": ["patch_guard_violation"],
                 }
@@ -661,22 +781,16 @@ class CodexExecutor(TaskExecutor):
                 }
             break
 
-        # Budget enforcement
-        total_tokens = usage_input_tokens + usage_output_tokens
-        if total_tokens and total_tokens > self.settings.codex_max_run_tokens:
-            await self._job_manager.fail_job(
-                prepared.job_id,
-                reason="run_budget_exceeded",
-                next_action="Reduce context or split the work item before retrying.",
-                error_kind="run_budget_exceeded",
-                input_tokens=usage_input_tokens,
-                output_tokens=usage_output_tokens,
-            )
-            return {
-                "status": "FAILED",
-                "message": "run_budget_exceeded",
-                "payload": {"usage": usage},
-            }
+        normalized_fix_failure = work_item.type == "FIX_TEST_FAILURE" and plan.status == "FAILED" and mutations_applied
+        if normalized_fix_failure:
+            plan.warnings.append("fix_patch_applied_despite_failed_model_status")
+
+        effective_status = "DONE" if normalized_fix_failure else plan.status
+        effective_message = (
+            "Applied candidate fix patch; rerun validation to confirm the repair."
+            if normalized_fix_failure
+            else plan.message
+        )
 
         diff = repo.git_diff()
         artifacts = [a.model_dump() for a in plan.artifacts]
@@ -708,7 +822,7 @@ class CodexExecutor(TaskExecutor):
             review_metrics["patch_complexity"] = plan.patch_complexity
         if 'git_diff' in {a["type"] for a in artifacts}:
             review_metrics["patch_lines"] = changed_lines if 'changed_lines' in locals() else None
-        final_status = "completed" if plan.status in {"DONE", "SKIPPED"} else "failed"
+        final_status = "completed" if effective_status in {"DONE", "SKIPPED"} else "failed"
         if final_status == "completed":
             await self._job_manager.complete_job(
                 prepared.job_id,
@@ -730,19 +844,22 @@ class CodexExecutor(TaskExecutor):
             )
 
         return {
-            "status": plan.status,
-            "message": plan.message,
+            "status": effective_status,
+            "message": effective_message,
             "payload": {
                 "artifacts": artifacts,
                 "warnings": plan.warnings,
                 "ai_job_id": str(prepared.job_id),
                 "ai_selected_tier": prepared.policy.selected_model_tier,
                 "ai_policy": self._policy_payload(prepared.policy),
+                "execution_contract": contract.to_dict() if contract is not None else None,
                 "patch_guard": {
                     "allowed_files": patch_guard.allowed_files,
                     "touched_files": patch_guard.touched_files,
                     "file_budget": patch_guard.file_budget,
                     "hard_file_budget": patch_guard.hard_file_budget,
+                    "protected_zones": patch_guard.protected_zones,
+                    "safe_zones": patch_guard.safe_zones,
                 },
                 "review": review_metrics,
                 "usage": usage,
@@ -792,7 +909,12 @@ class CodexExecutor(TaskExecutor):
         except Exception:
             return 0
 
-    def _build_context(self, repo: RepoTools, work_item: WorkItem) -> dict[str, Any]:
+    def _build_context(
+        self,
+        repo: RepoTools,
+        work_item: WorkItem,
+        execution_contract: ExecutionContract | None = None,
+    ) -> dict[str, Any]:
         """
         Deterministic minimal context selection.
         Priority:
@@ -823,9 +945,15 @@ class CodexExecutor(TaskExecutor):
                 max_bytes -= len(v.encode())
 
         payload = work_item.payload or {}
-        target_files = _target_files_from_payload(payload)
+        target_files = (
+            list(execution_contract.target_files)
+            if execution_contract is not None and execution_contract.target_files
+            else _target_files_from_payload(payload)
+        )
         if target_files:
             add_paths(target_files)
+        elif execution_contract is not None and execution_contract.allowed_files:
+            add_paths(list(execution_contract.allowed_files))
 
         # 1) Diff artifact file paths (highest priority for fixes)
         diff_art = None
@@ -856,6 +984,12 @@ class CodexExecutor(TaskExecutor):
                 add_paths([x for x in val if isinstance(x, str)])
         if isinstance(payload.get("files"), list):
             add_paths([x for x in payload["files"] if isinstance(x, str)])
+        if isinstance(payload.get("related_files"), list):
+            add_paths([x for x in payload["related_files"] if isinstance(x, str)])
+        if isinstance(payload.get("failing_test_files"), list):
+            add_paths([x for x in payload["failing_test_files"] if isinstance(x, str)])
+        if execution_contract is not None:
+            add_paths(list(execution_contract.related_files))
 
         # 4) Depth-1 local imports from already added Python files
         import_candidates = [p for p in list(files.keys()) if p.endswith(".py")]
@@ -912,11 +1046,15 @@ class CodexExecutor(TaskExecutor):
         context: RunContext,
     ) -> RunPatchVerificationSummary | None:
         plan_snapshot = context.plan_snapshot if isinstance(context.plan_snapshot, dict) else {}
-        planned_files = [
-            path
-            for path in plan_snapshot.get("expected_files", [])
-            if isinstance(path, str) and path.strip()
-        ]
+        planned_files = (
+            list(context.execution_contract.allowed_files)
+            if context.execution_contract is not None and context.execution_contract.allowed_files
+            else [
+                path
+                for path in plan_snapshot.get("expected_files", [])
+                if isinstance(path, str) and path.strip()
+            ]
+        )
         planned_steps = [
             step.get("title")
             for step in plan_snapshot.get("steps", [])
@@ -1003,7 +1141,83 @@ class CodexExecutor(TaskExecutor):
             "patch with only garbage" in lowered
             or "corrupt patch" in lowered
             or "patch fragment without header" in lowered
+            or "patch does not apply" in lowered
+            or "patch check failed" in lowered
+            or "patch apply failed" in lowered
+            or "error: patch failed:" in lowered
         )
+
+    def _is_likely_truncated_json_output(self, raw: str, error: Exception) -> bool:
+        if not isinstance(error, json.JSONDecodeError):
+            return False
+        if not isinstance(raw, str) or not raw.strip():
+            return False
+        message = str(error).lower()
+        stripped = raw.rstrip()
+        return (
+            "unterminated string" in message
+            or "unterminated" in message
+            or error.pos >= max(0, len(raw) - 128)
+            or stripped[-1] not in {"}", "]"}
+        )
+
+    def _parse_retry_max_tokens(
+        self,
+        *,
+        current_max_tokens: int,
+        selected_model_tier: str,
+        work_item: WorkItem,
+        contract: ExecutionContract | None,
+    ) -> int:
+        if contract is not None and contract.budget.budget_mode != "NORMAL":
+            return current_max_tokens
+
+        tier_default = {
+            "tier_premium": int(getattr(self.settings, "ai_default_completion_premium_tokens", 2000)),
+            "tier_economy": int(getattr(self.settings, "ai_default_completion_economy_tokens", 800)),
+        }.get(
+            selected_model_tier,
+            int(getattr(self.settings, "ai_default_completion_standard_tokens", self.settings.codex_max_tokens)),
+        )
+        boosted_floor = tier_default
+        if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND", "WRITE_TESTS"}:
+            boosted_floor = max(boosted_floor, 2200 if selected_model_tier != "tier_economy" else 1200)
+        elif work_item.type not in {"PLAN_DAG", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+            boosted_floor = max(boosted_floor, 1600)
+        boosted = min(max(current_max_tokens * 2, boosted_floor), 4000)
+        if contract is not None and contract.budget.remaining_tokens > 0:
+            boosted = min(boosted, max(current_max_tokens, contract.budget.remaining_tokens))
+        return max(current_max_tokens, boosted)
+
+    def _build_parse_retry_prompt(
+        self,
+        *,
+        user_prompt: str,
+        raw: str,
+        error: Exception,
+        work_item: WorkItem,
+        allowed_files: list[str],
+        retry_count: int,
+    ) -> str:
+        allowed_text = ", ".join(allowed_files[:6]) if allowed_files else "the scoped files"
+        issue = (
+            "truncated before the JSON object finished"
+            if self._is_likely_truncated_json_output(raw, error)
+            else "invalid JSON or did not match the schema"
+        )
+        guidance = [
+            f"Your previous output was {issue}. Re-emit the full response from scratch.",
+            "Respond with EXACTLY one complete JSON object matching the schema.",
+            "Do not include markdown fences, explanations, or any prose outside the JSON object.",
+            "Do not omit closing quotes, braces, or brackets.",
+            f"Stay within these files: {allowed_text}.",
+        ]
+        if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND", "WRITE_TESTS"}:
+            guidance.append(
+                "If a long apply_patch diff risks truncation, prefer write_file for a single targeted file or a shorter patch."
+            )
+        guidance.append(f"This is structured output retry {retry_count}.")
+        return f"{user_prompt}\n\n" + "\n".join(guidance)
 
     async def _repair_plan_after_patch_failure(
         self,
@@ -1029,19 +1243,43 @@ class CodexExecutor(TaskExecutor):
             "For single-file HTML/CSS/JS edits, prefer write_file with the full updated file contents.\n"
             "Do not include prose outside the JSON object."
         )
-        raw, usage = await client.generate(
-            SYSTEM_PROMPT,
-            repair_prompt,
-            model=prepared.model_name or self.settings.codex_model,
-            temperature=self.settings.codex_temperature,
-            max_tokens=self.settings.codex_max_tokens,
-            timeout=self.settings.codex_timeout_seconds,
-        )
-        try:
-            data = json.loads(raw)
-            plan = CodexPlan.model_validate(data)
-        except Exception as exc:
-            raise ValueError(f"Patch repair output was invalid: {exc}") from exc
+        current_prompt = repair_prompt
+        current_max_tokens = self.settings.codex_max_tokens
+        raw = ""
+        usage: dict[str, Any] = {}
+        for retry_count in range(2):
+            raw, usage = await client.generate(
+                SYSTEM_PROMPT,
+                current_prompt,
+                model=prepared.model_name or self.settings.codex_model,
+                temperature=self.settings.codex_temperature,
+                max_tokens=current_max_tokens,
+                timeout=self.settings.codex_timeout_seconds,
+            )
+            try:
+                data = json.loads(raw)
+                plan = CodexPlan.model_validate(data)
+                break
+            except Exception as exc:
+                parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
+                if parse_failure and retry_count == 0:
+                    await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
+                    current_max_tokens = self._parse_retry_max_tokens(
+                        current_max_tokens=current_max_tokens,
+                        selected_model_tier=prepared.policy.selected_model_tier,
+                        work_item=work_item,
+                        contract=None,
+                    )
+                    current_prompt = self._build_parse_retry_prompt(
+                        user_prompt=repair_prompt,
+                        raw=raw,
+                        error=exc,
+                        work_item=work_item,
+                        allowed_files=allowed_files,
+                        retry_count=retry_count + 1,
+                    )
+                    continue
+                raise ValueError(f"Patch repair output was invalid: {exc}") from exc
         log.warning(
             "AI patch repair retry run_id=%s work_item_id=%s ai_job_id=%s work_item_type=%s",
             work_item.run_id,
@@ -1051,11 +1289,58 @@ class CodexExecutor(TaskExecutor):
         )
         return plan, raw, usage
 
-    def _instructions_for(self, work_item: WorkItem) -> str:
+    async def _record_execution_budget(
+        self,
+        context: RunContext,
+        *,
+        prepared_job_id: str,
+        work_item_id: str,
+        selected_model_tier: str,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> ExecutionContract | None:
+        try:
+            async with SessionLocal() as session:
+                run = await session.get(Run, context.run_id)
+                if run is None:
+                    return context.execution_contract
+                contract = await record_run_budget_usage(
+                    session,
+                    run,
+                    work_item_id=work_item_id,
+                    ai_job_id=prepared_job_id,
+                    selected_model_tier=selected_model_tier,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+                await session.commit()
+                context.execution_contract = contract
+                return contract
+        except Exception:
+            return context.execution_contract
+
+    def _instructions_for(self, work_item: WorkItem, context: RunContext | None = None) -> str:
         payload = work_item.payload or {}
-        target_files = _target_files_from_payload(payload)
-        edit_budget = _edit_budget_from_payload(payload)
-        static_frontend_scope = _is_static_frontend_scope(payload)
+        contract = context.execution_contract if context is not None else None
+        target_files = (
+            list(contract.target_files)
+            if contract is not None and contract.target_files
+            else _target_files_from_payload(payload)
+        )
+        edit_budget = (
+            {
+                "mode": contract.scope_mode,
+                "file_budget": contract.file_budget,
+                "hard_file_budget": contract.hard_file_budget,
+            }
+            if contract is not None
+            else _edit_budget_from_payload(payload)
+        )
+        static_frontend_scope = _is_static_frontend_scope(payload) or (
+            bool(target_files)
+            and all(Path(path).suffix.lower() in {".html", ".css", ".js", ".mjs", ".cjs"} for path in target_files)
+        )
+        architecture = context.architecture_profile if context and isinstance(context.architecture_profile, dict) else {}
         base = (
             "Produce JSON per schema. Prefer apply_patch with unified diff. "
             "Use write_file for new files or complete replacements. Keep changes minimal. "
@@ -1069,6 +1354,34 @@ class CodexExecutor(TaskExecutor):
                 f" Restrict edits to these files unless validation proves a neighboring file is required: {file_list}. "
                 f"Keep the patch within {edit_budget['file_budget']} files and prefer a {edit_budget['mode']} strategy."
             )
+        protected_paths = (
+            list(contract.protected_paths)
+            if contract is not None
+            else architecture.get("protected_paths", []) if isinstance(architecture.get("protected_paths"), list) else []
+        )
+        safe_paths = (
+            list(contract.safe_paths)
+            if contract is not None
+            else architecture.get("safe_paths", []) if isinstance(architecture.get("safe_paths"), list) else []
+        )
+        assumptions = list(contract.assumptions_used) if contract is not None else []
+        if assumptions:
+            base += " Architecture assumptions: " + "; ".join(str(item) for item in assumptions[:4]) + "."
+        if protected_paths:
+            base += (
+                " Avoid protected zones unless the task explicitly requires them: "
+                + ", ".join(str(path) for path in protected_paths[:4])
+                + "."
+            )
+        if safe_paths:
+            base += " Prefer safe refactor zones when possible: " + ", ".join(str(path) for path in safe_paths[:4]) + "."
+        recipe_names = list(contract.validation_recipes) if contract is not None else []
+        if recipe_names:
+            base += " Validation recipes available: " + ", ".join(recipe_names[:4]) + "."
+        if contract is not None and contract.validation_state not in {"", "NOT_REQUIRED"}:
+            base += f" Current validation state: {contract.validation_state}."
+        if contract is not None and contract.retry_state not in {"", "IDLE"}:
+            base += f" Current retry state: {contract.retry_state}."
         if static_frontend_scope:
             base += (
                 " This is a static frontend task. Keep implementation inside the scoped HTML/CSS/JS files and "
@@ -1085,7 +1398,10 @@ class CodexExecutor(TaskExecutor):
             return (
                 base
                 + " You are fixing failing tests. Use the failing stack info and previous diff. "
-                  "Make the smallest possible patch that addresses the failure; avoid broad refactors."
+                  "Make the smallest possible patch that addresses the failure; avoid broad refactors. "
+                  "Prefer patching implementation files over test files. Treat test files as read-only verification "
+                  "context unless the failure is clearly caused by a syntax, import, or harness defect inside the test itself. "
+                  "Do not weaken or rewrite assertions just to make the suite pass."
                 + test_dependency_guard
             )
         if work_item.type in {"WRITE_TESTS", "RUN_TESTS"}:
@@ -1098,8 +1414,14 @@ class CodexExecutor(TaskExecutor):
             )
         return base
 
-    def _build_ai_job_request(self, work_item: WorkItem, context_bundle: dict[str, Any], allowed_files: list[str]) -> AIJobRequest:
-        candidate_paths = self._candidate_paths(work_item, context_bundle, allowed_files)
+    def _build_ai_job_request(
+        self,
+        work_item: WorkItem,
+        context_bundle: dict[str, Any],
+        allowed_files: list[str],
+        execution_contract: ExecutionContract | None = None,
+    ) -> AIJobRequest:
+        candidate_paths = self._candidate_paths(work_item, context_bundle, allowed_files, execution_contract)
         risk_level = self._risk_level_for_work_item(work_item, candidate_paths)
         payload = work_item.payload or {}
         if "PLAN" in work_item.type:
@@ -1127,6 +1449,18 @@ class CodexExecutor(TaskExecutor):
             task_type = "implementation"
             ambiguity = "medium"
             workflow_type = "repo_implementation_task"
+        metadata = {
+            "work_item_type": work_item.type,
+            "work_item_key": work_item.key,
+            "feature_key": payload.get("feature_key"),
+            "surface": payload.get("surface"),
+        }
+        if execution_contract is not None:
+            metadata["validation_state"] = execution_contract.validation_state
+            metadata["retry_state"] = execution_contract.retry_state
+            metadata["budget_mode"] = execution_contract.budget.budget_mode
+            if execution_contract.budget.model_tier_cap:
+                metadata["max_model_tier_cap"] = execution_contract.budget.model_tier_cap
         return AIJobRequest(
             workflow_type=workflow_type,
             role=role,
@@ -1142,12 +1476,7 @@ class CodexExecutor(TaskExecutor):
             entrypoint="runtime.codex_executor",
             changed_files=candidate_paths,
             tests_failed=work_item.type == "FIX_TEST_FAILURE",
-            metadata={
-                "work_item_type": work_item.type,
-                "work_item_key": work_item.key,
-                "feature_key": payload.get("feature_key"),
-                "surface": payload.get("surface"),
-            },
+            metadata=metadata,
         )
 
     @staticmethod
@@ -1176,7 +1505,13 @@ class CodexExecutor(TaskExecutor):
         }
         return mapping.get(work_item.type, "runtime")
 
-    def _candidate_paths(self, work_item: WorkItem, context_bundle: dict[str, Any], allowed_files: list[str]) -> list[str]:
+    def _candidate_paths(
+        self,
+        work_item: WorkItem,
+        context_bundle: dict[str, Any],
+        allowed_files: list[str],
+        execution_contract: ExecutionContract | None = None,
+    ) -> list[str]:
         ordered: list[str] = []
         seen: set[str] = set()
 
@@ -1190,6 +1525,10 @@ class CodexExecutor(TaskExecutor):
 
         payload = work_item.payload or {}
         add(_target_files_from_payload(payload))
+        if execution_contract is not None:
+            add(list(execution_contract.target_files))
+            add(list(execution_contract.allowed_files))
+            add(list(execution_contract.related_files))
         add(list(context_bundle.get("files", {}).keys()))
         add(allowed_files)
         for key in ("file", "filepath", "path", "target_file"):
@@ -1200,6 +1539,10 @@ class CodexExecutor(TaskExecutor):
                 add([item for item in value if isinstance(item, str)])
         if isinstance(payload.get("files"), list):
             add([item for item in payload["files"] if isinstance(item, str)])
+        if isinstance(payload.get("related_files"), list):
+            add([item for item in payload["related_files"] if isinstance(item, str)])
+        if isinstance(payload.get("failing_test_files"), list):
+            add([item for item in payload["failing_test_files"] if isinstance(item, str)])
         artifacts = context_bundle.get("artifacts", {})
         diff_content = artifacts.get("git_diff") or artifacts.get("diff_summary")
         if isinstance(diff_content, str):

@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import Run
 from app.runtime.context import RunContext
+from app.runtime.execution_contract import build_execution_contract, coerce_execution_contract
 from app.services.event_log import record_event
+from app.services.architecture_profile_service import get_architecture_runtime_meta
 from app.services.repo_connector import (
     checkout_workspace_branch_from_head,
     get_project_repository,
@@ -105,6 +107,7 @@ def _manifest(
         "repo_auth_mode": repo_auth_mode,
         "executor": run.executor,
         "plan_snapshot_path": str(paths.context / "plan.json"),
+        "execution_contract_path": str(paths.context / "execution_contract.json"),
         "simulation_mode": getattr(settings, "workspace_simulation_mode", "ephemeral"),
         "cleanup_policy": getattr(settings, "workspace_cleanup_policy", "retain"),
         "allowed_command_prefixes": get_workspace_allowed_command_prefixes(settings),
@@ -144,6 +147,7 @@ async def ensure_run_workspace(
     repo_provider: str | None = None,
     repo_full_name: str | None = None,
     repo_installation_id: int | None = None,
+    prefer_local_source: bool = True,
 ) -> WorkspacePaths:
     if require_repo and (not repo_url or not repo_provider):
         project_repo = await get_project_repository(session, project_id=run.project_id, tenant_id=run.tenant_id)
@@ -154,7 +158,11 @@ async def ensure_run_workspace(
             repo_full_name = repo_full_name or project_repo.repo_full_name
             repo_installation_id = repo_installation_id or project_repo.installation_id
 
-    source = repo_source_path.resolve() if repo_source_path and repo_source_path.exists() else _resolve_repo_source()
+    source = (
+        repo_source_path.resolve()
+        if repo_source_path and repo_source_path.exists()
+        else (_resolve_repo_source() if prefer_local_source else None)
+    )
     root = _workspace_root(run)
     paths = WorkspacePaths(
         root=root,
@@ -311,6 +319,26 @@ async def build_run_context(
     repo_installation_id: int | None = None,
 ) -> RunContext:
     settings = get_settings()
+    architecture_profile = await get_architecture_runtime_meta(
+        session,
+        tenant_id=run.tenant_id,
+        project_id=run.project_id,
+    )
+    summary = dict(run.summary or {})
+    execution_contract = coerce_execution_contract(summary.get("execution_contract"))
+    if execution_contract is None:
+        execution_contract = build_execution_contract(
+            run_summary=summary,
+            architecture_profile=architecture_profile,
+            plan_snapshot=(summary.get("plan_snapshot") if isinstance(summary.get("plan_snapshot"), dict) else None),
+            previous_contract=None,
+            settings=settings,
+        )
+        summary["execution_contract"] = execution_contract.to_dict()
+        run.summary = summary
+        if hasattr(session, "add") and hasattr(session, "flush"):
+            session.add(run)
+            await session.flush()
     paths = await ensure_run_workspace(
         session,
         run,
@@ -328,10 +356,15 @@ async def build_run_context(
         repo_path = Path(paths.repo)
         if not (repo_path / ".git").exists():
             raise RuntimeError("Workspace repository is unavailable for repo-backed execution")
+    execution_contract_path = paths.context / "execution_contract.json"
+    execution_contract_path.parent.mkdir(parents=True, exist_ok=True)
+    execution_contract_path.write_text(json.dumps(execution_contract.to_dict(), indent=2) + "\n", encoding="utf-8")
     return RunContext(
         project_id=run.project_id,
         run_id=run.id,
         plan_snapshot=(run.summary or {}).get("plan_snapshot") if isinstance(run.summary, dict) else None,
+        architecture_profile=architecture_profile,
+        execution_contract=execution_contract,
         workspace_root=str(paths.root),
         repo_path=str(paths.repo),
         artifacts_path=str(paths.artifacts),

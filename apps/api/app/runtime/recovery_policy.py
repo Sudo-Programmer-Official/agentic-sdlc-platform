@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from sqlalchemy import select, func
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.models import Trace, WorkItem, WorkItemEdge
+from app.runtime.run_state import RetryState
 from app.services.event_log import record_event
 from app.services.runtime_lineage import link_run_to_work_item
 
@@ -44,6 +46,58 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
 }
 
 
+def _unique_paths(values: list[str]) -> list[str]:
+    ordered: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if cleaned and cleaned not in ordered:
+            ordered.append(cleaned)
+    return ordered
+
+
+def _coerce_path_list(value: Any) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if not isinstance(value, list):
+        return []
+    return _unique_paths([item for item in value if isinstance(item, str) and item.strip()])
+
+
+def _looks_like_test_path(value: str) -> bool:
+    normalized = value.replace("\\", "/").strip()
+    if not normalized:
+        return False
+    pure = PurePosixPath(normalized)
+    name = pure.name.lower()
+    return (
+        any(part.lower() == "tests" for part in pure.parts)
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
+def _fix_recovery_scope(payload: dict[str, Any] | None) -> tuple[list[str], list[str]]:
+    if not isinstance(payload, dict):
+        return [], []
+    implementation_files = _coerce_path_list(payload.get("related_files"))
+    if not implementation_files:
+        implementation_files = [
+            path
+            for path in _coerce_path_list(payload.get("expected_files"))
+            if not _looks_like_test_path(path)
+        ]
+    failing_test_files = _coerce_path_list(payload.get("target_files"))
+    if not failing_test_files:
+        failing_test_files = [
+            path
+            for path in _coerce_path_list(payload.get("expected_files"))
+            if _looks_like_test_path(path)
+        ]
+    return _unique_paths(implementation_files), _unique_paths(failing_test_files)
+
+
 def _error_text(work_item: WorkItem) -> str:
     bits = [
         work_item.last_error or "",
@@ -63,10 +117,10 @@ def classify_failure(work_item: WorkItem) -> str:
     text = _error_text(work_item)
     if any(token in text for token in ("timeout", "temporarily unavailable", "connection reset", "network")):
         return "transient"
-    if any(token in text for token in ("file not found", "missing document", "missing graph", "not found")):
-        return "missing_context"
     if work_item.type == "RUN_TESTS" and work_item.status == "FAILED":
         return "test_failure"
+    if any(token in text for token in ("file not found", "missing document", "missing graph", "not found")):
+        return "missing_context"
     return "logic_failure"
 
 
@@ -128,6 +182,23 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
     if count >= settings.max_fix_attempts_per_run:
         return None
 
+    implementation_files, failing_test_files = _fix_recovery_scope(failed_work_item.payload or {})
+    fix_payload = {
+        "test_exit_code": (failed_work_item.result or {}).get("exit_code"),
+        "stdout": (failed_work_item.result or {}).get("stdout"),
+        "stderr": (failed_work_item.result or {}).get("stderr"),
+        "failed_work_item_id": str(failed_work_item.id),
+        "failure_class": failure_class,
+        "recovery_action": "spawn_fix_node",
+    }
+    if implementation_files:
+        fix_payload["target_files"] = implementation_files
+        fix_payload["files"] = implementation_files
+        fix_payload["expected_files"] = implementation_files
+    if failing_test_files:
+        fix_payload["related_files"] = failing_test_files
+        fix_payload["failing_test_files"] = failing_test_files
+
     fix = WorkItem(
         project_id=failed_work_item.project_id,
         tenant_id=failed_work_item.tenant_id,
@@ -138,14 +209,7 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         executor="codex",
         priority=9,
         required_capabilities=["code"],
-        payload={
-            "test_exit_code": (failed_work_item.result or {}).get("exit_code"),
-            "stdout": (failed_work_item.result or {}).get("stdout"),
-            "stderr": (failed_work_item.result or {}).get("stderr"),
-            "failed_work_item_id": str(failed_work_item.id),
-            "failure_class": failure_class,
-            "recovery_action": "spawn_fix_node",
-        },
+        payload=fix_payload,
     )
     session.add(fix)
     await session.flush()
@@ -197,6 +261,17 @@ async def _spawn_test_retry(session: AsyncSession, source_work_item: WorkItem) -
     if not failed_tests:
         return None
 
+    latest_failed = max(
+        failed_tests,
+        key=lambda item: item.created_at,
+    )
+    retry_payload = dict(latest_failed.payload or {})
+    retry_payload.update(
+        {
+            "recovery_source_id": str(source_work_item.id),
+            "recovery_action": "spawn_retry_node",
+        }
+    )
     test = WorkItem(
         project_id=source_work_item.project_id,
         tenant_id=source_work_item.tenant_id,
@@ -207,10 +282,7 @@ async def _spawn_test_retry(session: AsyncSession, source_work_item: WorkItem) -
         executor="test",
         priority=8,
         required_capabilities=["test"],
-        payload={
-            "recovery_source_id": str(source_work_item.id),
-            "recovery_action": "spawn_retry_node",
-        },
+        payload=retry_payload,
         depends_on_count=1,
     )
     session.add(test)
@@ -299,18 +371,23 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         work_item,
         failure_class=failure_class,
         recovery_action=rule.action,
+        retry_state="PENDING",
     )
     session.add(work_item)
     await session.flush()
 
     if rule.action == "retry":
         if work_item.attempt + 1 >= work_item.max_attempts:
+            _merge_result_metadata(work_item, retry_state=RetryState.EXHAUSTED)
+            session.add(work_item)
+            await session.flush()
             return None
         work_item.status = "QUEUED"
         work_item.attempt += 1
         work_item.assigned_agent_id = None
         work_item.lease_expires_at = None
         work_item.finished_at = None
+        _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
         session.add(work_item)
         await session.flush()
         await record_event(
@@ -333,14 +410,23 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         return {"action": "retry", "work_item_id": work_item.id}
 
     if rule.action == "spawn_fix_node":
+        _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
+        session.add(work_item)
+        await session.flush()
         created = await _spawn_fix_node(session, work_item, failure_class)
         return {"action": rule.action, "created": created}
 
     if rule.action == "spawn_retry_node":
+        _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
+        session.add(work_item)
+        await session.flush()
         created = await _spawn_test_retry(session, work_item)
         return {"action": rule.action, "created": created}
 
     if rule.action == "block_run":
+        _merge_result_metadata(work_item, retry_state=RetryState.BLOCKED)
+        session.add(work_item)
+        await session.flush()
         await _emit_recovery_event(
             session,
             work_item,

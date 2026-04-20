@@ -18,6 +18,7 @@ from app.schemas.mission_control import (
     MissionControlExecutionStep,
     MissionControlExecutionSummary,
 )
+from app.services.execution_contract_telemetry import build_execution_contract_telemetry
 from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 
 
@@ -282,6 +283,7 @@ async def build_run_execution_console(
         current_executor=current_step.executor if current_step else None,
         active_command_count=sum(1 for command in commands if command.status == "RUNNING"),
         last_updated_at=max((value for value in last_updated_candidates if value is not None), default=None),
+        execution_contract=build_execution_contract_telemetry(run.summary if isinstance(run.summary, dict) else None),
     )
 
     return MissionControlExecutionConsoleResponse(

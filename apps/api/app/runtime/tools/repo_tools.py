@@ -3,15 +3,27 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.config import get_settings
+from app.runtime.execution_contract import ExecutionContract, coerce_execution_contract
 from app.runtime.tools.redaction import redact
 from app.services.workspace_commands import run_workspace_command
 
 
 class RepoTools:
-    def __init__(self, root: Path, logs_path: Path | None = None):
+    def __init__(
+        self,
+        root: Path,
+        logs_path: Path | None = None,
+        execution_contract: ExecutionContract | dict | None = None,
+    ):
         self.root = root.resolve()
         self.settings = get_settings()
         self.logs_path = logs_path
+        self.execution_contract = coerce_execution_contract(execution_contract)
+        self.allowed_command_prefixes = (
+            list(self.execution_contract.allowed_command_prefixes)
+            if self.execution_contract is not None and self.execution_contract.allowed_command_prefixes
+            else None
+        )
 
     def _safe_path(self, rel_path: str) -> Path:
         p = (self.root / rel_path).resolve()
@@ -69,6 +81,7 @@ class RepoTools:
                 log_dir=self.logs_path,
                 label="git-apply-check",
                 timeout_seconds=10,
+                allowed_prefixes=self.allowed_command_prefixes,
                 stdin_text=normalized_diff,
                 output_max_bytes=self.settings.workspace_command_output_max_bytes,
             )
@@ -83,6 +96,7 @@ class RepoTools:
                 log_dir=self.logs_path,
                 label="git-apply",
                 timeout_seconds=10,
+                allowed_prefixes=self.allowed_command_prefixes,
                 stdin_text=normalized_diff,
                 output_max_bytes=self.settings.workspace_command_output_max_bytes,
             )
@@ -102,6 +116,7 @@ class RepoTools:
                 log_dir=self.logs_path,
                 label="git-diff",
                 timeout_seconds=5,
+                allowed_prefixes=self.allowed_command_prefixes,
                 output_max_bytes=self.settings.workspace_command_output_max_bytes,
             )
             if res.status in {"BLOCKED", "TIMEOUT"} or res.exit_code not in {0, None}:

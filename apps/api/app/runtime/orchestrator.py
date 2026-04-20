@@ -15,9 +15,11 @@ from app.runtime.executor import TaskExecutor
 from app.runtime.registry import build_executor, get_executor
 from app.runtime.leases import reclaim_expired_work_items
 from app.services.event_log import record_event
+from app.services.run_resume import capture_run_checkpoint, sync_run_resume_state
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_work_item_status
 from app.runtime.recovery_policy import maybe_apply_recovery
+from app.runtime.execution_contract import sync_run_execution_contract_state
 from app.runtime.dag import TaskScopeError, generate_template_dag
 from app.runtime.plan_snapshot import persist_run_plan_snapshot
 from app.core.config import get_settings
@@ -234,6 +236,7 @@ class RunOrchestrator:
             await session.commit()
             return False
         snapshot = await persist_run_plan_snapshot(session, run)
+        await sync_run_execution_contract_state(session, run)
         decomposition = await persist_run_task_decomposition(session, run)
         await record_event(
             session,
@@ -335,7 +338,7 @@ class RunOrchestrator:
                 run = await session.get(Run, run_id)
                 if not run:
                     return
-                if run.status == "CANCELED":
+                if run.status in {"COMPLETED", "FAILED", "CANCELED"}:
                     break
 
                 if await reclaim_expired_work_items(session, run_id=run_id):
@@ -362,6 +365,9 @@ class RunOrchestrator:
                 failed_count = sum(1 for item in failed_items if is_blocking_failure(item))
 
                 if failed_count == 0 and queued_count == 0 and active_count == 0:
+                    if use_external_runtime:
+                        await asyncio.sleep(0.2)
+                        continue
                     break
 
                 # find runnable items (QUEUED and deps done/skipped)
@@ -393,7 +399,7 @@ class RunOrchestrator:
                         )
                     ).scalars().all()
 
-                if failed_count and active_count == 0:
+                if failed_count and active_count == 0 and not use_external_runtime:
                     if queued_count == 0:
                         run_failed = True
                         break
@@ -418,6 +424,9 @@ class RunOrchestrator:
 
                 for wi in runnable:
                     await self._process_work_item(session, wi, run)
+
+            if use_external_runtime:
+                return
 
             # finalize run
             final_status = "FAILED" if run_failed else ("CANCELED" if run.status == "CANCELED" else "COMPLETED")
@@ -611,6 +620,8 @@ class RunOrchestrator:
             wi.last_error = None
             failure_stage = "artifact_persistence"
             await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
+            if wi.status in {"DONE", "SKIPPED"}:
+                await capture_run_checkpoint(session, run, work_item=wi, checkpoint_kind="safe")
             failure_stage = "event_recording"
             await record_event(
                 session,
@@ -629,6 +640,8 @@ class RunOrchestrator:
             await session.flush()
             failure_stage = "recovery_policy"
             await maybe_apply_recovery(session, wi)
+            await sync_run_execution_contract_state(session, run)
+            await sync_run_resume_state(session, run)
         except Exception as exc:
             log.exception(
                 "Work item execution failed run_id=%s work_item_id=%s type=%s stage=%s error=%s",
@@ -663,3 +676,7 @@ class RunOrchestrator:
             )
             await session.flush()
             await maybe_apply_recovery(session, failed_item)
+            refreshed_run = await session.get(Run, run_id)
+            if refreshed_run is not None:
+                await sync_run_execution_contract_state(session, refreshed_run)
+                await sync_run_resume_state(session, refreshed_run, failed_work_item=failed_item)

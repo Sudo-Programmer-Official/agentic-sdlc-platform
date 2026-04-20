@@ -38,6 +38,10 @@ async def test_build_run_context_raises_when_repo_backed_workspace_is_in_error(m
         )
 
     monkeypatch.setattr(workspace_supervisor, "ensure_run_workspace", fake_ensure_run_workspace)
+    async def fake_architecture_meta(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(workspace_supervisor, "get_architecture_runtime_meta", fake_architecture_meta)
     monkeypatch.setattr(
         workspace_supervisor,
         "get_settings",
@@ -46,3 +50,54 @@ async def test_build_run_context_raises_when_repo_backed_workspace_is_in_error(m
 
     with pytest.raises(RuntimeError, match="clone auth failed"):
         await workspace_supervisor.build_run_context(object(), run, require_repo=True)
+
+
+@pytest.mark.anyio
+async def test_build_run_context_includes_architecture_runtime_meta(monkeypatch, tmp_path: Path):
+    run = Run(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        status="RUNNING",
+        executor="codex",
+        summary={"plan_snapshot": {"goal": "Bounded change"}},
+    )
+
+    async def fake_ensure_run_workspace(*_args, **_kwargs):
+        workspace_root = tmp_path / "workspace"
+        repo_root = workspace_root / "repo"
+        repo_root.mkdir(parents=True, exist_ok=True)
+        (repo_root / ".git").mkdir()
+        return WorkspacePaths(
+            root=workspace_root,
+            repo=repo_root,
+            artifacts=workspace_root / "artifacts",
+            logs=workspace_root / "logs",
+            patches=workspace_root / "patches",
+            context=workspace_root / "context",
+            branch_name="run/test",
+            repo_seeded=True,
+        )
+
+    async def fake_architecture_meta(*_args, **_kwargs):
+        return {
+            "summary": {"packages": ["apps/web"], "protected_zones": ["apps/api/app/db/models"]},
+            "protected_paths": ["apps/api/app/db/models"],
+            "safe_paths": ["apps/web/src"],
+            "validation_recipe_index": {"frontend_validation": {"paths": ["apps/web"]}},
+            "command_index": {"frontend_build": {"command": "npm -C apps/web run build"}},
+        }
+
+    monkeypatch.setattr(workspace_supervisor, "ensure_run_workspace", fake_ensure_run_workspace)
+    monkeypatch.setattr(workspace_supervisor, "get_architecture_runtime_meta", fake_architecture_meta)
+    monkeypatch.setattr(
+        workspace_supervisor,
+        "get_settings",
+        lambda: type("Settings", (), {"workspace_simulation_mode": "ephemeral", "workspace_cleanup_policy": "retain"})(),
+    )
+
+    context = await workspace_supervisor.build_run_context(object(), run, require_repo=True)
+
+    assert context.architecture_profile is not None
+    assert context.architecture_profile["protected_paths"] == ["apps/api/app/db/models"]
+    assert context.architecture_profile["safe_paths"] == ["apps/web/src"]

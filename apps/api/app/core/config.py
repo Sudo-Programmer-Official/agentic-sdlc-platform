@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     codex_max_write_bytes_total: int = 200_000
     codex_redaction_enabled: bool = True
     codex_max_run_tokens: int = 200_000
+    codex_max_run_cost_cents: float = 30.0
     max_fix_attempts_per_run: int = 2
     test_command: str = "pytest -q"
     test_timeout_seconds: int = 180

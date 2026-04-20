@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Run, WorkItem
+from app.runtime.execution_contract import build_execution_contract
 
 PHASE_BY_TYPE = {
     "PLAN_DAG": "plan",
@@ -147,6 +148,12 @@ async def persist_run_plan_snapshot(session: AsyncSession, run: Run) -> dict:
     snapshot = build_plan_snapshot(run, work_items)
     summary = dict(run.summary or {})
     summary["plan_snapshot"] = snapshot
+    summary["execution_contract"] = build_execution_contract(
+        run_summary=summary,
+        architecture_profile=(summary.get("architecture_profile") if isinstance(summary.get("architecture_profile"), dict) else None),
+        plan_snapshot=snapshot,
+        previous_contract=summary.get("execution_contract"),
+    ).to_dict()
     run.summary = summary
     session.add(run)
     await session.flush()
@@ -155,5 +162,9 @@ async def persist_run_plan_snapshot(session: AsyncSession, run: Run) -> dict:
         context_dir = Path(run.workspace_root) / "context"
         context_dir.mkdir(parents=True, exist_ok=True)
         (context_dir / "plan.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+        (context_dir / "execution_contract.json").write_text(
+            json.dumps(summary["execution_contract"], indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     return snapshot

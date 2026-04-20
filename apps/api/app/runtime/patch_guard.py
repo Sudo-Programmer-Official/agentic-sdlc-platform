@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from app.runtime.context import RunContext
+from app.runtime.execution_contract import ExecutionContract, coerce_execution_contract
 from app.runtime.schemas.executor_io import Action
 
 DEFAULT_MAX_PATCH_FILES = 5
@@ -19,6 +20,28 @@ def _normalize_path(path: str) -> str:
     while normalized.startswith("./"):
         normalized = normalized[2:]
     return str(PurePosixPath(normalized))
+
+
+def _path_matches_prefix(path: str, prefix: str) -> bool:
+    normalized_path = _normalize_path(path)
+    normalized_prefix = _normalize_path(prefix)
+    if not normalized_path or not normalized_prefix:
+        return False
+    if normalized_prefix == ".":
+        return True
+    path_parts = PurePosixPath(normalized_path).parts
+    prefix_parts = PurePosixPath(normalized_prefix).parts
+    if len(prefix_parts) > len(path_parts):
+        return False
+    return path_parts[: len(prefix_parts)] == prefix_parts
+
+
+def _matching_zones(paths: list[str], zones: list[str]) -> list[str]:
+    matches: list[str] = []
+    for zone in zones:
+        if any(_path_matches_prefix(path, zone) for path in paths):
+            matches.append(_normalize_path(zone))
+    return list(dict.fromkeys(matches))
 
 
 def _paths_from_payload(payload: dict[str, Any] | None) -> list[str]:
@@ -122,6 +145,8 @@ class PatchGuardDecision:
     allowed_files: list[str]
     file_budget: int
     hard_file_budget: int
+    protected_zones: list[str]
+    safe_zones: list[str]
     violations: list[str]
 
     @property
@@ -132,35 +157,73 @@ class PatchGuardDecision:
 def evaluate_patch_guard(
     *,
     actions: list[Action],
-    allowed_files: list[str],
+    allowed_files: list[str] | None = None,
     file_budget: int = DEFAULT_MAX_PATCH_FILES,
     hard_file_budget: int = HARD_MAX_PATCH_FILES,
+    protected_paths: list[str] | None = None,
+    safe_paths: list[str] | None = None,
+    contract: ExecutionContract | dict | None = None,
 ) -> PatchGuardDecision:
+    resolved_contract = coerce_execution_contract(contract)
+    resolved_allowed_files = (
+        list(resolved_contract.allowed_files)
+        if resolved_contract is not None and resolved_contract.allowed_files
+        else list(allowed_files or [])
+    )
+    resolved_file_budget = (
+        int(resolved_contract.file_budget)
+        if resolved_contract is not None and resolved_contract.file_budget > 0
+        else int(file_budget)
+    )
+    resolved_hard_file_budget = (
+        max(resolved_file_budget, int(resolved_contract.hard_file_budget))
+        if resolved_contract is not None and resolved_contract.hard_file_budget > 0
+        else int(hard_file_budget)
+    )
+    resolved_protected_paths = (
+        list(resolved_contract.protected_paths)
+        if resolved_contract is not None and resolved_contract.protected_paths
+        else list(protected_paths or [])
+    )
+    resolved_safe_paths = (
+        list(resolved_contract.safe_paths)
+        if resolved_contract is not None and resolved_contract.safe_paths
+        else list(safe_paths or [])
+    )
     touched_files = extract_action_paths(actions)
     violations: list[str] = []
+    protected_zones = _matching_zones(touched_files, resolved_protected_paths)
+    safe_zones = _matching_zones(touched_files, resolved_safe_paths)
 
-    if len(touched_files) > hard_file_budget:
+    if len(touched_files) > resolved_hard_file_budget:
         violations.append(
-            f"Patch touches {len(touched_files)} files; hard cap is {hard_file_budget}."
+            f"Patch touches {len(touched_files)} files; hard cap is {resolved_hard_file_budget}."
         )
-    elif len(touched_files) > file_budget:
+    elif len(touched_files) > resolved_file_budget:
         violations.append(
-            f"Patch touches {len(touched_files)} files; autonomous file budget is {file_budget}."
+            f"Patch touches {len(touched_files)} files; autonomous file budget is {resolved_file_budget}."
         )
 
-    if allowed_files:
-        extra_files = [path for path in touched_files if path not in allowed_files]
+    if resolved_allowed_files:
+        extra_files = [path for path in touched_files if path not in resolved_allowed_files]
         if extra_files:
             violations.append(
                 "Patch touches files outside the planned scope: "
                 + ", ".join(extra_files[:8])
             )
+    if protected_zones:
+        violations.append(
+            "Patch touches protected architecture zones that require a narrower plan or explicit review: "
+            + ", ".join(protected_zones[:8])
+        )
 
     return PatchGuardDecision(
         touched_files=touched_files,
-        allowed_files=allowed_files,
-        file_budget=file_budget,
-        hard_file_budget=hard_file_budget,
+        allowed_files=resolved_allowed_files,
+        file_budget=resolved_file_budget,
+        hard_file_budget=resolved_hard_file_budget,
+        protected_zones=protected_zones,
+        safe_zones=safe_zones,
         violations=violations,
     )
 
@@ -175,12 +238,46 @@ def build_patch_guard_meta(
     target_files: list[str] | None = None,
 ) -> dict[str, Any]:
     plan_snapshot = context.plan_snapshot if isinstance(context.plan_snapshot, dict) else {}
+    contract = context.execution_contract
+    architecture = context.architecture_profile if isinstance(context.architecture_profile, dict) else {}
     return {
-        "allowed_files": allowed_files,
+        "allowed_files": (
+            list(contract.allowed_files)
+            if contract is not None and contract.allowed_files
+            else allowed_files
+        ),
         "target_files": target_files or [],
-        "scope_mode": scope_mode,
-        "file_budget": file_budget,
-        "hard_file_budget": hard_file_budget,
-        "plan_risk_level": plan_snapshot.get("risk_level"),
-        "validation_steps": plan_snapshot.get("validation_steps", []),
+        "scope_mode": contract.scope_mode if contract is not None else scope_mode,
+        "file_budget": contract.file_budget if contract is not None else file_budget,
+        "hard_file_budget": contract.hard_file_budget if contract is not None else hard_file_budget,
+        "plan_risk_level": contract.risk_level if contract is not None else plan_snapshot.get("risk_level"),
+        "validation_steps": (
+            list(contract.validation_steps)
+            if contract is not None
+            else plan_snapshot.get("validation_steps", [])
+        ),
+        "validation_state": contract.validation_state if contract is not None else None,
+        "retry_state": contract.retry_state if contract is not None else None,
+        "protected_paths": (
+            list(contract.protected_paths)
+            if contract is not None
+            else architecture.get("protected_paths", [])
+        ),
+        "safe_paths": (
+            list(contract.safe_paths)
+            if contract is not None
+            else architecture.get("safe_paths", [])
+        ),
+        "validation_recipe_index": (
+            {name: {"paths": []} for name in contract.validation_recipes}
+            if contract is not None
+            else architecture.get("validation_recipe_index", {})
+        ),
+        "command_index": (
+            {key: dict(value) for key, value in contract.command_index.items()}
+            if contract is not None
+            else architecture.get("command_index", {})
+        ),
+        "architecture_summary": architecture.get("summary"),
+        "budget": contract.budget.to_dict() if contract is not None else None,
     }

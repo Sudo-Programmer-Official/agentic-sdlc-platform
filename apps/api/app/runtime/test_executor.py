@@ -24,9 +24,8 @@ class TestExecutor(TaskExecutor):
     def _command_env(self) -> dict[str, str]:
         python_bin = str(Path(sys.executable).resolve().parent)
         current_path = os.environ.get("PATH", "")
-        path_parts = [part for part in current_path.split(os.pathsep) if part]
-        if python_bin not in path_parts:
-            path_parts.insert(0, python_bin)
+        path_parts = [part for part in current_path.split(os.pathsep) if part and part != python_bin]
+        path_parts.insert(0, python_bin)
         return {"PATH": os.pathsep.join(path_parts) if path_parts else python_bin}
 
     def _normalize_test_command(self, command: list[str]) -> list[str]:
@@ -46,9 +45,48 @@ class TestExecutor(TaskExecutor):
             return True
         return len(command) >= 3 and command[1] == "-m" and command[2] == "pytest"
 
+    @staticmethod
+    def _scoped_test_files(work_item: WorkItem) -> list[str]:
+        payload = work_item.payload or {}
+        scoped: list[str] = []
+        for key in ("target_files", "files", "expected_files"):
+            values = payload.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                path = value.strip()
+                if not path:
+                    continue
+                name = Path(path).name
+                if Path(path).suffix == ".py" and name.startswith("test_"):
+                    scoped.append(path)
+        return list(dict.fromkeys(scoped))
+
+    @staticmethod
+    def _pytest_has_explicit_targets(command: list[str]) -> bool:
+        if not command:
+            return False
+        args = command[1:] if Path(command[0]).name == "pytest" else command[3:]
+        return any(arg and not arg.startswith("-") for arg in args)
+
+    def _resolve_test_command(self, work_item: WorkItem, context: RunContext) -> list[str]:
+        configured = (
+            context.execution_contract.test_command
+            if context.execution_contract is not None and context.execution_contract.test_command
+            else self.settings.test_command
+        )
+        command = self._normalize_test_command(shlex.split(configured))
+        if self._is_pytest_command(command) and not self._pytest_has_explicit_targets(command):
+            scoped_files = self._scoped_test_files(work_item)
+            if scoped_files:
+                command = [*command, *scoped_files]
+        return command
+
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
-        cmd = self._normalize_test_command(shlex.split(self.settings.test_command))
+        cmd = self._resolve_test_command(work_item, context)
         log_dir = Path(context.logs_path) if context.logs_path else repo_root / ".agentic-sdlc-logs"
         try:
             result = await run_workspace_command_async(
@@ -57,6 +95,11 @@ class TestExecutor(TaskExecutor):
                 log_dir=log_dir,
                 label=f"test-{work_item.type.lower()}",
                 timeout_seconds=self.settings.test_timeout_seconds,
+                allowed_prefixes=(
+                    list(context.execution_contract.allowed_command_prefixes)
+                    if context.execution_contract is not None and context.execution_contract.allowed_command_prefixes
+                    else None
+                ),
                 output_max_bytes=self.settings.test_output_max_bytes,
                 env=self._command_env(),
             )

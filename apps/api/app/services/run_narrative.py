@@ -160,6 +160,12 @@ def _next_best_step(run: Run, work_items: list[WorkItem], summary: RunTimelineSu
 
 
 def _validation_state(run: Run, work_items: list[WorkItem]) -> str:
+    if isinstance(run.summary, dict):
+        contract = run.summary.get("execution_contract")
+        if isinstance(contract, dict):
+            state = contract.get("validation_state")
+            if isinstance(state, str) and state.strip():
+                return state.strip().upper()
     if run.workspace_status == "ERROR":
         return "BLOCKED"
     validation_items = [

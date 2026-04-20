@@ -56,7 +56,7 @@ start_process web "$WEB_DIR" npm run dev -- --host 0.0.0.0 --port "$WEB_PORT"
 echo
 echo "API: http://localhost:$API_PORT"
 echo "Web: http://localhost:$WEB_PORT"
-echo
+echo "Scheduler and Worker logs are in $LOG_DIR/scheduler.log and $LOG_DIR/worker.log"
 echo "Press Ctrl+C to stop all processes."
 
 wait

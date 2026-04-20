@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
-from app.db.models import Agent, Artifact, Project, Run, RunEvent, Task, Trace, WorkItem
+from app.db.models import Agent, Artifact, Project, Run, RunEvent, Task, Trace, WorkItem, WorkItemEdge
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.runtime import orchestrator as orchestrator_module
@@ -17,6 +18,7 @@ from app.runtime.leases import keep_work_item_lease_alive
 from app.runtime.scheduler_service import tick as scheduler_tick
 from app.runtime import worker_service
 from app.runtime.worker_service import tick_worker
+from app.runtime.recovery_policy import classify_failure, maybe_apply_recovery
 from app.services import run_launch as run_launch_module
 from app.services.run_launch import launch_run_for_project
 
@@ -84,6 +86,10 @@ async def test_embedded_orchestrator_completes_dummy_run(monkeypatch, runtime_db
         assert isinstance(run.summary.get("plan_snapshot"), dict)
         assert run.summary["plan_snapshot"]["steps"]
         assert run.summary["plan_snapshot"]["steps"][0]["title"] == "PLAN_DAG"
+        assert isinstance(run.summary.get("resume_checkpoints"), list)
+        assert run.summary["resume_checkpoints"]
+        assert isinstance(run.summary.get("resume_state"), dict)
+        assert run.summary["resume_state"]["checkpoint_count"] >= 1
 
         work_items = (
             await session.execute(
@@ -199,6 +205,7 @@ async def test_external_worker_claims_and_executes_dummy_work_item(monkeypatch, 
             capabilities=["runtime-worker"],
             max_concurrency=1,
             status="ACTIVE",
+            last_heartbeat_at=datetime.now(timezone.utc),
         )
         session.add(agent)
         await session.flush()
@@ -242,6 +249,198 @@ async def test_external_worker_claims_and_executes_dummy_work_item(monkeypatch, 
 
 
 @pytest.mark.anyio
+async def test_recovery_retry_marks_pending_contract_state(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Recovery retry project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="dummy")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="FAILED",
+            executor="test",
+            attempt=0,
+            max_attempts=3,
+            result={"stderr": "network timeout"},
+        )
+        session.add(work_item)
+        await session.commit()
+        work_item_id = work_item.id
+
+    async with runtime_db() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+
+        recovery = await maybe_apply_recovery(session, work_item)
+        await session.commit()
+
+        assert recovery == {"action": "retry", "work_item_id": work_item_id}
+        assert work_item.status == "QUEUED"
+        assert work_item.result["retry_state"] == "PENDING"
+
+
+@pytest.mark.anyio
+async def test_test_failure_recovery_scopes_fix_node_to_implementation_files(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Scoped recovery project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="FAILED",
+            executor="test",
+            attempt=0,
+            max_attempts=3,
+            payload={
+                "target_files": ["test_index_html.py"],
+                "files": ["test_index_html.py"],
+                "expected_files": ["test_index_html.py"],
+                "related_files": ["index.html"],
+            },
+            result={
+                "exit_code": 1,
+                "stdout": "FAILED test_index_html.py::test_hero_section_stands_out",
+                "stderr": "",
+            },
+        )
+        session.add(work_item)
+        await session.commit()
+        work_item_id = work_item.id
+        run_id = run.id
+
+    async with runtime_db() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+
+        recovery = await maybe_apply_recovery(session, work_item)
+        await session.commit()
+
+        assert recovery is not None
+        assert recovery["action"] == "spawn_fix_node"
+
+        fix_item = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id, WorkItem.type == "FIX_TEST_FAILURE")
+            )
+        ).scalars().one()
+        assert fix_item.payload["target_files"] == ["index.html"]
+        assert fix_item.payload["files"] == ["index.html"]
+        assert fix_item.payload["expected_files"] == ["index.html"]
+        assert fix_item.payload["related_files"] == ["test_index_html.py"]
+        assert fix_item.payload["failing_test_files"] == ["test_index_html.py"]
+
+
+@pytest.mark.anyio
+async def test_fix_recovery_retry_reuses_failed_run_tests_scope(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Scoped test retry project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_test = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="FAILED",
+            executor="test",
+            payload={
+                "target_files": ["test_index_html.py"],
+                "files": ["test_index_html.py"],
+                "expected_files": ["test_index_html.py"],
+                "related_files": ["index.html"],
+                "title": "Validate Hero section enhancement",
+            },
+            result={"exit_code": 1, "stdout": "FAILED test_index_html.py::test_hero", "stderr": ""},
+        )
+        session.add(failed_test)
+        await session.flush()
+
+        fix_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="FIX_TEST_FAILURE",
+            key="FIX_TEST_FAILURE_1",
+            status="DONE",
+            executor="codex",
+            payload={
+                "target_files": ["index.html"],
+                "related_files": ["test_index_html.py"],
+            },
+            result={"message": "fix applied"},
+        )
+        session.add(fix_item)
+        await session.commit()
+        failed_test_id = failed_test.id
+        fix_item_id = fix_item.id
+        run_id = run.id
+
+    async with runtime_db() as session:
+        fix_item = await session.get(WorkItem, fix_item_id)
+        assert fix_item is not None
+
+        recovery = await maybe_apply_recovery(session, fix_item)
+        await session.commit()
+
+        assert recovery is not None
+        assert recovery["action"] == "spawn_retry_node"
+
+        retried_test = (
+            await session.execute(
+                select(WorkItem).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.type == "RUN_TESTS",
+                    WorkItem.id != failed_test_id,
+                )
+            )
+        ).scalars().one()
+        assert retried_test.payload["target_files"] == ["test_index_html.py"]
+        assert retried_test.payload["files"] == ["test_index_html.py"]
+        assert retried_test.payload["expected_files"] == ["test_index_html.py"]
+        assert retried_test.payload["related_files"] == ["index.html"]
+        assert retried_test.payload["recovery_source_id"] == str(fix_item_id)
+        assert retried_test.payload["recovery_action"] == "spawn_retry_node"
+
+
+@pytest.mark.anyio
 async def test_scheduler_requeues_expired_running_items_and_run_can_finish(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("OPENAI_API_KEY", "")
@@ -265,6 +464,7 @@ async def test_scheduler_requeues_expired_running_items_and_run_can_finish(monke
             capabilities=["runtime-worker"],
             max_concurrency=1,
             status="ACTIVE",
+            last_heartbeat_at=datetime.now(timezone.utc),
         )
         session.add(agent)
         await session.flush()
@@ -380,7 +580,101 @@ async def test_scheduler_does_not_complete_run_before_work_items_exist(monkeypat
             ).scalars().all()
         ]
         assert "RUN_COMPLETED" not in event_types
-        assert "RUN_FAILED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_external_orchestrator_waits_for_recovery_queue_before_terminal_failure(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="External recovery wait project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="dummy")
+        session.add(run)
+        await session.flush()
+
+        agent = Agent(
+            tenant_id=tenant_id,
+            name="runtime-worker",
+            kind="worker",
+            executors=["dummy"],
+            capabilities=["runtime-worker"],
+            max_concurrency=1,
+            status="ACTIVE",
+            last_heartbeat_at=datetime.now(timezone.utc),
+        )
+        session.add(agent)
+        await session.flush()
+
+        failed_test = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="FAILED",
+            executor="test",
+            payload={"blocking": True},
+            result={"failure_class": "test_failure", "recovery_action": "spawn_fix_node"},
+        )
+        fix_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="FIX_TEST_FAILURE",
+            key="FIX_TEST_FAILURE",
+            status="QUEUED",
+            executor="dummy",
+            payload={"recovery_source_id": "seeded"},
+        )
+        session.add_all([failed_test, fix_item])
+        await session.flush()
+
+        session.add(
+            WorkItemEdge(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                from_work_item_id=failed_test.id,
+                to_work_item_id=fix_item.id,
+            )
+        )
+        await session.commit()
+        run_id = run.id
+
+    orchestrator = RunOrchestrator(runtime_db, executor_name="dummy")
+    task = asyncio.create_task(orchestrator.start(run_id))
+    try:
+        await asyncio.sleep(0.6)
+        assert task.done() is False
+
+        async with runtime_db() as session:
+            run = await session.get(Run, run_id)
+            assert run is not None
+            assert run.status == "RUNNING"
+            assert run.finished_at is None
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def test_classify_failure_treats_run_test_assertion_not_found_as_test_failure():
+    work_item = WorkItem(
+        project_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        type="RUN_TESTS",
+        status="FAILED",
+        executor="test",
+        result={"stdout": "AssertionError: Theme color <meta> tag not found."},
+    )
+
+    assert classify_failure(work_item) == "test_failure"
 
 
 @pytest.mark.anyio

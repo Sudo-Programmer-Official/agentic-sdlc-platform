@@ -54,6 +54,38 @@ export function createEmptyProjectPreviewProfile(
   };
 }
 
+export function createEmptyArchitectureProfileSummary(message = "No architecture profile saved yet.") {
+  return {
+    profile_exists: false,
+    profile_id: null,
+    status: "MISSING",
+    source: "INFERRED",
+    version: null,
+    summary: message,
+    repo_full_name: null,
+    repo_default_branch: null,
+    repo_layout_label: "Repository",
+    monorepo: false,
+    package_count: 0,
+    packages: [],
+    boundary_count: 0,
+    protected_zone_count: 0,
+    protected_zones: [],
+    safe_zone_count: 0,
+    safe_zones: [],
+    command_coverage_count: 0,
+    commands: [],
+    validation_recipe_count: 0,
+    derived_ready: false,
+    last_derived_at: null,
+    execution_slice: [],
+    validation_recipes: [],
+    protected_zones_touched: [],
+    safe_zones_touched: [],
+    assumptions_used: [],
+  };
+}
+
 export type CreateTaskPayload = {
   title: string;
   description?: string | null;
@@ -124,6 +156,15 @@ export type PreviewProfilePayload = {
   ttl_hours?: number;
   max_previews_per_project?: number | null;
   created_by?: string | null;
+};
+
+export type ArchitectureProfileUpsertPayload = {
+  status?: string;
+  source?: string;
+  summary?: string | null;
+  profile_json?: Record<string, any>;
+  created_by?: string | null;
+  updated_by?: string | null;
 };
 
 export type CreateApprovalPayload = {
@@ -287,6 +328,61 @@ export async function fetchProjectPreviewProfile(projectId: string) {
   }
 }
 
+export async function fetchProjectArchitectureProfile(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/architecture-profile`);
+  return parseApiResponse(resp);
+}
+
+export async function fetchProjectArchitectureProfileSummary(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/architecture-profile/summary`);
+  try {
+    return await parseApiResponse(resp);
+  } catch (err) {
+    if (isApiErrorStatus(err, 404)) return createEmptyArchitectureProfileSummary((err as any)?.message);
+    throw err;
+  }
+}
+
+export async function saveProjectArchitectureProfile(projectId: string, payload: ArchitectureProfileUpsertPayload) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/architecture-profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function bootstrapProjectArchitectureProfile(
+  projectId: string,
+  payload: {
+    refresh_repo_map?: boolean;
+    created_by?: string | null;
+  } = {}
+) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/architecture-profile/bootstrap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function deriveProjectArchitectureProfile(
+  projectId: string,
+  payload: {
+    refresh_repo_map?: boolean;
+    bootstrap_if_missing?: boolean;
+    updated_by?: string | null;
+  } = {}
+) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/architecture-profile/derive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
 export async function fetchGitHubConnectInfo(): Promise<GitHubConnectInfo> {
   const resp = await fetch(`${API_BASE}/integrations/github/connect`);
   return parseApiResponse(resp);
@@ -352,6 +448,15 @@ export async function updateRunStatus(runId: string, status: string) {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status })
+  });
+  return parseApiResponse(resp);
+}
+
+export async function resumeRun(runId: string, payload: { start_now?: boolean } = {}) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ start_now: payload.start_now ?? true }),
   });
   return parseApiResponse(resp);
 }

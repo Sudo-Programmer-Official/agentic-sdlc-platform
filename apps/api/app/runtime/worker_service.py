@@ -14,7 +14,9 @@ from app.db.models import Agent, Run, WorkItem
 from app.runtime.leases import keep_work_item_lease_alive, lease_seconds_for_executor
 from app.runtime.registry import build_executor
 from app.runtime.recovery_policy import maybe_apply_recovery
+from app.runtime.execution_contract import sync_run_execution_contract_state
 from app.services.event_log import record_event
+from app.services.run_resume import capture_run_checkpoint, sync_run_resume_state
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.services.workspace_supervisor import build_run_context
@@ -53,6 +55,8 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
         session.add(wi)
         failure_stage = "artifact_persistence"
         await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
+        if wi.status in {"DONE", "SKIPPED"}:
+            await capture_run_checkpoint(session, run, work_item=wi, checkpoint_kind="safe")
         failure_stage = "event_recording"
         await record_event(
             session,
@@ -67,6 +71,9 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
         await session.flush()
         failure_stage = "recovery_policy"
         await maybe_apply_recovery(session, wi)
+        if run is not None:
+            await sync_run_execution_contract_state(session, run)
+            await sync_run_resume_state(session, run)
     except Exception as exc:
         await session.rollback()
         failed_item = await session.get(WorkItem, work_item_id)
@@ -94,6 +101,10 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
         )
         await session.flush()
         await maybe_apply_recovery(session, failed_item)
+        failed_run = await session.get(Run, run_id)
+        if failed_run is not None:
+            await sync_run_execution_contract_state(session, failed_run)
+            await sync_run_resume_state(session, failed_run, failed_work_item=failed_item)
 
 
 async def tick_worker(agent_id: uuid.UUID):

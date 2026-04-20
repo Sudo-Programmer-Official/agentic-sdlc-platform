@@ -16,6 +16,7 @@ from app.db.models import Project, Run, WorkItem
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.runtime.context import RunContext
+from app.runtime.execution_contract import build_execution_contract
 from app.runtime.test_executor import TestExecutor
 from app.services.workspace_commands import COMMAND_AUDIT_LOG_NAME, run_workspace_command
 from app.services.workspace_supervisor import build_run_context, destroy_run_workspace
@@ -204,6 +205,118 @@ async def test_test_executor_runs_pytest_via_active_interpreter(tmp_path, monkey
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).resolve().parent)
+
+
+@pytest.mark.anyio
+async def test_test_executor_scopes_generic_pytest_to_work_item_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_COMMAND", "pytest -q")
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_workspace_command_async(command, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(
+            status="SUCCEEDED",
+            stdout="scoped ok",
+            stderr="",
+            exit_code=0,
+            timed_out=False,
+            log_path=None,
+            audit_path=None,
+        )
+
+    monkeypatch.setattr("app.runtime.test_executor.run_workspace_command_async", fake_run_workspace_command_async)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+
+    work_item = WorkItem(
+        project_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        type="RUN_TESTS",
+        executor="test",
+        payload={
+            "target_files": ["test_index_html.py"],
+            "related_files": ["index.html"],
+        },
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        repo_path=str(repo_root),
+        logs_path=str(logs_root),
+        workspace_status="READY",
+    )
+
+    result = await TestExecutor().execute(work_item, context)
+
+    assert result["status"] == "DONE"
+    assert captured["command"] == [sys.executable, "-m", "pytest", "-q", "test_index_html.py"]
+
+
+@pytest.mark.anyio
+async def test_test_executor_prefers_execution_contract_command(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_COMMAND", "pytest -q")
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_workspace_command_async(command, **kwargs):
+        captured["command"] = command
+        captured["allowed_prefixes"] = kwargs.get("allowed_prefixes")
+        return SimpleNamespace(
+            status="SUCCEEDED",
+            stdout="contract ok",
+            stderr="",
+            exit_code=0,
+            timed_out=False,
+            log_path=None,
+            audit_path=None,
+        )
+
+    monkeypatch.setattr("app.runtime.test_executor.run_workspace_command_async", fake_run_workspace_command_async)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+    contract = build_execution_contract(
+        run_summary={"target_files": ["apps/api/tests/test_runtime_flow.py"]},
+        architecture_profile={
+            "command_index": {
+                "repo_tests": {
+                    "command": "python3 -c \"print('contract tests')\"",
+                    "kind": "test",
+                    "paths": ["apps/api/tests"],
+                }
+            }
+        },
+        plan_snapshot=None,
+    )
+
+    work_item = WorkItem(
+        project_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        type="RUN_TESTS",
+        executor="test",
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        repo_path=str(repo_root),
+        logs_path=str(logs_root),
+        workspace_status="READY",
+        execution_contract=contract,
+    )
+
+    result = await TestExecutor().execute(work_item, context)
+
+    assert result["status"] == "DONE"
+    assert captured["command"] == ["python3", "-c", "print('contract tests')"]
+    assert captured["allowed_prefixes"] == contract.allowed_command_prefixes
 
 
 @pytest.mark.anyio

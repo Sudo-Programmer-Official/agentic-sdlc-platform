@@ -79,12 +79,14 @@ from app.services.preview_service import (
 from app.services.run_comparison import compare_runs
 from app.services.run_memory import find_similar_runs
 from app.services.run_narrative import build_run_narrative
-from app.services.run_launch import launch_run_for_project
+from app.services.run_launch import _schedule_orchestrator_start, launch_run_for_project
+from app.services.run_resume import prepare_run_for_resume
 from app.services.strategy_selection import create_strategy_group, get_strategy_group
 from app.services.run_timeline import build_run_timeline
 from app.services.workspace_supervisor import ensure_run_workspace
 from app.services.requirements_bridge import ensure_legacy_project, load_requirements_plan_state
 from app.services.run_summary_builder import ensure_project_run_summaries
+from app.services.architecture_profile_service import bootstrap_architecture_profile, summarize_architecture_profile
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
     TaskCounts,
@@ -104,6 +106,10 @@ settings = get_settings()
 
 class StageUpdate(BaseModel):
     to_stage: str
+
+
+class RunResumeRequest(BaseModel):
+    start_now: bool = True
 
 
 ALLOWED_TRANSITIONS = {
@@ -490,6 +496,13 @@ async def connect_project_repo(
                 "default_branch": repo.default_branch,
             },
         )
+        await bootstrap_architecture_profile(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project.id,
+            refresh_repo_map_requested=False,
+            created_by=payload.created_by or ctx.user_id,
+        )
         await session.commit()
         await session.refresh(repo)
         return _project_repo_out(repo)
@@ -578,6 +591,13 @@ async def save_project_preview_profile(
             "backend_root": profile.backend_root,
             "ttl_hours": profile.ttl_hours,
         },
+    )
+    await bootstrap_architecture_profile(
+        session,
+        tenant_id=ctx.tenant_id,
+        project_id=project.id,
+        refresh_repo_map_requested=False,
+        created_by=ctx.user_id,
     )
     await session.commit()
     await session.refresh(profile)
@@ -697,6 +717,62 @@ async def fork_existing_run(
         start_now=payload.start_now,
     )
     return _run_out(forked)
+
+
+@router.post("/runs/{run_id}/resume", response_model=RunOut)
+@public_router.post("/runs/{run_id}/resume", response_model=RunOut)
+async def resume_existing_run(
+    run_id: uuid.UUID,
+    payload: RunResumeRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunOut:
+    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    try:
+        await prepare_run_for_resume(
+            session,
+            run,
+            actor_type="USER",
+            actor_id=getattr(ctx, "user_id", None),
+        )
+        await session.commit()
+        await session.refresh(run)
+    except ValueError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    if payload.start_now:
+        orchestrator = RunOrchestrator(SessionLocal, executor_name=run.executor)
+        bind = session.get_bind()
+        is_sqlite = bind is not None and bind.dialect.name == "sqlite"
+        try:
+            await orchestrator.bootstrap_in_session(
+                session,
+                run.id,
+                actor_type="USER",
+                actor_id=getattr(ctx, "user_id", None),
+                executor_name=run.executor,
+            )
+            await session.commit()
+            await session.refresh(run)
+        except Exception as exc:
+            await session.rollback()
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        if not is_sqlite:
+            _schedule_orchestrator_start(
+                orchestrator,
+                run_id=run.id,
+                actor_type="USER",
+                actor_id=getattr(ctx, "user_id", None),
+                executor_name=run.executor,
+            )
+
+    return _run_out(run)
 
 
 @router.post("/runs/{run_id}/create-pr", response_model=PullRequestOut)
@@ -1399,6 +1475,7 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
         .limit(1)
     )
     latest_run = None
+    architecture_summary = None
     if latest_run_row is not None:
         latest_summary = latest_summary_rows[0] if latest_summary_rows else None
         run_summary_meta = latest_run_row.summary if isinstance(latest_run_row.summary, dict) else {}
@@ -1443,11 +1520,24 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
             delivery_commit_sha=delivery_commit_sha,
             delivery_pushed_at=_delivery_summary_value(run_summary_meta, "remote_branch_pushed_at"),
         )
+        architecture_summary = await summarize_architecture_profile(
+            session,
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+            touched_files=list(latest_summary.changed_files) if latest_summary is not None else [],
+        )
+    else:
+        architecture_summary = await summarize_architecture_profile(
+            session,
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+        )
     return ProjectSummaryResponse(
         project_id=str(project.id),
         name=project.name,
         current_stage=project.status,
         latest_run=latest_run,
+        architecture_profile=architecture_summary,
         task_counts=task_counts,
         architecture_refresh_needed=legacy_project.architecture_refresh_needed,
         plan_refresh_needed=legacy_project.plan_refresh_needed,

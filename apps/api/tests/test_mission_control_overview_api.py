@@ -12,6 +12,7 @@ from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
 from app.main import app
+from app.runtime.execution_contract import build_execution_contract
 
 
 @pytest.fixture
@@ -144,6 +145,30 @@ async def test_mission_control_overview_returns_intake_impact_and_insights(db_se
                 "backend": {"url": "http://127.0.0.1:8100"},
                 "expires_at": (datetime.utcnow() + timedelta(hours=1)).isoformat(),
             },
+            "execution_contract": build_execution_contract(
+                run_summary={
+                    "goal": "Fix failing auth tests and open a PR",
+                    "target_files": ["app/auth_service.py"],
+                    "expected_files": ["app/auth_service.py", "tests/test_auth.py"],
+                    "edit_budget": {"mode": "minimal_patch", "max_files": 2, "hard_max_files": 4},
+                },
+                architecture_profile={
+                    "protected_paths": ["app/db/models"],
+                    "safe_paths": ["app"],
+                    "command_index": {
+                        "repo_tests": {
+                            "command": "python3 -m pytest -q tests/test_auth.py",
+                            "kind": "test",
+                            "paths": ["tests"],
+                        }
+                    },
+                },
+                plan_snapshot={
+                    "validation_steps": ["Run tests", "Review diff"],
+                    "success_criteria": ["Auth tests pass"],
+                    "risk_level": "MEDIUM",
+                },
+            ).to_dict(),
         },
     )
     session.add_all([older_run, latest_run])
@@ -218,6 +243,13 @@ async def test_mission_control_overview_returns_intake_impact_and_insights(db_se
     assert "auth_service" in data["latest_change_impact"]["modules_impacted"]
     assert "tests/test_auth.py" in data["latest_change_impact"]["tests_impacted"]
     assert "GET /login" in data["latest_change_impact"]["api_impact"]
+    assert data["architecture_profile"]["repo_full_name"] == "acme/example"
+    assert data["architecture_profile"]["package_count"] >= 2
+    assert "apps/web" in data["architecture_profile"]["packages"]
+    assert data["latest_execution_contract"]["lifecycle_state"] == "PENDING"
+    assert data["latest_execution_contract"]["validation_state"] == "PENDING"
+    assert data["latest_execution_contract"]["budget"]["budget_mode"] == "NORMAL"
+    assert data["recent_runs"][0]["execution_contract"]["test_command"] == "python3 -m pytest -q tests/test_auth.py"
 
 
 @pytest.mark.anyio
@@ -345,3 +377,54 @@ async def test_mission_control_overview_preview_panel_prefers_latest_deliverable
     assert data["previews_and_prs"]["preview_status"] == "READY"
     assert data["previews_and_prs"]["preview_url"] == "http://127.0.0.1:3100"
     assert data["previews_and_prs"]["file_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_execution_console_surfaces_execution_contract_telemetry(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Execution console telemetry", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="RUNNING",
+        executor="codex",
+        branch_name="run/runtime-contract",
+        workspace_status="READY",
+        summary={
+            "goal": "Fix runtime contract drift",
+            "execution_contract": build_execution_contract(
+                run_summary={
+                    "goal": "Fix runtime contract drift",
+                    "target_files": ["apps/api/app/runtime/codex_executor.py"],
+                    "expected_files": ["apps/api/app/runtime/codex_executor.py"],
+                },
+                architecture_profile={
+                    "command_index": {
+                        "repo_tests": {
+                            "command": "python3 -m pytest -q apps/api/tests/test_codex_executor.py",
+                            "kind": "test",
+                            "paths": ["apps/api/tests"],
+                        }
+                    }
+                },
+                plan_snapshot={
+                    "validation_steps": ["Run tests"],
+                    "risk_level": "LOW",
+                },
+            ).to_dict(),
+        },
+    )
+    session.add(run)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/runs/{run.id}/execution-console")
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["summary"]["execution_contract"]["lifecycle_state"] == "PENDING"
+    assert data["summary"]["execution_contract"]["validation_steps"] == ["Run tests"]
+    assert data["summary"]["execution_contract"]["budget"]["budget_mode"] == "NORMAL"

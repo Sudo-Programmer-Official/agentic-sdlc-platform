@@ -19,6 +19,8 @@ class AIOpsSummaryOut(BaseModel):
     total_cost_cents: float
     average_cost_per_successful_pr: float
     average_cost_per_docs_proposal: float
+    unique_context_packs: int
+    context_pack_reuse_rate: float
 
 
 class AIOpsWorkflowMetricOut(BaseModel):
@@ -56,6 +58,9 @@ class AIOpsOffenderOut(BaseModel):
 class AIOpsRecentJobOut(BaseModel):
     id: uuid.UUID
     workflow_type: str
+    feature_key: str | None = None
+    surface: str | None = None
+    entrypoint: str | None = None
     role: str
     task_type: str
     selected_model_tier: str
@@ -77,6 +82,8 @@ class AIOpsDashboardOut(BaseModel):
     summary: AIOpsSummaryOut
     workflows: list[AIOpsWorkflowMetricOut]
     spend_by_tier: list[AIOpsSpendItemOut]
+    spend_by_feature: list[AIOpsSpendItemOut]
+    spend_by_surface: list[AIOpsSpendItemOut]
     spend_by_project: list[AIOpsSpendItemOut]
     spend_by_repository: list[AIOpsSpendItemOut]
     top_retry_offenders: list[AIOpsOffenderOut]

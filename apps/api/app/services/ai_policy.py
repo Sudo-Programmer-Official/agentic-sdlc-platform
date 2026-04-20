@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import logging
 import math
 import uuid
@@ -81,6 +82,9 @@ class AIJobRequest:
     work_item_id: uuid.UUID | None = None
     document_id: uuid.UUID | None = None
     knowledge_event_id: uuid.UUID | None = None
+    feature_key: str | None = None
+    surface: str | None = None
+    entrypoint: str | None = None
     changed_files: list[str] = field(default_factory=list)
     background_job: bool = False
     user_triggered: bool = False
@@ -108,6 +112,17 @@ class AICacheContext:
     fragments: dict[str, str]
     cache_hits: int
     cache_keys: list[str]
+
+
+@dataclass(frozen=True)
+class AIContextPack:
+    fragments: dict[str, str]
+    text: str
+    cache_hits: int
+    cache_keys: list[str]
+    pack_key: str
+    pack_hash: str
+    pack_cache_hit: bool
 
 
 @dataclass(frozen=True)
@@ -174,6 +189,19 @@ def _cap_tier(left: ModelTier, right: ModelTier) -> ModelTier:
     return left if TIER_ORDER[left] <= TIER_ORDER[right] else right
 
 
+def _normalize_dimension(value: str | None) -> str | None:
+    if not value:
+        return None
+    lowered = "-".join(part for part in "".join(ch.lower() if ch.isalnum() else "-" for ch in value).split("-") if part)
+    return lowered[:120] or None
+
+
+def _label_for_dimension(value: str | None, fallback: str) -> str:
+    if not value:
+        return fallback
+    return value.replace("-", " ").replace("_", " ").title()
+
+
 class AIJobManager:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession] | None = None):
         self._session_factory = session_factory or SessionLocal
@@ -203,6 +231,62 @@ class AIJobManager:
             except Exception:
                 await owned.rollback()
                 raise
+
+    @staticmethod
+    def _metadata_value(request: AIJobRequest, key: str) -> str | None:
+        value = request.metadata.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    def _feature_key(self, request: AIJobRequest) -> str | None:
+        return _normalize_dimension(
+            request.feature_key
+            or self._metadata_value(request, "feature_key")
+            or self._metadata_value(request, "work_item_key")
+            or self._metadata_value(request, "document_type")
+            or self._metadata_value(request, "knowledge_flow")
+        )
+
+    def _surface(self, request: AIJobRequest) -> str | None:
+        return _normalize_dimension(
+            request.surface
+            or self._metadata_value(request, "surface")
+            or self._metadata_value(request, "work_item_type")
+            or request.workflow_type
+        )
+
+    def _entrypoint(self, request: AIJobRequest) -> str | None:
+        value = request.entrypoint or self._metadata_value(request, "entrypoint")
+        if not value:
+            return None
+        return value.strip()[:255]
+
+    def _context_pack_cache_key(self, request: AIJobRequest) -> str:
+        return self._feature_key(request) or self._surface(request) or request.workflow_type
+
+    def _context_pack_source_revision(self, request: AIJobRequest) -> str:
+        payload = {
+            "workflow_type": request.workflow_type,
+            "role": request.role,
+            "task_type": request.task_type,
+            "feature_key": self._feature_key(request),
+            "surface": self._surface(request),
+            "entrypoint": self._entrypoint(request),
+            "changed_files": sorted({path.strip() for path in request.changed_files if path and path.strip()}),
+        }
+        return sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+
+    def _context_pack_seed_sections(self, request: AIJobRequest) -> dict[str, str]:
+        sections: dict[str, str] = {}
+        feature_key = self._feature_key(request)
+        surface = self._surface(request)
+        entrypoint = self._entrypoint(request)
+        if feature_key:
+            sections["feature_scope"] = f"Feature scope: {feature_key}."
+        if surface:
+            sections["surface_scope"] = f"Surface: {surface}."
+        if entrypoint:
+            sections["entrypoint"] = f"Entrypoint: {entrypoint}."
+        return sections
 
     def route_job(self, request: AIJobRequest) -> AIJobPolicy:
         settings = self._settings
@@ -406,6 +490,45 @@ class AIJobManager:
 
         return AICacheContext(fragments=fragments, cache_hits=cache_hits, cache_keys=cache_keys)
 
+    async def load_context_pack(
+        self,
+        request: AIJobRequest,
+        *,
+        session: AsyncSession | None = None,
+    ) -> AIContextPack:
+        pack_key = self._context_pack_cache_key(request)
+        source_revision = self._context_pack_source_revision(request)
+
+        async with self._session_scope(session) as db:
+            pack = await self._load_or_compute_cache(
+                db,
+                request,
+                cache_scope="context_pack",
+                cache_key=pack_key,
+                source_revision=source_revision,
+                builder=lambda inner: self._build_context_pack(inner, request),
+            )
+
+        payload = pack or {}
+        fragments = {
+            key: str(value)
+            for key, value in (payload.get("sections") or {}).items()
+            if isinstance(key, str) and isinstance(value, str) and value
+        }
+        text = str(payload.get("text") or "")
+        pack_hash = str(payload.get("pack_hash") or sha1(text.encode("utf-8")).hexdigest())
+        pack_cache_hit = bool(payload.get("_cache_hit", 0))
+        nested_hits = int(payload.get("fragment_cache_hit_count") or 0)
+        return AIContextPack(
+            fragments=fragments,
+            text=text,
+            cache_hits=(1 if pack_cache_hit else 0) + nested_hits,
+            cache_keys=[str(value) for value in (payload.get("fragment_cache_keys") or []) if isinstance(value, str)],
+            pack_key=pack_key,
+            pack_hash=pack_hash,
+            pack_cache_hit=pack_cache_hit,
+        )
+
     async def prepare_job(
         self,
         request: AIJobRequest,
@@ -414,6 +537,7 @@ class AIJobManager:
         user_prompt: str,
         filters_used: list[str],
         cache_hit_count: int = 0,
+        context_pack: AIContextPack | None = None,
         completion_token_estimate: int | None = None,
         block_on_human_review: bool = False,
         session: AsyncSession | None = None,
@@ -460,6 +584,9 @@ class AIJobManager:
                 document_id=request.document_id,
                 knowledge_event_id=request.knowledge_event_id,
                 workflow_type=request.workflow_type,
+                feature_key=self._feature_key(request),
+                surface=self._surface(request),
+                entrypoint=self._entrypoint(request),
                 role=request.role,
                 task_type=policy.task_type,
                 ambiguity_level=policy.ambiguity_level,
@@ -483,6 +610,16 @@ class AIJobManager:
                     "metadata": request.metadata,
                     "provider": self._settings.llm_provider,
                     "model_name": model_name,
+                    "context_pack": (
+                        {
+                            "key": context_pack.pack_key,
+                            "hash": context_pack.pack_hash,
+                            "pack_cache_hit": context_pack.pack_cache_hit,
+                            "section_keys": list(context_pack.fragments.keys()),
+                        }
+                        if context_pack
+                        else None
+                    ),
                 },
                 completed_at=_now_utc() if status == "stopped" else None,
             )
@@ -632,6 +769,9 @@ class AIJobManager:
                 document_id=request.document_id,
                 knowledge_event_id=request.knowledge_event_id,
                 workflow_type=request.workflow_type,
+                feature_key=self._feature_key(request),
+                surface=self._surface(request),
+                entrypoint=self._entrypoint(request),
                 role=request.role,
                 task_type=policy.task_type,
                 ambiguity_level=policy.ambiguity_level,
@@ -732,13 +872,22 @@ class AIJobManager:
                 return 0.0
             return round(numerator / denominator, 4)
 
+        def context_pack_meta(item: AIJobRun) -> dict[str, Any]:
+            details = item.details_json or {}
+            payload = details.get("context_pack") if isinstance(details, dict) else None
+            return payload if isinstance(payload, dict) else {}
+
         workflow_groups: dict[str, list[AIJobRun]] = {}
         tier_groups: dict[str, list[AIJobRun]] = {}
+        feature_groups: dict[str, list[AIJobRun]] = {}
+        surface_groups: dict[str, list[AIJobRun]] = {}
         project_groups: dict[str, list[AIJobRun]] = {}
         repo_groups: dict[str, list[AIJobRun]] = {}
         for row in rows:
             workflow_groups.setdefault(row.workflow_type, []).append(row)
             tier_groups.setdefault(row.selected_model_tier, []).append(row)
+            feature_groups.setdefault(row.feature_key or "unattributed", []).append(row)
+            surface_groups.setdefault(row.surface or "unknown-surface", []).append(row)
             if row.project_id:
                 project_groups.setdefault(str(row.project_id), []).append(row)
             if row.repository_id:
@@ -773,6 +922,34 @@ class AIJobManager:
             for tier, items in sorted(tier_groups.items(), key=lambda pair: TIER_ORDER.get(pair[0], 99), reverse=True)
         ]
 
+        spend_by_feature = [
+            {
+                "key": feature_key,
+                "label": _label_for_dimension(feature_key if feature_key != "unattributed" else None, "Unattributed"),
+                "cost_cents": round(sum(total_cost(item) for item in items), 4),
+                "job_count": len(items),
+            }
+            for feature_key, items in sorted(
+                feature_groups.items(),
+                key=lambda pair: sum(total_cost(item) for item in pair[1]),
+                reverse=True,
+            )
+        ]
+
+        spend_by_surface = [
+            {
+                "key": surface_key,
+                "label": _label_for_dimension(surface_key if surface_key != "unknown-surface" else None, "Unknown Surface"),
+                "cost_cents": round(sum(total_cost(item) for item in items), 4),
+                "job_count": len(items),
+            }
+            for surface_key, items in sorted(
+                surface_groups.items(),
+                key=lambda pair: sum(total_cost(item) for item in pair[1]),
+                reverse=True,
+            )
+        ]
+
         spend_by_project = [
             {
                 "key": project_key,
@@ -805,6 +982,9 @@ class AIJobManager:
             {
                 "id": item.id,
                 "workflow_type": item.workflow_type,
+                "feature_key": item.feature_key,
+                "surface": item.surface,
+                "entrypoint": item.entrypoint,
                 "role": item.role,
                 "task_type": item.task_type,
                 "selected_model_tier": item.selected_model_tier,
@@ -863,6 +1043,16 @@ class AIJobManager:
         docs_jobs = [
             item for item in rows if item.workflow_type in {"docs_verification", "docs_proposal"} and item.status == "completed"
         ]
+        context_pack_jobs = [item for item in rows if context_pack_meta(item)]
+        context_pack_reuse_hits = sum(1 for item in context_pack_jobs if context_pack_meta(item).get("pack_cache_hit"))
+        unique_context_packs = len(
+            {
+                str(meta.get("hash") or meta.get("key"))
+                for item in context_pack_jobs
+                for meta in [context_pack_meta(item)]
+                if meta.get("hash") or meta.get("key")
+            }
+        )
 
         return {
             "summary": {
@@ -886,9 +1076,13 @@ class AIJobManager:
                 )
                 if docs_jobs
                 else 0.0,
+                "unique_context_packs": unique_context_packs,
+                "context_pack_reuse_rate": rate(context_pack_reuse_hits, len(context_pack_jobs)),
             },
             "workflows": workflows,
             "spend_by_tier": spend_by_tier,
+            "spend_by_feature": spend_by_feature,
+            "spend_by_surface": spend_by_surface,
             "spend_by_project": spend_by_project,
             "spend_by_repository": spend_by_repository,
             "top_retry_offenders": top_retry_offenders,
@@ -939,6 +1133,24 @@ class AIJobManager:
         session.add(row)
         await session.flush()
         return {"_cache_hit": 0, **payload}
+
+    async def _build_context_pack(self, session: AsyncSession, request: AIJobRequest) -> dict[str, Any] | None:
+        cached = await self.load_cached_context_fragments(request, session=session)
+        sections = {**self._context_pack_seed_sections(request), **cached.fragments}
+        if not sections:
+            return None
+        text = "\n".join(
+            f"{key.replace('_', ' ').title()}: {value}"
+            for key, value in sections.items()
+            if value
+        )
+        return {
+            "text": text,
+            "sections": sections,
+            "pack_hash": sha1(text.encode("utf-8")).hexdigest(),
+            "fragment_cache_hit_count": cached.cache_hits,
+            "fragment_cache_keys": cached.cache_keys,
+        }
 
     async def _build_repo_summary(self, session: AsyncSession, request: AIJobRequest) -> dict[str, Any] | None:
         repo = await session.get(ProjectRepository, request.repository_id) if request.repository_id else None

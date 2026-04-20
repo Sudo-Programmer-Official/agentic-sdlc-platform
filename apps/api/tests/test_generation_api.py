@@ -15,7 +15,7 @@ from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
 from app.main import app
 from app.schemas.generation import GeneratedTask
-from app.services.ai_policy import AICacheContext, AIJobPolicy, PreparedAIExecution
+from app.services.ai_policy import AIContextPack, AIJobPolicy, PreparedAIExecution
 from app.services.llm_generator import LLMTaskGenerator, TASK_SCHEMA
 
 
@@ -121,8 +121,16 @@ async def test_llm_task_generator_uses_named_json_schema_response_format(monkeyp
             )
 
     class FakeJobManager:
-        async def load_cached_context_fragments(self, *args, **kwargs):
-            return AICacheContext(fragments={}, cache_hits=0, cache_keys=[])
+        async def load_context_pack(self, *args, **kwargs):
+            return AIContextPack(
+                fragments={},
+                text="",
+                cache_hits=0,
+                cache_keys=[],
+                pack_key="document-task-generation",
+                pack_hash="pack-hash",
+                pack_cache_hit=False,
+            )
 
         def route_job(self, request):
             return AIJobPolicy(

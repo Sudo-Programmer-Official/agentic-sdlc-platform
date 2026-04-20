@@ -29,7 +29,7 @@
       <MetricCard label="Success Rate" :value="formatPercent(dashboard.summary.success_rate)" :detail="`Approval rate ${formatPercent(dashboard.summary.approval_rate)}`" tone="success">
         <template #icon><AppIcon name="status" size="lg" /></template>
       </MetricCard>
-      <MetricCard label="Context Size" :value="Math.round(dashboard.summary.average_context_size)" :detail="`Escalation rate ${formatPercent(dashboard.summary.manual_escalation_rate)}`" tone="neutral">
+      <MetricCard label="Context Packs" :value="dashboard.summary.unique_context_packs" :detail="`Reuse ${formatPercent(dashboard.summary.context_pack_reuse_rate)} · avg ${Math.round(dashboard.summary.average_context_size)} tokens`" tone="neutral">
         <template #icon><AppIcon name="map" size="lg" /></template>
       </MetricCard>
     </section>
@@ -40,13 +40,13 @@
           <div>
             <div class="text-sm uppercase tracking-wide text-slate-400">Spend Breakdown</div>
             <div class="text-xs text-slate-500">
-              Compare routing behavior across tiers, projects, and connected repositories.
+              Compare routing behavior across tiers, feature scopes, surfaces, and connected repositories.
             </div>
           </div>
           <span class="topbar-chip">{{ formatCost(dashboard.summary.average_cost_per_docs_proposal) }} docs avg</span>
         </div>
 
-        <div class="mt-5 grid gap-4 xl:grid-cols-3">
+        <div class="mt-5 grid gap-4 xl:grid-cols-2 2xl:grid-cols-4">
           <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div class="text-xs uppercase tracking-wide text-slate-400">By Tier</div>
             <div class="mt-4 space-y-3">
@@ -61,9 +61,22 @@
           </div>
 
           <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div class="text-xs uppercase tracking-wide text-slate-400">By Project</div>
+            <div class="text-xs uppercase tracking-wide text-slate-400">By Feature</div>
             <div class="mt-4 space-y-3">
-              <div v-for="item in dashboard.spend_by_project" :key="`project-${item.key}`" class="flex items-center justify-between gap-3 text-sm">
+              <div v-for="item in dashboard.spend_by_feature" :key="`feature-${item.key}`" class="flex items-center justify-between gap-3 text-sm">
+                <div>
+                  <div class="font-semibold text-slate-900">{{ item.label }}</div>
+                  <div class="text-xs text-slate-500">{{ item.job_count }} jobs</div>
+                </div>
+                <div class="font-mono text-slate-700">{{ formatCost(item.cost_cents) }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div class="text-xs uppercase tracking-wide text-slate-400">By Surface</div>
+            <div class="mt-4 space-y-3">
+              <div v-for="item in dashboard.spend_by_surface" :key="`surface-${item.key}`" class="flex items-center justify-between gap-3 text-sm">
                 <div>
                   <div class="font-semibold text-slate-900">{{ item.label }}</div>
                   <div class="text-xs text-slate-500">{{ item.job_count }} jobs</div>
@@ -188,7 +201,7 @@
           <thead class="text-left text-xs uppercase tracking-wide text-slate-400">
             <tr>
               <th class="pb-3 pr-4">Workflow</th>
-              <th class="pb-3 pr-4">Role</th>
+              <th class="pb-3 pr-4">Feature / Surface</th>
               <th class="pb-3 pr-4">Tier</th>
               <th class="pb-3 pr-4">Cost</th>
               <th class="pb-3 pr-4">Context</th>
@@ -199,8 +212,17 @@
           </thead>
           <tbody>
             <tr v-for="item in dashboard.recent_jobs" :key="item.id" class="border-t border-slate-100 text-slate-700">
-              <td class="py-3 pr-4 font-semibold text-slate-900">{{ item.workflow_type }}</td>
-              <td class="py-3 pr-4">{{ item.role }}</td>
+              <td class="py-3 pr-4">
+                <div class="font-semibold text-slate-900">{{ item.workflow_type }}</div>
+                <div class="text-xs text-slate-500">{{ item.role }}</div>
+              </td>
+              <td class="py-3 pr-4">
+                <div>{{ formatDimension(item.feature_key) }}</div>
+                <div class="text-xs text-slate-500">
+                  {{ formatDimension(item.surface) }}
+                  <span v-if="item.entrypoint">· {{ item.entrypoint }}</span>
+                </div>
+              </td>
               <td class="py-3 pr-4">{{ item.selected_model_tier }}</td>
               <td class="py-3 pr-4 font-mono">{{ formatCost(item.cost_cents) }}</td>
               <td class="py-3 pr-4">{{ item.context_size }}</td>
@@ -275,5 +297,14 @@ function formatDate(value?: string) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "—";
   return parsed.toLocaleString();
+}
+
+function formatDimension(value?: string | null) {
+  if (!value) return "—";
+  return value
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 </script>

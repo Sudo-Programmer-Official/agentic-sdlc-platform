@@ -75,10 +75,13 @@ class LLMTaskGenerator:
             tenant_id=self.tenant_id,
             project_id=self.project_id,
             document_id=self.document_id,
+            feature_key="document-task-generation",
+            surface="requirements",
+            entrypoint="api.generate_tasks",
             user_triggered=True,
-            metadata={"document_title": title, "max_tasks": opts.max_tasks},
+            metadata={"document_title": title, "max_tasks": opts.max_tasks, "surface": "requirements"},
         )
-        cache_context = await self._job_manager.load_cached_context_fragments(job_request, session=self._session)
+        context_pack = await self._job_manager.load_context_pack(job_request, session=self._session)
 
         system_prompt = (
             "You are an SDLC planner. Return concise, structured tasks derived from the provided document. "
@@ -92,7 +95,7 @@ class LLMTaskGenerator:
 
         project_context = "\n".join(
             f"{key.replace('_', ' ').title()}: {value}"
-            for key, value in cache_context.fragments.items()
+            for key, value in context_pack.fragments.items()
             if value
         )
         user_content = (
@@ -107,8 +110,9 @@ class LLMTaskGenerator:
             job_request,
             system_prompt=system_prompt,
             user_prompt=user_content,
-            filters_used=["document_excerpt_compression", "cached_project_context"],
-            cache_hit_count=cache_context.cache_hits,
+            filters_used=["document_excerpt_compression", "context_pack_lookup"],
+            cache_hit_count=context_pack.cache_hits,
+            context_pack=context_pack,
             completion_token_estimate=policy.max_context_tokens // 10,
             block_on_human_review=False,
             session=self._session,
@@ -141,6 +145,8 @@ class LLMTaskGenerator:
                     "ai_job_id": str(prepared.job_id),
                     "ai_selected_tier": prepared.policy.selected_model_tier,
                     "ai_policy": self._policy_payload(prepared.policy),
+                    "ai_context_pack_key": context_pack.pack_key,
+                    "ai_context_pack_hash": context_pack.pack_hash,
                     "temperature": opts.temperature,
                 }
             )
@@ -236,6 +242,8 @@ class LLMTaskGenerator:
             "ai_job_id": str(prepared.job_id),
             "ai_selected_tier": prepared.policy.selected_model_tier,
             "ai_policy": self._policy_payload(prepared.policy),
+            "ai_context_pack_key": context_pack.pack_key,
+            "ai_context_pack_hash": context_pack.pack_hash,
             "temperature": opts.temperature,
             "tokens_prompt": usage.prompt_tokens if usage else None,
             "tokens_completion": usage.completion_tokens if usage else None,

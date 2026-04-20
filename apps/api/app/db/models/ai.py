@@ -17,6 +17,8 @@ class AIJobRun(TimestampMixin, Base):
         Index("idx_ai_job_runs_project_created", "project_id", "created_at"),
         Index("idx_ai_job_runs_repo_created", "repository_id", "created_at"),
         Index("idx_ai_job_runs_workflow_created", "workflow_type", "created_at"),
+        Index("idx_ai_job_runs_feature_created", "feature_key", "created_at"),
+        Index("idx_ai_job_runs_surface_created", "surface", "created_at"),
         Index("idx_ai_job_runs_tier_created", "selected_model_tier", "created_at"),
         Index("idx_ai_job_runs_status_created", "status", "created_at"),
     )
@@ -40,6 +42,9 @@ class AIJobRun(TimestampMixin, Base):
         UUID(as_uuid=True), ForeignKey("knowledge_events.id", ondelete="SET NULL"), nullable=True
     )
     workflow_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    feature_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    surface: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    entrypoint: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     task_type: Mapped[str] = mapped_column(String(32), nullable=False)
     ambiguity_level: Mapped[str] = mapped_column(String(16), nullable=False)

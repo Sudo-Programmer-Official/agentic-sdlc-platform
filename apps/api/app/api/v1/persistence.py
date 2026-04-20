@@ -62,6 +62,7 @@ from app.services.activity_log import log_activity
 from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_run_status as guarded_update_run_status, update_work_item_status
+from app.runtime.leases import DEFAULT_CLAIM_LEASE_SECONDS
 from app.runtime.orchestrator import RunOrchestrator
 from app.runtime.recovery_policy import maybe_apply_recovery
 from app.db.session import SessionLocal
@@ -626,7 +627,7 @@ class RunEventOut(BaseModel):
 
 class ClaimRequest(BaseModel):
     limit: int = 1
-    lease_seconds: int = 60
+    lease_seconds: int = DEFAULT_CLAIM_LEASE_SECONDS
 
 
 @router.patch("/runs/{run_id}/status", response_model=RunOut)
@@ -985,6 +986,7 @@ async def claim_work_items(
                 "RUNNING",
                 assigned_agent_id=agent_id,
                 lease_expires_at=lease_expires,
+                started_at=now,
             )
             if not ok:
                 continue
@@ -1077,6 +1079,7 @@ async def fail_work_item(
             attempt=wi.attempt + 1,
             assigned_agent_id=None,
             lease_expires_at=None,
+            started_at=None,
             last_error=payload.error,
         )
         event_type = "WORK_ITEM_RETRIED"

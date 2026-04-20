@@ -8,6 +8,7 @@ from sqlalchemy import select, func
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.db.models import Run, WorkItem
+from app.runtime.leases import reclaim_expired_work_items
 from app.services.event_log import record_event
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
@@ -15,39 +16,8 @@ settings = get_settings()
 
 async def tick(session):
     settings = get_settings()
-    now = datetime.now(timezone.utc)
 
-    # Requeue expired leases (conditional)
-    expired = (
-        await session.execute(
-            select(WorkItem).where(
-                WorkItem.status == "CLAIMED",
-                WorkItem.lease_expires_at.isnot(None),
-                WorkItem.lease_expires_at < now,
-            )
-        )
-    ).scalars().all()
-    for wi in expired:
-        from app.services.state_guard import update_work_item_status
-        ok = await update_work_item_status(
-            session,
-            wi.id,
-            ["CLAIMED"],
-            "QUEUED",
-            assigned_agent_id=None,
-            lease_expires_at=None,
-        )
-        if not ok:
-            continue
-        await record_event(
-            session,
-            project_id=wi.project_id,
-            run_id=wi.run_id,
-            work_item_id=wi.id,
-            event_type="WORK_ITEM_LEASE_EXPIRED",
-            actor_type="SYSTEM",
-            payload={"work_item_id": str(wi.id)},
-        )
+    await reclaim_expired_work_items(session)
 
     # finalize runs
     runs = (
@@ -91,15 +61,19 @@ async def tick(session):
                     pass
             continue
 
-        failed_non_superseded = (
+        failed_results = (
             await session.execute(
-                select(func.count()).where(
+                select(WorkItem.result).where(
                     WorkItem.run_id == run.id,
                     WorkItem.status == "FAILED",
-                    (WorkItem.result["superseded"].astext.is_(None)) | (WorkItem.result["superseded"].astext != "true"),
                 )
             )
-        ).scalar() or 0
+        ).scalars().all()
+        failed_non_superseded = sum(
+            1
+            for result in failed_results
+            if not (isinstance(result, dict) and result.get("superseded") is True)
+        )
         active = (
             await session.execute(
                 select(func.count()).where(

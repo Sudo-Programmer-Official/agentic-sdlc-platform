@@ -219,9 +219,14 @@ class CodexExecutor(TaskExecutor):
         if graph_context:
             context_bundle["graph_context"] = graph_context
         job_request = self._build_ai_job_request(work_item, context_bundle, allowed_files)
-        cache_context = await self._job_manager.load_cached_context_fragments(job_request)
-        if cache_context.fragments:
-            context_bundle["meta"]["cached_context"] = cache_context.fragments
+        context_pack = await self._job_manager.load_context_pack(job_request)
+        if context_pack.fragments:
+            context_bundle["meta"]["cached_context"] = context_pack.fragments
+        context_bundle["meta"]["context_pack"] = {
+            "key": context_pack.pack_key,
+            "hash": context_pack.pack_hash,
+            "pack_cache_hit": context_pack.pack_cache_hit,
+        }
 
         # Adaptive patch ratio based on stage
         ratio = self.max_patch_ratio_default
@@ -249,14 +254,15 @@ class CodexExecutor(TaskExecutor):
             }
         )
         filters_used = ["diff_narrowing", "stack_trace_extraction", "path_hint_lookup", "graph_context_lookup"]
-        if cache_context.fragments:
-            filters_used.append("cache_lookup")
+        if context_pack.fragments:
+            filters_used.append("context_pack_lookup")
         prepared = await self._job_manager.prepare_job(
             job_request,
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             filters_used=filters_used,
-            cache_hit_count=cache_context.cache_hits,
+            cache_hit_count=context_pack.cache_hits,
+            context_pack=context_pack,
             completion_token_estimate=self.settings.codex_max_tokens,
             block_on_human_review=True,
         )
@@ -901,6 +907,7 @@ class CodexExecutor(TaskExecutor):
     def _build_ai_job_request(self, work_item: WorkItem, context_bundle: dict[str, Any], allowed_files: list[str]) -> AIJobRequest:
         candidate_paths = self._candidate_paths(work_item, context_bundle, allowed_files)
         risk_level = self._risk_level_for_work_item(work_item, candidate_paths)
+        payload = work_item.payload or {}
         if "PLAN" in work_item.type:
             role = "planner"
             task_type = "planning"
@@ -936,10 +943,44 @@ class CodexExecutor(TaskExecutor):
             project_id=work_item.project_id,
             run_id=work_item.run_id,
             work_item_id=work_item.id,
+            feature_key=self._feature_key_for_work_item(work_item),
+            surface=self._surface_for_work_item(work_item),
+            entrypoint="runtime.codex_executor",
             changed_files=candidate_paths,
             tests_failed=work_item.type == "FIX_TEST_FAILURE",
-            metadata={"work_item_type": work_item.type, "work_item_key": work_item.key},
+            metadata={
+                "work_item_type": work_item.type,
+                "work_item_key": work_item.key,
+                "feature_key": payload.get("feature_key"),
+                "surface": payload.get("surface"),
+            },
         )
+
+    @staticmethod
+    def _feature_key_for_work_item(work_item: WorkItem) -> str:
+        payload = work_item.payload or {}
+        explicit = payload.get("feature_key")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+        return work_item.key or work_item.type.lower()
+
+    @staticmethod
+    def _surface_for_work_item(work_item: WorkItem) -> str:
+        payload = work_item.payload or {}
+        explicit = payload.get("surface")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+        mapping = {
+            "PLAN_DAG": "planning",
+            "REVIEW_DIFF": "review",
+            "REVIEW_INTEGRATION": "review",
+            "WRITE_TESTS": "tests",
+            "RUN_TESTS": "tests",
+            "FIX_TEST_FAILURE": "tests",
+            "CODE_FRONTEND": "frontend",
+            "CODE_BACKEND": "backend",
+        }
+        return mapping.get(work_item.type, "runtime")
 
     def _candidate_paths(self, work_item: WorkItem, context_bundle: dict[str, Any], allowed_files: list[str]) -> list[str]:
         ordered: list[str] = []

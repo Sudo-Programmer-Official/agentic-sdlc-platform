@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Agent, Run, WorkItem, WorkItemEdge
 from app.runtime.executor import TaskExecutor
 from app.runtime.registry import build_executor, get_executor
+from app.runtime.leases import reclaim_expired_work_items
 from app.services.event_log import record_event
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.state_guard import update_work_item_status
@@ -337,39 +338,7 @@ class RunOrchestrator:
                 if run.status == "CANCELED":
                     break
 
-                # Requeue expired leases (CLAIMED items that timed out)
-                now = datetime.now(timezone.utc)
-                expired_items = (
-                    await session.execute(
-                        select(WorkItem).where(
-                            WorkItem.run_id == run_id,
-                            WorkItem.status == "CLAIMED",
-                            WorkItem.lease_expires_at.isnot(None),
-                            WorkItem.lease_expires_at < now,
-                        )
-                    )
-                ).scalars().all()
-                if expired_items:
-                    for wi in expired_items:
-                        ok = await update_work_item_status(
-                            session,
-                            wi.id,
-                            ["CLAIMED"],
-                            "QUEUED",
-                            assigned_agent_id=None,
-                            lease_expires_at=None,
-                        )
-                        if not ok:
-                            continue
-                        await record_event(
-                            session,
-                            project_id=wi.project_id,
-                            run_id=wi.run_id,
-                            work_item_id=wi.id,
-                            event_type="WORK_ITEM_LEASE_EXPIRED",
-                            actor_type="SYSTEM",
-                            payload={"work_item_id": str(wi.id)},
-                        )
+                if await reclaim_expired_work_items(session, run_id=run_id):
                     await session.flush()
 
                 # check completion/failed

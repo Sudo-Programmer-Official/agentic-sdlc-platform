@@ -11,6 +11,7 @@ from sqlalchemy import select, and_, exists
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.db.models import Agent, Run, WorkItem
+from app.runtime.leases import keep_work_item_lease_alive, lease_seconds_for_executor
 from app.runtime.registry import build_executor
 from app.runtime.recovery_policy import maybe_apply_recovery
 from app.services.event_log import record_event
@@ -31,7 +32,12 @@ def _work_item_terminal_event_type(status: str) -> str:
 
 
 async def execute_item(session, wi: WorkItem, agent: Agent):
-    run = await session.get(Run, wi.run_id)
+    work_item_id = wi.id
+    run_id = wi.run_id
+    project_id = wi.project_id
+    tenant_id = wi.tenant_id
+    agent_id = agent.id
+    run = await session.get(Run, run_id)
     if run is None:
         return
     failure_stage = "workspace_context"
@@ -50,20 +56,20 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
         failure_stage = "event_recording"
         await record_event(
             session,
-            project_id=wi.project_id,
-            run_id=wi.run_id,
-            work_item_id=wi.id,
+            project_id=project_id,
+            run_id=run_id,
+            work_item_id=work_item_id,
             event_type=_work_item_terminal_event_type(wi.status),
             actor_type="AGENT",
-            actor_id=str(agent.id),
-            payload={"work_item_id": str(wi.id), "status": wi.status},
+            actor_id=str(agent_id),
+            payload={"work_item_id": str(work_item_id), "status": wi.status},
         )
         await session.flush()
         failure_stage = "recovery_policy"
         await maybe_apply_recovery(session, wi)
     except Exception as exc:
         await session.rollback()
-        failed_item = await session.get(WorkItem, wi.id)
+        failed_item = await session.get(WorkItem, work_item_id)
         if failed_item is None:
             return
         failed_item.status = "FAILED"
@@ -72,15 +78,15 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
         session.add(failed_item)
         await record_event(
             session,
-            project_id=failed_item.project_id,
-            run_id=failed_item.run_id,
-            work_item_id=failed_item.id,
+            project_id=project_id,
+            run_id=run_id,
+            work_item_id=work_item_id,
             event_type="WORK_ITEM_FAILED",
             actor_type="AGENT",
-            actor_id=str(agent.id),
-            tenant_id=failed_item.tenant_id,
+            actor_id=str(agent_id),
+            tenant_id=tenant_id,
             payload={
-                "work_item_id": str(failed_item.id),
+                "work_item_id": str(work_item_id),
                 "error": str(exc),
                 "exception_class": exc.__class__.__name__,
                 "failure_stage": failure_stage,
@@ -100,7 +106,6 @@ async def tick_worker(agent_id: uuid.UUID):
             return
         # claim one item
         now = datetime.now(timezone.utc)
-        lease_expires = now + timedelta(seconds=60)
         agent.last_heartbeat_at = now
         session.add(agent)
         agent_caps = set(agent.capabilities or [])
@@ -136,9 +141,12 @@ async def tick_worker(agent_id: uuid.UUID):
         if not wi:
             await session.commit()
             return
+        lease_seconds = lease_seconds_for_executor(settings, wi.executor)
+        lease_expires = now + timedelta(seconds=lease_seconds)
         wi.status = "RUNNING"
         wi.assigned_agent_id = agent_id
         wi.lease_expires_at = lease_expires
+        wi.started_at = now
         session.add(wi)
         await record_event(
             session,
@@ -158,8 +166,20 @@ async def tick_worker(agent_id: uuid.UUID):
         agent = await session.get(Agent, agent_id)
         if not wi or not agent:
             return
-        await execute_item(session, wi, agent)
-        await session.commit()
+        lease_keepalive = asyncio.create_task(
+            keep_work_item_lease_alive(
+                SessionLocal,
+                agent_id=agent_id,
+                work_item_id=wi.id,
+                lease_seconds=lease_seconds,
+            )
+        )
+        try:
+            await execute_item(session, wi, agent)
+            await session.commit()
+        finally:
+            lease_keepalive.cancel()
+            await lease_keepalive
 
 
 async def main():

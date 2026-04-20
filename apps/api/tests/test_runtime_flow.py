@@ -1,4 +1,6 @@
+import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,8 @@ from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.runtime import orchestrator as orchestrator_module
 from app.runtime.orchestrator import RunOrchestrator
+from app.runtime.leases import keep_work_item_lease_alive
+from app.runtime.scheduler_service import tick as scheduler_tick
 from app.runtime import worker_service
 from app.runtime.worker_service import tick_worker
 from app.services import run_launch as run_launch_module
@@ -235,6 +239,254 @@ async def test_external_worker_claims_and_executes_dummy_work_item(monkeypatch, 
         assert "WORK_ITEM_CLAIMED" in event_types
         assert "WORK_ITEM_DONE" in event_types
         assert all(event.work_item_id is not None for event in events if event.payload and event.payload.get("work_item_id"))
+
+
+@pytest.mark.anyio
+async def test_scheduler_requeues_expired_running_items_and_run_can_finish(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Expired lease project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="dummy")
+        session.add(run)
+        await session.flush()
+
+        agent = Agent(
+            tenant_id=tenant_id,
+            name="runtime-worker",
+            kind="worker",
+            executors=["dummy"],
+            capabilities=["runtime-worker"],
+            max_concurrency=1,
+            status="ACTIVE",
+        )
+        session.add(agent)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_BACKEND",
+            key="CODE_BACKEND",
+            status="RUNNING",
+            priority=10_000,
+            executor="dummy",
+            assigned_agent_id=agent.id,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+            lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            required_capabilities=["runtime-worker"],
+        )
+        session.add(work_item)
+        await session.commit()
+        agent_id = agent.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        assert work_item.status == "QUEUED"
+        assert work_item.assigned_agent_id is None
+        assert work_item.started_at is None
+
+        lease_event = (
+            await session.execute(
+                select(RunEvent)
+                .where(RunEvent.run_id == run_id, RunEvent.event_type == "WORK_ITEM_LEASE_EXPIRED")
+                .order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().one()
+        assert lease_event.work_item_id == work_item_id
+        assert lease_event.payload == {
+            "work_item_id": str(work_item_id),
+            "previous_status": "RUNNING",
+            "lease_expires_at": lease_event.payload["lease_expires_at"],
+        }
+
+    await tick_worker(agent_id)
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        assert work_item.status == "DONE"
+
+        event_types = [
+            event.event_type
+            for event in (
+                await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+            ).scalars().all()
+        ]
+        assert "WORK_ITEM_LEASE_EXPIRED" in event_types
+        assert "WORK_ITEM_DONE" in event_types
+        assert "RUN_COMPLETED" in event_types
+
+
+@pytest.mark.anyio
+async def test_keep_work_item_lease_alive_refreshes_running_item(runtime_db):
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Lease refresh project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="dummy")
+        session.add(run)
+        await session.flush()
+
+        agent = Agent(
+            tenant_id=tenant_id,
+            name="runtime-worker",
+            kind="worker",
+            executors=["dummy"],
+            capabilities=["runtime-worker"],
+            max_concurrency=1,
+            status="ACTIVE",
+        )
+        session.add(agent)
+        await session.flush()
+
+        original_lease = datetime.now(timezone.utc) + timedelta(seconds=1)
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_BACKEND",
+            key="CODE_BACKEND",
+            status="RUNNING",
+            priority=10_000,
+            executor="dummy",
+            assigned_agent_id=agent.id,
+            started_at=datetime.now(timezone.utc),
+            lease_expires_at=original_lease,
+            required_capabilities=["runtime-worker"],
+        )
+        session.add(work_item)
+        await session.commit()
+        agent_id = agent.id
+        work_item_id = work_item.id
+
+    lease_task = asyncio.create_task(
+        keep_work_item_lease_alive(
+            runtime_db,
+            agent_id=agent_id,
+            work_item_id=work_item_id,
+            lease_seconds=1,
+            interval_seconds=0.05,
+        )
+    )
+    await asyncio.sleep(0.12)
+    lease_task.cancel()
+    await lease_task
+
+    async with runtime_db() as session:
+        agent = await session.get(Agent, agent_id)
+        work_item = await session.get(WorkItem, work_item_id)
+        assert agent is not None
+        assert work_item is not None
+        assert agent.last_heartbeat_at is not None
+        assert work_item.lease_expires_at is not None
+        refreshed_lease = work_item.lease_expires_at
+        if refreshed_lease.tzinfo is None:
+            refreshed_lease = refreshed_lease.replace(tzinfo=timezone.utc)
+        assert refreshed_lease > original_lease
+
+
+@pytest.mark.anyio
+async def test_external_worker_marks_item_failed_when_executor_raises(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    class BrokenExecutor:
+        name = "dummy"
+
+        async def execute(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(worker_service, "build_executor", lambda *_args, **_kwargs: BrokenExecutor())
+
+    async with runtime_db() as session:
+        project = Project(name="Broken worker project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="dummy")
+        session.add(run)
+        await session.flush()
+
+        agent = Agent(
+            tenant_id=tenant_id,
+            name="runtime-worker",
+            kind="worker",
+            executors=["dummy"],
+            capabilities=["runtime-worker"],
+            max_concurrency=1,
+            status="ACTIVE",
+        )
+        session.add(agent)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_BACKEND",
+            key="CODE_BACKEND",
+            status="QUEUED",
+            priority=10_000,
+            executor="dummy",
+            required_capabilities=["runtime-worker"],
+        )
+        session.add(work_item)
+        await session.commit()
+        agent_id = agent.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    await tick_worker(agent_id)
+
+    async with runtime_db() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        assert work_item.status == "FAILED"
+        assert work_item.last_error == "boom"
+
+        failed_events = (
+            await session.execute(
+                select(RunEvent)
+                .where(RunEvent.run_id == run_id, RunEvent.event_type == "WORK_ITEM_FAILED")
+                .order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        assert failed_events
+        assert failed_events[-1].work_item_id == work_item_id
+        assert failed_events[-1].payload == {
+            "work_item_id": str(work_item_id),
+            "error": "boom",
+            "exception_class": "RuntimeError",
+            "failure_stage": "executor_execute",
+        }
 
 
 @pytest.mark.anyio

@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     run_auto_push_branch_on_completion: bool = True
     preview_host: str = "127.0.0.1"
     preview_default_ttl_hours: int = 24
-    preview_max_per_project: int = 5
+    preview_max_per_project: int = 100
     preview_max_global: int = 20
     git_author_name: str = "Agentic SDLC"
     git_author_email: str = "agentic-sdlc@local"

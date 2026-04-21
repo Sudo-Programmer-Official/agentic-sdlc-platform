@@ -76,6 +76,43 @@ async def test_public_project_routes_resolve_to_db_backed_handlers(db_session):
 
 
 @pytest.mark.anyio
+async def test_public_runs_list_prioritizes_active_run_over_newer_failed_run(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Run ordering", tenant_id=tenant_id, description="db-backed")
+    session.add(project)
+    await session.flush()
+
+    running_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="RUNNING",
+        executor="codex",
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+    session.add(running_run)
+    await session.flush()
+
+    failed_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="FAILED",
+        executor="codex",
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        finished_at=datetime.now(timezone.utc) - timedelta(seconds=20),
+    )
+    session.add(failed_run)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        runs_resp = await client.get(f"/api/v1/projects/{project.id}/runs")
+
+    assert runs_resp.status_code == 200
+    data = runs_resp.json()
+    assert [row["id"] for row in data[:2]] == [str(running_run.id), str(failed_run.id)]
+    assert data[0]["status"] == "RUNNING"
+
+
+@pytest.mark.anyio
 async def test_public_project_summary_exposes_latest_delivery_state(db_session):
     session, tenant_id = db_session
     project = Project(name="Delivery summary", tenant_id=tenant_id, description="db-backed")

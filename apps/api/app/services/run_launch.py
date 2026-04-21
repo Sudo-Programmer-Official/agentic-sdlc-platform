@@ -212,14 +212,15 @@ async def launch_run_for_project(
             raise ValueError("Task not found")
         run_summary = _build_task_run_summary(selected_task)
 
-    existing_running = await session.scalar(
+    active_statuses = ("QUEUED", "RUNNING")
+    existing_active = await session.scalar(
         select(func.count()).select_from(
             select(Run.id)
-            .where(Run.project_id == project_id, Run.tenant_id == tenant_id, Run.status == "RUNNING")
+            .where(Run.project_id == project_id, Run.tenant_id == tenant_id, Run.status.in_(active_statuses))
             .subquery()
         )
     ) or 0
-    if existing_running > 0:
+    if existing_active > 0:
         raise ValueError(
             "A run is already in progress for this project; finish or cancel it before starting another."
         )

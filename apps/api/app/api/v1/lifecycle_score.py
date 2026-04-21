@@ -160,10 +160,10 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
             func.count().filter(Run.status == "COMPLETED"),
             func.count().filter(Run.status == "FAILED"),
             func.count().filter(Run.status == "CANCELED"),
-            func.count().filter(Run.status == "RUNNING"),
+            func.count().filter(Run.status.in_(["QUEUED", "RUNNING"])),
         ).where(Run.project_id == project_id)
     )
-    total_runs, completed_runs, failed_runs, canceled_runs, running_runs = runs_counts.first()
+    total_runs, completed_runs, failed_runs, canceled_runs, active_runs = runs_counts.first()
 
     # Durations for completed runs
     completed_rows = (
@@ -185,7 +185,7 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
         execution_score = 50
         stability_score = 50
     else:
-        running_penalty = 20 if running_runs > 0 else 0
+        running_penalty = 20 if active_runs > 0 else 0
         execution_score = int(max(0, 100 * completion_ratio - 30 * failure_ratio - running_penalty))
         if durations:
             avg_dur = sum(durations) / len(durations)
@@ -205,7 +205,7 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
         "completed_runs": completed_runs,
         "failed_runs": failed_runs,
         "canceled_runs": canceled_runs,
-        "running_runs": running_runs,
+        "running_runs": active_runs,
         "completion_ratio": completion_ratio,
         "failure_ratio": failure_ratio,
         "avg_duration_seconds": (sum(durations) / len(durations)) if durations else None,
@@ -251,7 +251,7 @@ async def lifecycle_score(project_id: uuid.UUID, session: AsyncSession = Depends
         warnings.append("Trace coverage below 70%")
     if failure_ratio > 0.30 and total_runs > 0:
         warnings.append("Run failure ratio above 30%")
-    if running_runs > 0:
+    if active_runs > 0:
         warnings.append("There is an active run in progress")
     if completed_runs == 0 and total_runs == 0:
         warnings.append("No runs executed yet")

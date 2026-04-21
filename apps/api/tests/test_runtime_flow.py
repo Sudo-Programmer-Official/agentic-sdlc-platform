@@ -1237,6 +1237,28 @@ async def test_launch_run_bootstraps_work_items_before_background_execution(monk
 
 
 @pytest.mark.anyio
+async def test_launch_run_rejects_when_queued_run_already_exists(runtime_db):
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Queued run guard project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        session.add(Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="codex"))
+        await session.commit()
+
+        with pytest.raises(ValueError, match="already in progress"):
+            await launch_run_for_project(
+                session,
+                tenant_id=tenant_id,
+                project_id=project.id,
+                executor_name="codex",
+                schedule=False,
+            )
+
+
+@pytest.mark.anyio
 async def test_launch_run_fails_closed_when_workspace_prepare_errors(monkeypatch, runtime_db, tmp_path):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("OPENAI_API_KEY", "")

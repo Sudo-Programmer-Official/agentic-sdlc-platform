@@ -50,6 +50,7 @@ Do not reproduce full diffs or file contents.
 Do not invent files outside the repo. Do not include explanations outside JSON."""
 
 STRUCTURED_OUTPUT_RETRY_LIMIT = 1
+REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT = 2
 
 log = logging.getLogger("app.runtime.codex_executor")
 _UNIFIED_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$")
@@ -177,6 +178,21 @@ def _fix_test_failure_writable_scope(
     if non_test_allowed:
         return _unique_paths(non_test_allowed + scoped_tests)
     return _unique_paths(scoped_tests or preferred or allowed_files)
+
+
+def _write_tests_writable_scope(
+    *,
+    target_files: list[str],
+    allowed_files: list[str],
+) -> list[str]:
+    preferred_tests = [path for path in _unique_paths(target_files) if _looks_like_test_path(path)]
+    if preferred_tests:
+        return preferred_tests
+    scoped_tests = [path for path in _unique_paths(allowed_files) if _looks_like_test_path(path)]
+    if scoped_tests:
+        return scoped_tests
+    fallback = _unique_paths(target_files or allowed_files)
+    return fallback
 
 
 def _edit_budget_from_payload(payload: dict[str, Any] | None) -> dict[str, int | str | None]:
@@ -311,7 +327,13 @@ class CodexExecutor(TaskExecutor):
             return policy.selected_model_tier
         if retry_reason in {"rate_limit", "timeout", "transient_network_failure"}:
             return policy.selected_model_tier
-        if retry_reason == "structured_parser_failure" and work_item.type in {"PLAN_DAG", "WRITE_TESTS", "CODE_FRONTEND"}:
+        if retry_reason in {"structured_parser_failure", "stage_scope_violation"} and work_item.type in {
+            "PLAN_DAG",
+            "WRITE_TESTS",
+            "CODE_FRONTEND",
+            "REVIEW_DIFF",
+            "REVIEW_INTEGRATION",
+        }:
             return policy.max_model_tier
         if work_item.type in {"FIX_TEST_FAILURE", "REVIEW_DIFF", "REVIEW_INTEGRATION"} or policy.risk_level == "high":
             return policy.max_model_tier
@@ -367,6 +389,11 @@ class CodexExecutor(TaskExecutor):
         )
         if work_item.type == "FIX_TEST_FAILURE":
             writable_scope = _fix_test_failure_writable_scope(work_item.payload, contract, target_files, allowed_files)
+            if writable_scope:
+                target_files = writable_scope
+                allowed_files = list(writable_scope)
+        elif work_item.type == "WRITE_TESTS":
+            writable_scope = _write_tests_writable_scope(target_files=target_files, allowed_files=allowed_files)
             if writable_scope:
                 target_files = writable_scope
                 allowed_files = list(writable_scope)
@@ -763,7 +790,8 @@ class CodexExecutor(TaskExecutor):
             }
 
         patch_guard = None
-        repair_attempted = False
+        patch_repair_attempted = False
+        stage_scope_repair_attempted = False
         while True:
             patch_guard = evaluate_patch_guard(
                 actions=plan.actions,
@@ -801,6 +829,87 @@ class CodexExecutor(TaskExecutor):
                     "warnings": ["requires_confirmation"],
                 }
             if not patch_guard.ok:
+                repair_error: Exception | None = None
+                if (
+                    stage_violations
+                    and not stage_scope_repair_attempted
+                    and self._is_stage_scope_repair_candidate(
+                        work_item=work_item,
+                        violations=stage_violations,
+                    )
+                ):
+                    stage_scope_repair_attempted = True
+                    await self._job_manager.record_retry(prepared.job_id, "stage_scope_violation")
+                    try:
+                        plan, raw, repair_usage, repair_model_tier, repair_model_name = (
+                            await self._repair_plan_after_stage_scope_violation(
+                                client=client,
+                                prepared=prepared,
+                                user_prompt=user_prompt,
+                                allowed_files=allowed_files,
+                                violations=stage_violations,
+                                work_item=work_item,
+                                contract=contract,
+                            )
+                        )
+                    except Exception as repair_exc:
+                        repair_error = repair_exc
+                    else:
+                        repair_input_tokens = int(
+                            repair_usage.get("input_tokens") or estimate_tokens(system_prompt + user_prompt)
+                        )
+                        repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
+                        usage_input_tokens += repair_input_tokens
+                        usage_output_tokens += repair_output_tokens
+                        usage_cost_cents = round(
+                            usage_cost_cents
+                            + self._job_manager.estimate_cost_cents(
+                                repair_model_tier,
+                                repair_input_tokens,
+                                repair_output_tokens,
+                            ),
+                            4,
+                        )
+                        usage = {
+                            "input_tokens": usage_input_tokens,
+                            "output_tokens": usage_output_tokens,
+                        }
+                        attempt_tiers.append(repair_model_tier)
+                        effective_model_tier = repair_model_tier
+                        effective_model_name = repair_model_name
+                        contract = await self._record_execution_budget(
+                            context,
+                            prepared_job_id=str(prepared.job_id),
+                            work_item_id=str(work_item.id),
+                            selected_model_tier=repair_model_tier,
+                            input_tokens=repair_input_tokens,
+                            output_tokens=repair_output_tokens,
+                        )
+                        if contract is not None and contract.budget.budget_mode == "BLOCKED":
+                            next_action = "Split the run or reset the run budget before executing more autonomous work."
+                            await self._job_manager.fail_job(
+                                prepared.job_id,
+                                reason="run_budget_exhausted",
+                                next_action=next_action,
+                                error_kind="run_budget_exhausted",
+                                input_tokens=usage_input_tokens,
+                                output_tokens=usage_output_tokens,
+                                actual_cost_cents=usage_cost_cents,
+                                details={
+                                    "attempt_tiers": attempt_tiers,
+                                    "provider": self.settings.llm_provider,
+                                    "model_name": repair_model_name,
+                                    "budget": contract.budget.to_dict(),
+                                },
+                            )
+                            return self._run_budget_exhausted_result(
+                                contract=contract,
+                                prepared_job_id=str(prepared.job_id),
+                                next_action=next_action,
+                            )
+                        continue
+                if repair_error is not None:
+                    patch_guard.violations.append(f"Automatic stage-scope repair failed: {repair_error}")
                 await self._job_manager.fail_job(
                     prepared.job_id,
                     reason="patch_guard_violation",
@@ -892,14 +1001,14 @@ class CodexExecutor(TaskExecutor):
                         continue
             except Exception as exc:
                 if (
-                    not repair_attempted
+                    not patch_repair_attempted
                     and self._is_patch_repair_candidate(
                         action=current_action,
                         error=exc,
                         mutations_applied=mutations_applied,
                     )
                 ):
-                    repair_attempted = True
+                    patch_repair_attempted = True
                     await self._job_manager.record_retry(prepared.job_id, "patch_apply_error")
                     try:
                         plan, raw, repair_usage, repair_model_tier, repair_model_name = await self._repair_plan_after_patch_failure(
@@ -1366,6 +1475,22 @@ class CodexExecutor(TaskExecutor):
             or "error: patch failed:" in lowered
         )
 
+    def _is_stage_scope_repair_candidate(
+        self,
+        *,
+        work_item: WorkItem,
+        violations: list[str],
+    ) -> bool:
+        if not violations:
+            return False
+        if "PLAN" in work_item.type:
+            return True
+        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+            return True
+        if work_item.type == "WRITE_TESTS":
+            return any("WRITE_TESTS may only modify Python test files" in violation for violation in violations)
+        return False
+
     def _is_likely_truncated_json_output(self, raw: str, error: Exception) -> bool:
         if not isinstance(error, json.JSONDecodeError):
             return False
@@ -1511,6 +1636,7 @@ class CodexExecutor(TaskExecutor):
             repair_prompt += (
                 "\nFor WRITE_TESTS, prefer write_file with the full updated contents of the target test file."
                 " Do not return another apply_patch diff unless it is tiny and exact."
+                " Never modify non-test files such as index.html."
             )
         current_prompt = repair_prompt
         current_max_tokens = self.settings.codex_max_tokens
@@ -1520,7 +1646,7 @@ class CodexExecutor(TaskExecutor):
         effective_model_tier = prepared.policy.selected_model_tier
         effective_model_name = prepared.model_name or self.settings.codex_model
         system_prompt = self._system_prompt_for(work_item)
-        for retry_count in range(2):
+        for retry_count in range(REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT + 1):
             effective_model_tier = self._effective_model_tier(
                 policy=prepared.policy,
                 work_item=work_item,
@@ -1545,11 +1671,18 @@ class CodexExecutor(TaskExecutor):
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
-                if parse_failure and retry_count == 0:
+                if parse_failure and retry_count < REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT:
                     await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
+                    retry_reason = "structured_parser_failure"
+                    next_retry_tier = self._effective_model_tier(
+                        policy=prepared.policy,
+                        work_item=work_item,
+                        attempt=retry_count + 2,
+                        retry_reason=retry_reason,
+                    )
                     current_max_tokens = self._parse_retry_max_tokens(
                         current_max_tokens=current_max_tokens,
-                        selected_model_tier=effective_model_tier,
+                        selected_model_tier=next_retry_tier,
                         work_item=work_item,
                         contract=contract,
                     )
@@ -1565,6 +1698,110 @@ class CodexExecutor(TaskExecutor):
                 raise ValueError(f"Patch repair output was invalid: {exc}") from exc
         log.warning(
             "AI patch repair retry run_id=%s work_item_id=%s ai_job_id=%s work_item_type=%s",
+            work_item.run_id,
+            work_item.id,
+            prepared.job_id,
+            work_item.type,
+        )
+        return plan, raw, usage, effective_model_tier, effective_model_name
+
+    async def _repair_plan_after_stage_scope_violation(
+        self,
+        *,
+        client: OpenAIClient,
+        prepared,
+        user_prompt: str,
+        allowed_files: list[str],
+        violations: list[str],
+        work_item: WorkItem,
+        contract: ExecutionContract | None,
+    ) -> tuple[CodexPlan, str, dict[str, Any], str, str]:
+        allowed_text = ", ".join(allowed_files[:6]) if allowed_files else "the scoped files"
+        repair_prompt = (
+            f"{user_prompt}\n\n"
+            "The previous action plan violated the stage scope.\n"
+            f"Violations: {'; '.join(violations)}\n"
+            "Do not redesign the solution or broaden the run plan; repair the existing scoped change only.\n"
+            f"Stay within these files: {allowed_text}.\n"
+            "Return a new JSON object matching the schema.\n"
+            "Do not include prose outside the JSON object."
+        )
+        if "PLAN" in work_item.type:
+            repair_prompt += (
+                "\nThis is a planning stage. Return only note actions that describe the intended patch, tests, "
+                "and validation sequence. Never emit apply_patch, write_file, or delete_file actions."
+            )
+        elif work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+            repair_prompt += (
+                "\nThis is a review stage. Return only note actions with concise findings or approval guidance. "
+                "Never emit apply_patch, write_file, or delete_file actions."
+            )
+        elif work_item.type == "WRITE_TESTS":
+            repair_prompt += (
+                "\nWRITE_TESTS may only modify Python test files whose basename starts with test_. "
+                "Touch only scoped test files and prefer write_file with the full updated test contents."
+                " Never modify non-test files such as index.html."
+            )
+        current_prompt = repair_prompt
+        current_max_tokens = self.settings.codex_max_tokens
+        raw = ""
+        usage: dict[str, Any] = {}
+        retry_reason = "stage_scope_violation"
+        effective_model_tier = prepared.policy.selected_model_tier
+        effective_model_name = prepared.model_name or self.settings.codex_model
+        system_prompt = self._system_prompt_for(work_item)
+        for retry_count in range(REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT + 1):
+            effective_model_tier = self._effective_model_tier(
+                policy=prepared.policy,
+                work_item=work_item,
+                attempt=retry_count + 1,
+                retry_reason=retry_reason,
+            )
+            effective_model_name = self._model_name_for_tier(
+                effective_model_tier,
+                fallback=prepared.model_name or self.settings.codex_model,
+            )
+            raw, usage = await client.generate(
+                system_prompt,
+                current_prompt,
+                model=effective_model_name,
+                temperature=self.settings.codex_temperature,
+                max_tokens=current_max_tokens,
+                timeout=self.settings.codex_timeout_seconds,
+            )
+            try:
+                data = json.loads(raw)
+                plan = CodexPlan.model_validate(data)
+                break
+            except Exception as exc:
+                parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
+                if parse_failure and retry_count < REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT:
+                    await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
+                    retry_reason = "structured_parser_failure"
+                    next_retry_tier = self._effective_model_tier(
+                        policy=prepared.policy,
+                        work_item=work_item,
+                        attempt=retry_count + 2,
+                        retry_reason=retry_reason,
+                    )
+                    current_max_tokens = self._parse_retry_max_tokens(
+                        current_max_tokens=current_max_tokens,
+                        selected_model_tier=next_retry_tier,
+                        work_item=work_item,
+                        contract=contract,
+                    )
+                    current_prompt = self._build_parse_retry_prompt(
+                        user_prompt=repair_prompt,
+                        raw=raw,
+                        error=exc,
+                        work_item=work_item,
+                        allowed_files=allowed_files,
+                        retry_count=retry_count + 1,
+                    )
+                    continue
+                raise ValueError(f"Stage-scope repair output was invalid: {exc}") from exc
+        log.warning(
+            "AI stage-scope repair retry run_id=%s work_item_id=%s ai_job_id=%s work_item_type=%s",
             work_item.run_id,
             work_item.id,
             prepared.job_id,

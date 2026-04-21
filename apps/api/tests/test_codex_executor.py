@@ -16,6 +16,7 @@ from app.runtime.codex_executor import (
     _is_static_frontend_scope,
     _stage_scope_violations,
     _target_files_from_payload,
+    _write_tests_writable_scope,
     _verification_from_action_scope,
     CodexExecutor,
 )
@@ -31,6 +32,8 @@ class SequencePlanClient:
         self._plans = list(plans)
         self.prompts: list[str] = []
         self.system_prompts: list[str] = []
+        self.max_tokens: list[int | None] = []
+        self.models: list[str | None] = []
 
     def method_name(self) -> str:
         return "sequence-plan-client"
@@ -38,9 +41,11 @@ class SequencePlanClient:
     def sdk_version(self) -> str:
         return "test"
 
-    async def generate(self, system_prompt, user_prompt, **_kwargs):
+    async def generate(self, system_prompt, user_prompt, **kwargs):
         self.system_prompts.append(system_prompt)
         self.prompts.append(user_prompt)
+        self.max_tokens.append(kwargs.get("max_tokens"))
+        self.models.append(kwargs.get("model"))
         if not self._plans:
             raise AssertionError("No plan responses remaining")
         return json.dumps(self._plans.pop(0)), {"input_tokens": 1, "output_tokens": 1}
@@ -222,6 +227,24 @@ def test_fix_test_failure_writable_scope_keeps_failing_tests_in_scope():
     )
 
     assert writable_scope == ["index.html", "test_index_html.py"]
+
+
+def test_write_tests_writable_scope_prefers_only_test_targets():
+    writable_scope = _write_tests_writable_scope(
+        target_files=["test_index_html.py"],
+        allowed_files=["index.html", "test_index_html.py"],
+    )
+
+    assert writable_scope == ["test_index_html.py"]
+
+
+def test_write_tests_writable_scope_falls_back_to_scoped_tests_when_targets_are_missing():
+    writable_scope = _write_tests_writable_scope(
+        target_files=[],
+        allowed_files=["index.html", "tests/test_nav.py"],
+    )
+
+    assert writable_scope == ["tests/test_nav.py"]
 
 
 def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
@@ -442,6 +465,119 @@ def test_patch_guard_uses_apply_patch_path_when_diff_headers_are_missing():
 
     assert decision.touched_files == ["test_index_html.py"]
     assert decision.ok is True
+
+
+@pytest.mark.anyio
+async def test_codex_executor_repairs_plan_stage_mutation_by_regenerating_notes(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    original_html = "<nav><a href='#home'>Home</a></nav>\n"
+    index_path.write_text(original_html, encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Plan stage scope repair", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "index.html"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequencePlanClient(
+        [
+            {
+                "status": "DONE",
+                "message": "mutating plan",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "path": "index.html",
+                        "patch": (
+                            "diff --git a/index.html b/index.html\n"
+                            "--- a/index.html\n"
+                            "+++ b/index.html\n"
+                            "@@ -1 +1 @@\n"
+                            "-<nav><a href='#home'>Home</a></nav>\n"
+                            "+<nav style='background:pink'><a href='#home'>Home</a></nav>\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+            {
+                "status": "DONE",
+                "message": "repaired plan",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "note",
+                        "text": "Update index.html navigation styles to a pink gradient with white text, then add targeted validation and review steps.",
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Change navigation color to pink",
+                    "expected_files": ["index.html"],
+                    "steps": [
+                        {
+                            "title": "Plan navigation color update",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "PLAN_DAG",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert index_path.read_text(encoding="utf-8") == original_html
+    assert len(client.prompts) == 2
+    assert "The previous action plan violated the stage scope." in client.prompts[1]
+    assert "This is a planning stage. Return only note actions" in client.prompts[1]
+    assert result["payload"]["patch_guard"]["touched_files"] == []
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
 
 
 @pytest.mark.anyio
@@ -1432,6 +1568,268 @@ async def test_fix_test_failure_retry_escalates_to_premium_model(
         ).scalars().one()
 
     assert ai_job.actual_cost_cents == pytest.approx(0.0065, rel=1e-6)
+
+
+@pytest.mark.anyio
+async def test_write_tests_patch_repair_parse_retry_escalates_to_premium_model(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<nav><a href='#home'>Home</a></nav>\n", encoding="utf-8")
+    test_path = tmp_path / "test_index_html.py"
+    test_path.write_text(
+        "def test_index_html_exists():\n"
+        "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+        "        assert '<nav>' in handle.read()\n",
+        encoding="utf-8",
+    )
+
+    async with db_session_factory() as session:
+        project = Project(name="Write tests repair escalation", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="WRITE_TESTS",
+            key="WRITE_TESTS",
+            status="QUEUED",
+            executor="codex",
+            payload={
+                "target_files": ["test_index_html.py"],
+                "related_files": ["index.html"],
+            },
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            {
+                "status": "DONE",
+                "message": "first write tests patch",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "path": "test_index_html.py",
+                        "patch": (
+                            "--- a/test_index_html.py\n"
+                            "+++ b/test_index_html.py\n"
+                            "@@ def test_index_html_exists():\n"
+                            "+def test_index_html_nav_has_home_anchor():\n"
+                            "+    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "+        assert \"href='#home'\" in handle.read()\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+            "{\"status\":\"DONE\",\"message\":\"repair",
+            {
+                "status": "DONE",
+                "message": "repair after retry",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "test_index_html.py",
+                        "content": (
+                            "def test_index_html_exists():\n"
+                            "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "        assert '<nav>' in handle.read()\n"
+                            "\n"
+                            "def test_index_html_nav_has_home_anchor():\n"
+                            "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "        assert \"href='#home'\" in handle.read()\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Add tests for pink navigation styling",
+                    "expected_files": ["test_index_html.py"],
+                    "steps": [
+                        {
+                            "title": "Add tests for pink navigation styling",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "WRITE_TESTS",
+                            "expected_files": ["test_index_html.py"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "test_index_html_nav_has_home_anchor" in test_path.read_text(encoding="utf-8")
+    assert client.models == ["gpt-4.1-mini", "gpt-4.1-mini", "gpt-4.1"]
+    assert "structured output retry 1" in client.prompts[2].lower()
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+
+@pytest.mark.anyio
+async def test_write_tests_patch_repair_survives_double_parse_retry_before_success(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<nav><a href='#home'>Home</a></nav>\n", encoding="utf-8")
+    test_path = tmp_path / "test_index_html.py"
+    test_path.write_text(
+        "def test_index_html_exists():\n"
+        "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+        "        assert '<nav>' in handle.read()\n",
+        encoding="utf-8",
+    )
+
+    async with db_session_factory() as session:
+        project = Project(name="Write tests repair double retry", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="WRITE_TESTS",
+            key="WRITE_TESTS",
+            status="QUEUED",
+            executor="codex",
+            payload={
+                "target_files": ["test_index_html.py"],
+                "related_files": ["index.html"],
+            },
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            {
+                "status": "DONE",
+                "message": "first write tests patch",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "path": "test_index_html.py",
+                        "patch": (
+                            "--- a/test_index_html.py\n"
+                            "+++ b/test_index_html.py\n"
+                            "@@ def test_index_html_exists():\n"
+                            "+def test_index_html_nav_has_home_anchor():\n"
+                            "+    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "+        assert \"href='#home'\" in handle.read()\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+            "{\"status\":\"DONE\",\"message\":\"repair",
+            "{\"status\":\"DONE\",\"message\":\"repair retry",
+            {
+                "status": "DONE",
+                "message": "repair after second parser retry",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "test_index_html.py",
+                        "content": (
+                            "def test_index_html_exists():\n"
+                            "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "        assert '<nav>' in handle.read()\n"
+                            "\n"
+                            "def test_index_html_nav_has_home_anchor():\n"
+                            "    with open('index.html', 'r', encoding='utf-8') as handle:\n"
+                            "        assert \"href='#home'\" in handle.read()\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Add tests for pink navigation styling",
+                    "expected_files": ["test_index_html.py"],
+                    "steps": [
+                        {
+                            "title": "Add tests for pink navigation styling",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "WRITE_TESTS",
+                            "expected_files": ["test_index_html.py"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "test_index_html_nav_has_home_anchor" in test_path.read_text(encoding="utf-8")
+    assert client.models == ["gpt-4.1-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4.1"]
+    assert "structured output retry 1" in client.prompts[2].lower()
+    assert "structured output retry 2" in client.prompts[3].lower()
+    assert client.max_tokens[2] > client.max_tokens[1]
+    assert client.max_tokens[3] > client.max_tokens[2]
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
 
 
 @pytest.mark.anyio

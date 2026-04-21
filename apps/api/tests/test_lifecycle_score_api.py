@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Document, Project, Task, Trace
+from app.db.models import Document, Project, Run, Task, Trace
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -95,3 +95,50 @@ async def test_public_lifecycle_score_route_returns_score_for_seeded_project(db_
     assert "health_index" in data
     assert data["counts"]["orphan_tasks"] == 0
     assert data["coverage"]["tasks_with_trace"] == 1
+
+
+@pytest.mark.anyio
+async def test_public_lifecycle_score_treats_queued_run_as_active(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Lifecycle queued active", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    document = Document(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        type="prd",
+        version=1,
+        title="PRD",
+        body="Build the feature",
+    )
+    session.add(document)
+    await session.flush()
+    task = Task(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        document_id=document.id,
+        title="Task",
+        status="PENDING",
+    )
+    session.add(task)
+    await session.flush()
+    session.add(
+        Trace(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            from_type="document",
+            from_id=document.id,
+            to_type="task",
+            to_id=task.id,
+            relation_type="derives",
+        )
+    )
+    session.add(Run(project_id=project.id, tenant_id=tenant_id, status="QUEUED", executor="codex"))
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/v1/projects/{project.id}/lifecycle-score")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "There is an active run in progress" in data["warnings"]

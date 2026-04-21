@@ -241,10 +241,25 @@ async def _load_recent_runs_and_artifacts(
     run_by_id = {run.id: run for run in runs}
     summaries.sort(
         key=lambda summary: (
-            run_by_id.get(summary.run_id).started_at if run_by_id.get(summary.run_id) else None
-        )
-        or summary.run_created_at
-        or summary.created_at,
+            2
+            if str(summary.status or "").upper() == "RUNNING"
+            else 1
+            if str(summary.status or "").upper() == "QUEUED"
+            else 0,
+            (
+                (
+                    (run_by_id.get(summary.run_id).started_at if run_by_id.get(summary.run_id) else None)
+                    or summary.run_created_at
+                    or summary.created_at
+                ).timestamp()
+                if (
+                    (run_by_id.get(summary.run_id).started_at if run_by_id.get(summary.run_id) else None)
+                    or summary.run_created_at
+                    or summary.created_at
+                )
+                else float("-inf")
+            ),
+        ),
         reverse=True,
     )
     artifacts = (

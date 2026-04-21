@@ -3,11 +3,23 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, case, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Approval, Artifact, Run, RunEvent, RunSummary, WorkItem
 from app.services.work_item_state import is_blocking_failure
+
+
+def _run_activity_ordering():
+    return (
+        case(
+            (Run.status == "RUNNING", 0),
+            (Run.status == "QUEUED", 1),
+            else_=2,
+        ),
+        func.coalesce(Run.started_at, Run.created_at, Run.updated_at).desc(),
+        Run.id.desc(),
+    )
 
 
 def _elapsed_seconds(run: Run) -> float | None:
@@ -210,7 +222,7 @@ async def ensure_project_run_summaries(
         await session.execute(
             select(Run)
             .where(Run.project_id == project_id, Run.tenant_id == tenant_id)
-            .order_by(Run.created_at.desc())
+            .order_by(*_run_activity_ordering())
             .limit(limit)
         )
     ).scalars().all()

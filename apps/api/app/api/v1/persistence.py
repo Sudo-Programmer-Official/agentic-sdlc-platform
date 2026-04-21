@@ -7,7 +7,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, func, and_, exists
+from sqlalchemy import select, func, and_, exists, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -126,6 +126,20 @@ RUN_ALLOWED = {
     "FAILED": set(),
     "CANCELED": set(),
 }
+
+ACTIVE_RUN_STATUSES = ("RUNNING", "QUEUED")
+
+
+def _run_activity_ordering():
+    return (
+        case(
+            (Run.status == "RUNNING", 0),
+            (Run.status == "QUEUED", 1),
+            else_=2,
+        ),
+        func.coalesce(Run.started_at, Run.created_at, Run.updated_at).desc(),
+        Run.id.desc(),
+    )
 
 
 def _allowed_for(status: str) -> list[str]:
@@ -337,7 +351,9 @@ async def list_runs(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     result = await session.execute(
-        select(Run).where(Run.project_id == project_id, Run.tenant_id == ctx.tenant_id).order_by(Run.created_at.desc())
+        select(Run)
+        .where(Run.project_id == project_id, Run.tenant_id == ctx.tenant_id)
+        .order_by(*_run_activity_ordering())
     )
     runs = result.scalars().all()
     return [_run_out(r) for r in runs]
@@ -1471,7 +1487,7 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
     latest_run_row = await session.scalar(
         select(Run)
         .where(Run.project_id == project_id, Run.tenant_id == project.tenant_id)
-        .order_by(Run.created_at.desc(), Run.id.desc())
+        .order_by(*_run_activity_ordering())
         .limit(1)
     )
     latest_run = None

@@ -45,6 +45,31 @@ def test_task_payload_from_summary_infers_frontend_entrypoint_from_hero_goal():
     assert payload["expected_files"] == ["index.html"]
 
 
+def test_task_payload_from_summary_ignores_sentence_artifact_file_hint():
+    payload = _task_payload_from_summary(
+        {
+            "task_id": "task-footer",
+            "task_title": "Enhance footer and main section",
+            "goal": "Enhance footer and main section: Please work on main section and footer section make all sync in design so that it look nice overall..along with header",
+            "task_description": "Please work on main section and footer section make all sync in design so that it look nice overall..along with header",
+        }
+    )
+
+    assert payload["expected_files"] == ["index.html"]
+
+
+def test_task_payload_from_summary_keeps_valid_text_file_hints():
+    payload = _task_payload_from_summary(
+        {
+            "task_id": "task-hints",
+            "task_title": "Polish layout",
+            "goal": "Update index.html and test_index_html.py to reflect the new hero and footer.",
+        }
+    )
+
+    assert payload["expected_files"] == ["index.html", "test_index_html.py"]
+
+
 def test_payload_for_write_tests_targets_generated_test_file():
     payload = _payload_for_stage(
         "WRITE_TESTS",

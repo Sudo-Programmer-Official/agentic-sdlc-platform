@@ -15,6 +15,11 @@ log = logging.getLogger("app.runtime")
 PATH_HINT_PATTERN = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,12})(?![\w./-])")
 FRONTEND_SUFFIXES = {".html", ".css", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}
 BACKEND_SUFFIXES = {".py", ".rb", ".go", ".rs", ".java", ".kt", ".php", ".cs", ".scala"}
+TEXT_HINT_SUFFIXES = (
+    FRONTEND_SUFFIXES
+    | BACKEND_SUFFIXES
+    | {".json", ".md", ".txt", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".env", ".sh", ".sql", ".xml"}
+)
 FRONTEND_KEYWORDS = {
     "homepage",
     "landing page",
@@ -49,14 +54,32 @@ class TaskScopeError(ValueError):
     """Raised when a task-scoped run cannot determine a safe file envelope."""
 
 
-def _normalized_paths(values: list[str]) -> list[str]:
+def _looks_like_text_file_hint(path: str) -> bool:
+    pure = PurePosixPath(path)
+    name = pure.name
+    if not name:
+        return False
+    # Reject punctuation artifacts from prose such as "overall..along".
+    if ".." in name:
+        return False
+    suffix = pure.suffix.lower()
+    if suffix in TEXT_HINT_SUFFIXES:
+        return True
+    # Allow uncommon extensions only when a directory prefix exists.
+    return len(pure.parts) > 1 and bool(suffix) and len(suffix) <= 13
+
+
+def _normalized_paths(values: list[str], *, from_text: bool = False) -> list[str]:
     normalized: list[str] = []
     for value in values:
         candidate = value.strip().strip("`'\".,:;()[]{}")
         candidate = candidate.lstrip("./")
         if not candidate or candidate.startswith(("http://", "https://")):
             continue
-        normalized.append(str(PurePosixPath(candidate)))
+        normalized_path = str(PurePosixPath(candidate))
+        if from_text and not _looks_like_text_file_hint(normalized_path):
+            continue
+        normalized.append(normalized_path)
     return list(dict.fromkeys(path for path in normalized if path))
 
 
@@ -120,7 +143,8 @@ def _expected_files_from_text(*values: str | None) -> list[str]:
             for value in values
             if value
             for match in PATH_HINT_PATTERN.findall(value)
-        ]
+        ],
+        from_text=True,
     )
 
 

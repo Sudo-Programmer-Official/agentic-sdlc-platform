@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     ai_budget_economy_cents: float = 2.0
     ai_budget_background_cents: float = 0.5
     ai_max_context_premium_tokens: int = 20_000
-    ai_max_context_standard_tokens: int = 10_000
+    ai_max_context_standard_tokens: int = 20_000
     ai_max_context_economy_tokens: int = 4_000
     ai_default_completion_premium_tokens: int = 2_000
     ai_default_completion_standard_tokens: int = 1_200

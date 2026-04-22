@@ -27,6 +27,7 @@ clear boundaries for future service extraction.
 - `docs/knowledge-verification-subsystem.md`: developer guide for the knowledge subsystem
 - `docs/runtime-foundation-spec.md`: runtime execution primitives, orchestrator rules, and event model baseline
 - `docs/task-run-execution-flow.md`: explicit task-to-run binding for manually created tasks and operator run flow
+- `docs/runtime-failure-debug-runbook.md`: practical run-failure triage flow with live RDS queries and failure decision map
 
 ## Status
 Foundation skeleton only. No business logic, no AWS integration.

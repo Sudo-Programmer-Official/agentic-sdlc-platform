@@ -257,7 +257,8 @@ def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
     instructions = executor._instructions_for(work_item)
 
     assert "Restrict edits to these files unless validation proves a neighboring file is required: index.html." in instructions
-    assert "prefer write_file with the full updated file contents over apply_patch" in instructions
+    assert "prefer compact apply_patch updates to affected test blocks" in instructions
+    assert "old and new expectations do not conflict" in instructions
     assert "This is a static frontend task." in instructions
     assert "Do not introduce new third-party imports such as BeautifulSoup or bs4" in instructions
     assert "html.parser" in instructions
@@ -1199,6 +1200,7 @@ async def test_write_tests_parse_retry_escalates_to_premium_model(
     assert "test_index_html_exists" in test_path.read_text(encoding="utf-8")
     assert len(client.prompts) == 2
     assert "structured output retry 1" in client.prompts[1].lower()
+    assert client.max_tokens[0] >= 3200
     assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
     assert client.max_tokens[1] > client.max_tokens[0]
     assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
@@ -1345,7 +1347,7 @@ async def test_codex_executor_repairs_unapplyable_patch_by_regenerating_plan(
     assert "test_index_html_has_theme_styles" in test_path.read_text(encoding="utf-8")
     assert len(client.prompts) == 2
     assert "patch does not apply" in client.prompts[1]
-    assert "prefer write_file with the full updated contents of the target test file" in client.prompts[1]
+    assert "regenerate a compact and exact patch for the existing test file when possible" in client.prompts[1]
 
 
 @pytest.mark.anyio

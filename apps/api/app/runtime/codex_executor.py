@@ -1524,11 +1524,17 @@ class CodexExecutor(TaskExecutor):
             int(getattr(self.settings, "ai_default_completion_standard_tokens", self.settings.codex_max_tokens)),
         )
         boosted_floor = tier_default
-        if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND", "WRITE_TESTS"}:
+        boosted_cap = 4000
+        if work_item.type == "WRITE_TESTS":
+            # WRITE_TESTS responses frequently include larger JSON payloads; give them
+            # extra room to avoid truncated structured output.
+            boosted_floor = max(boosted_floor, 3200 if selected_model_tier != "tier_economy" else 1600)
+            boosted_cap = 6000 if selected_model_tier != "tier_economy" else 3200
+        elif work_item.type in {"CODE_FRONTEND", "CODE_BACKEND"}:
             boosted_floor = max(boosted_floor, 2200 if selected_model_tier != "tier_economy" else 1200)
         elif work_item.type not in {"PLAN_DAG", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
             boosted_floor = max(boosted_floor, 1600)
-        boosted = min(max(current_max_tokens * 2, boosted_floor), 4000)
+        boosted = min(max(current_max_tokens * 2, boosted_floor), boosted_cap)
         if contract is not None and contract.budget.remaining_tokens > 0:
             boosted = min(boosted, max(current_max_tokens, contract.budget.remaining_tokens))
         return max(current_max_tokens, boosted)
@@ -1601,7 +1607,10 @@ class CodexExecutor(TaskExecutor):
             )
         if work_item.type == "WRITE_TESTS":
             guidance.append(
-                "For WRITE_TESTS, prefer write_file with the full updated contents of the scoped test file instead of apply_patch unless the diff is tiny and exact."
+                "For WRITE_TESTS, prefer compact apply_patch edits to the affected test blocks when the file already exists; use write_file for new test files or short complete rewrites."
+            )
+            guidance.append(
+                "Do not leave conflicting old-behavior and new-behavior assertions in the same suite; reconcile stale tests to the current task goal."
             )
         guidance.append(f"This is structured output retry {retry_count}.")
         return f"{user_prompt}\n\n" + "\n".join(guidance)
@@ -1634,8 +1643,8 @@ class CodexExecutor(TaskExecutor):
         )
         if work_item.type == "WRITE_TESTS":
             repair_prompt += (
-                "\nFor WRITE_TESTS, prefer write_file with the full updated contents of the target test file."
-                " Do not return another apply_patch diff unless it is tiny and exact."
+                "\nFor WRITE_TESTS, regenerate a compact and exact patch for the existing test file when possible."
+                " Use write_file for new test files or short complete rewrites."
                 " Never modify non-test files such as index.html."
             )
         current_prompt = repair_prompt
@@ -1934,7 +1943,8 @@ class CodexExecutor(TaskExecutor):
                 + " You are fixing failing tests. Use the failing stack info and previous diff. "
                   "Make the smallest possible patch that addresses the failure; avoid broad refactors. "
                   "Prefer patching implementation files over test files. Treat test files as read-only verification "
-                  "context unless the failure is clearly caused by a syntax, import, or harness defect inside the test itself. "
+                  "context unless the failure is clearly caused by a syntax, import, harness defect, or contradictory assertions in the test file itself. "
+                  "If two assertions are mutually exclusive for the current task goal, reconcile the scoped test definitions instead of oscillating implementation-only patches. "
                   "Do not weaken or rewrite assertions just to make the suite pass."
                 + test_dependency_guard
             )
@@ -1942,7 +1952,8 @@ class CodexExecutor(TaskExecutor):
             return (
                 base
                 + " Keep validation lightweight and directly tied to the requested behavior."
-                  " When updating a bounded test file, prefer write_file with the full updated file contents over apply_patch."
+                  " For existing large test files, prefer compact apply_patch updates to affected test blocks; use write_file for new files or short complete rewrites."
+                  " Remove or update stale assertions when behavior changes so old and new expectations do not conflict in the same suite."
                   " Malformed unified diffs are treated as hard failures in this stage."
                 + test_dependency_guard
             )

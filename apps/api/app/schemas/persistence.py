@@ -151,7 +151,34 @@ class ProjectRepositoryConnect(BaseModel):
     repo_full_name: Optional[str] = None
     default_branch: str = "main"
     installation_id: Optional[int] = None
+    auth_strategy: str = "runtime_default"
     created_by: Optional[str] = None
+
+
+class ProjectRepositoryPreflightRequest(BaseModel):
+    provider: str = "github"
+    repo_url: Optional[str] = None
+    repo_full_name: Optional[str] = None
+    default_branch: Optional[str] = None
+    installation_id: Optional[int] = None
+    auth_strategy: Optional[str] = None
+    clone: bool = True
+
+
+class ProjectRepositoryPreflightOut(BaseModel):
+    ok: bool
+    provider: str
+    auth_strategy: str
+    auth_mode: Optional[str] = None
+    credential_strategy: Optional[str] = None
+    selection_reason: Optional[str] = None
+    transport_url: Optional[str] = None
+    repo_url: str
+    default_branch: str
+    installation_id: Optional[int] = None
+    token_generated: bool = False
+    git_binary: Optional[str] = None
+    error: Optional[str] = None
 
 
 class ProjectRepositoryOut(BaseModel):
@@ -162,6 +189,7 @@ class ProjectRepositoryOut(BaseModel):
     repo_full_name: Optional[str]
     default_branch: str
     installation_id: Optional[int]
+    auth_strategy: str = "runtime_default"
     created_by: Optional[str]
     created_at: datetime
     updated_at: datetime

@@ -120,6 +120,7 @@ async def test_connect_repo_upserts_project_repository(db_session):
                 "repo_url": str(remote),
                 "repo_full_name": "example/repo",
                 "default_branch": "main",
+                "auth_strategy": "public_https",
             },
         )
         fetch_resp = await client.get(f"/api/v1/projects/{project.id}/repo")
@@ -127,6 +128,7 @@ async def test_connect_repo_upserts_project_repository(db_session):
     assert create_resp.status_code == 200
     assert create_resp.json()["repo_full_name"] == "example/repo"
     assert create_resp.json()["provider"] == "github"
+    assert create_resp.json()["auth_strategy"] == "public_https"
     assert fetch_resp.status_code == 200
     assert fetch_resp.json()["repo_url"] == str(remote)
 
@@ -155,6 +157,58 @@ async def test_connect_repo_uses_provider_default_installation_id(db_session, mo
 
     assert create_resp.status_code == 200
     assert create_resp.json()["installation_id"] == 4242
+
+
+@pytest.mark.anyio
+async def test_repo_preflight_uses_saved_auth_strategy(db_session, monkeypatch):
+    session, tenant_id, tmp_path = db_session
+    project = Project(name="Repo project", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+
+    remote = _seed_remote_repo(tmp_path)
+    calls = []
+
+    def fake_preflight(**kwargs):
+        calls.append(kwargs)
+        return repo_connector.RepoPreflightResult(
+            ok=True,
+            provider=kwargs["provider"],
+            auth_strategy=kwargs["auth_strategy"],
+            auth_mode="plain",
+            credential_strategy="anonymous_https",
+            selection_reason="test",
+            transport_url=kwargs["repo_url"],
+            repo_url=kwargs["repo_url"],
+            default_branch=kwargs["default_branch"],
+            installation_id=kwargs["installation_id"],
+            git_binary="/usr/bin/git",
+        )
+
+    monkeypatch.setattr(persistence, "preflight_repo_access", fake_preflight)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        create_resp = await client.post(
+            f"/api/v1/projects/{project.id}/connect-repo",
+            json={
+                "provider": "github",
+                "repo_url": str(remote),
+                "repo_full_name": "example/repo",
+                "default_branch": "main",
+                "auth_strategy": "public_https",
+            },
+        )
+        preflight_resp = await client.post(
+            f"/api/v1/projects/{project.id}/repo/preflight",
+            json={"clone": True},
+        )
+
+    assert create_resp.status_code == 200
+    assert preflight_resp.status_code == 200
+    assert preflight_resp.json()["ok"] is True
+    assert calls[0]["auth_strategy"] == "public_https"
+    assert calls[0]["repo_url"] == str(remote)
 
 
 @pytest.mark.anyio
@@ -496,10 +550,12 @@ async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_s
         repo_url: str,
         repo_full_name: str | None = None,
         installation_id: int | None = None,
+        auth_strategy: str | None = None,
     ):
         assert provider == "github"
         assert repo_full_name == "example/repo"
         assert installation_id is None
+        assert auth_strategy == "runtime_default"
         origin_url = _run_git(["remote", "get-url", "origin"], cwd=repo_dir)
         assert origin_url == str(remote)
         assert repo_url == str(remote)

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 import shlex
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -285,6 +286,10 @@ class ExecutionBudgetLedger:
     remaining_tokens: int = 0
     used_cost_cents: float = 0.0
     remaining_cost_cents: float = DEFAULT_CODEX_MAX_RUN_COST_CENTS
+    recovery_reserve_cost_cents: float = 0.0
+    used_recovery_cost_cents: float = 0.0
+    remaining_recovery_cost_cents: float = 0.0
+    active_budget_partition: str = "main"
     budget_mode: str = BudgetMode.NORMAL
     model_tier_cap: str | None = None
     completion_token_cap: int | None = None
@@ -294,7 +299,7 @@ class ExecutionBudgetLedger:
     last_model_tier: str | None = None
     updated_at: str | None = None
 
-    def refresh(self, settings: Settings | None = None) -> None:
+    def refresh(self, settings: Settings | None = None, *, recovery_mode: bool = False) -> None:
         cfg = settings or get_settings()
         codex_max_tokens = int(getattr(cfg, "codex_max_tokens", DEFAULT_CODEX_MAX_TOKENS))
         economy_completion_tokens = int(
@@ -307,23 +312,47 @@ class ExecutionBudgetLedger:
         economy_budget_cents = float(getattr(cfg, "ai_budget_economy_cents", 2.0))
         self.max_tokens = max(0, int(self.max_tokens))
         self.max_cost_cents = max(0.0, float(self.max_cost_cents))
+        configured_recovery_reserve = max(
+            float(getattr(cfg, "ai_recovery_reserve_min_cents", 0.0)),
+            self.max_cost_cents * max(0.0, float(getattr(cfg, "ai_recovery_reserve_fraction", 0.0))),
+        )
+        self.recovery_reserve_cost_cents = round(
+            max(0.0, float(self.recovery_reserve_cost_cents or configured_recovery_reserve)),
+            4,
+        )
         self.used_input_tokens = max(0, int(self.used_input_tokens))
         self.used_output_tokens = max(0, int(self.used_output_tokens))
         self.used_tokens = max(0, int(self.used_input_tokens + self.used_output_tokens))
         self.remaining_tokens = max(0, int(self.max_tokens - self.used_tokens))
         self.used_cost_cents = round(max(0.0, float(self.used_cost_cents)), 4)
-        self.remaining_cost_cents = round(max(0.0, self.max_cost_cents - self.used_cost_cents), 4)
+        self.used_recovery_cost_cents = round(max(0.0, float(self.used_recovery_cost_cents)), 4)
+        self.remaining_recovery_cost_cents = round(
+            max(0.0, self.recovery_reserve_cost_cents - self.used_recovery_cost_cents),
+            4,
+        )
+        effective_max_cost_cents = self.max_cost_cents
+        self.active_budget_partition = "main"
+        if recovery_mode:
+            effective_max_cost_cents = self.max_cost_cents + self.recovery_reserve_cost_cents
+            self.active_budget_partition = "recovery"
+        self.remaining_cost_cents = round(max(0.0, effective_max_cost_cents - self.used_cost_cents), 4)
         self.updated_at = _now_iso()
 
-        if self.remaining_tokens < max(256, economy_completion_tokens) or self.remaining_cost_cents <= background_budget_cents:
+        recovery_reserve_exhausted = recovery_mode and self.remaining_recovery_cost_cents <= background_budget_cents
+        if (
+            self.remaining_tokens < max(256, economy_completion_tokens)
+            or self.remaining_cost_cents <= background_budget_cents
+            or recovery_reserve_exhausted
+        ):
             self.budget_mode = BudgetMode.BLOCKED
             self.model_tier_cap = "tier_none"
             self.completion_token_cap = 0
-            self.escalation_reason = (
-                "run_cost_budget_exhausted"
-                if self.remaining_cost_cents <= background_budget_cents
-                else "run_token_budget_exhausted"
-            )
+            if recovery_reserve_exhausted:
+                self.escalation_reason = "recovery_budget_exhausted"
+            elif self.remaining_cost_cents <= background_budget_cents:
+                self.escalation_reason = "run_cost_budget_exhausted"
+            else:
+                self.escalation_reason = "run_token_budget_exhausted"
             return
 
         if self.remaining_tokens < max(codex_max_tokens * 4, standard_completion_tokens * 2) or self.remaining_cost_cents <= economy_budget_cents:
@@ -355,6 +384,10 @@ class ExecutionBudgetLedger:
             "remaining_tokens": self.remaining_tokens,
             "used_cost_cents": self.used_cost_cents,
             "remaining_cost_cents": self.remaining_cost_cents,
+            "recovery_reserve_cost_cents": self.recovery_reserve_cost_cents,
+            "used_recovery_cost_cents": self.used_recovery_cost_cents,
+            "remaining_recovery_cost_cents": self.remaining_recovery_cost_cents,
+            "active_budget_partition": self.active_budget_partition,
             "budget_mode": self.budget_mode,
             "model_tier_cap": self.model_tier_cap,
             "completion_token_cap": self.completion_token_cap,
@@ -375,6 +408,9 @@ class ExecutionBudgetLedger:
             used_input_tokens=int(payload.get("used_input_tokens") or 0),
             used_output_tokens=int(payload.get("used_output_tokens") or 0),
             used_cost_cents=float(payload.get("used_cost_cents") or 0.0),
+            recovery_reserve_cost_cents=float(payload.get("recovery_reserve_cost_cents") or 0.0),
+            used_recovery_cost_cents=float(payload.get("used_recovery_cost_cents") or 0.0),
+            active_budget_partition=str(payload.get("active_budget_partition") or "main"),
             last_ai_job_id=payload.get("last_ai_job_id"),
             last_work_item_id=payload.get("last_work_item_id"),
             last_model_tier=payload.get("last_model_tier"),
@@ -511,12 +547,20 @@ def build_execution_contract(
     run_summary: dict[str, Any] | None,
     architecture_profile: dict[str, Any] | None,
     plan_snapshot: dict[str, Any] | None,
+    project_contract: dict[str, Any] | None = None,
     previous_contract: ExecutionContract | dict[str, Any] | None = None,
     settings: Settings | None = None,
 ) -> ExecutionContract:
     cfg = settings or get_settings()
     summary = run_summary if isinstance(run_summary, dict) else {}
     architecture = architecture_profile if isinstance(architecture_profile, dict) else {}
+    resolved_project_contract = (
+        project_contract
+        if isinstance(project_contract, dict)
+        else summary.get("project_contract")
+        if isinstance(summary.get("project_contract"), dict)
+        else {}
+    )
     plan = plan_snapshot if isinstance(plan_snapshot, dict) else {}
     previous = coerce_execution_contract(previous_contract, cfg)
 
@@ -559,6 +603,9 @@ def build_execution_contract(
     assumptions_used = []
     if isinstance(architecture_summary, dict):
         assumptions_used = _coerce_string_list(architecture_summary.get("assumptions_used"))
+    if isinstance(resolved_project_contract, dict):
+        project_assumptions = _coerce_string_list(resolved_project_contract.get("assumptions_used"))
+        assumptions_used = _unique_paths(assumptions_used + project_assumptions)
 
     allowed_command_prefixes = _unique_paths(
         _default_allowed_prefixes(cfg)
@@ -619,6 +666,7 @@ def update_summary_execution_contract(
     summary: dict[str, Any] | None,
     *,
     architecture_profile: dict[str, Any] | None = None,
+    project_contract: dict[str, Any] | None = None,
     plan_snapshot: dict[str, Any] | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -626,6 +674,8 @@ def update_summary_execution_contract(
     contract = build_execution_contract(
         run_summary=payload,
         architecture_profile=architecture_profile,
+        project_contract=project_contract
+        or (payload.get("project_contract") if isinstance(payload.get("project_contract"), dict) else None),
         plan_snapshot=plan_snapshot or (payload.get("plan_snapshot") if isinstance(payload.get("plan_snapshot"), dict) else None),
         previous_contract=payload.get("execution_contract"),
         settings=settings,
@@ -664,7 +714,19 @@ def _is_recovery_work_item(item: WorkItem) -> bool:
     )
 
 
+def is_recovery_work_item(item: WorkItem) -> bool:
+    return _is_recovery_work_item(item)
+
+
 def _derive_retry_state(work_items: list[WorkItem]) -> str:
+    if any(
+        _is_recovery_work_item(item)
+        and item.status == "FAILED"
+        and isinstance(item.result, dict)
+        and item.result.get("message") == "run_budget_exhausted"
+        for item in work_items
+    ):
+        return RetryState.BLOCKED_BUDGET
     if any(
         _is_recovery_work_item(item) and item.status in {"QUEUED", "RUNNING", "CLAIMED"}
         for item in work_items
@@ -710,6 +772,7 @@ async def sync_run_execution_contract_state(session: AsyncSession, run: Run) -> 
     contract = build_execution_contract(
         run_summary=summary,
         architecture_profile=(summary.get("architecture_profile") if isinstance(summary.get("architecture_profile"), dict) else None),
+        project_contract=(summary.get("project_contract") if isinstance(summary.get("project_contract"), dict) else None),
         plan_snapshot=(summary.get("plan_snapshot") if isinstance(summary.get("plan_snapshot"), dict) else None),
         previous_contract=summary.get("execution_contract"),
     )
@@ -743,25 +806,36 @@ async def record_run_budget_usage(
     input_tokens: int,
     output_tokens: int,
 ) -> ExecutionContract:
+    work_item: WorkItem | None = None
+    if work_item_id:
+        try:
+            work_item = await session.get(WorkItem, uuid.UUID(str(work_item_id)))
+        except Exception:
+            work_item = None
+    recovery_mode = bool(work_item is not None and _is_recovery_work_item(work_item))
     summary = dict(run.summary or {})
     contract = build_execution_contract(
         run_summary=summary,
         architecture_profile=(summary.get("architecture_profile") if isinstance(summary.get("architecture_profile"), dict) else None),
+        project_contract=(summary.get("project_contract") if isinstance(summary.get("project_contract"), dict) else None),
         plan_snapshot=(summary.get("plan_snapshot") if isinstance(summary.get("plan_snapshot"), dict) else None),
         previous_contract=summary.get("execution_contract"),
     )
     contract.budget.used_input_tokens += max(0, int(input_tokens))
     contract.budget.used_output_tokens += max(0, int(output_tokens))
-    contract.budget.used_cost_cents += _estimate_cost_cents(
+    estimated_cost_cents = _estimate_cost_cents(
         get_settings(),
         selected_model_tier,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
     )
+    contract.budget.used_cost_cents += estimated_cost_cents
+    if recovery_mode:
+        contract.budget.used_recovery_cost_cents += estimated_cost_cents
     contract.budget.last_work_item_id = work_item_id
     contract.budget.last_ai_job_id = ai_job_id
     contract.budget.last_model_tier = selected_model_tier
-    contract.budget.refresh()
+    contract.budget.refresh(recovery_mode=recovery_mode)
     summary["execution_contract"] = contract.to_dict()
     run.summary = summary
     session.add(run)

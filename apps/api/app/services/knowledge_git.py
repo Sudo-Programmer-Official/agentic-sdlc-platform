@@ -58,6 +58,7 @@ def ensure_analysis_repo(project_repo: ProjectRepository, *, branch_name: str | 
         default_branch=project_repo.default_branch,
         repo_full_name=project_repo.repo_full_name,
         installation_id=project_repo.installation_id,
+        auth_strategy=project_repo.auth_strategy,
         work_branch=branch_name or project_repo.default_branch,
     )
     return repo_dir
@@ -69,6 +70,7 @@ def fetch_origin(project_repo: ProjectRepository, repo_dir: Path) -> None:
         repo_url=project_repo.repo_url,
         repo_full_name=project_repo.repo_full_name,
         installation_id=project_repo.installation_id,
+        auth_strategy=project_repo.auth_strategy,
     )
     _run_git(["fetch", "origin", "--prune"], cwd=repo_dir, git_config=access.git_config)
 

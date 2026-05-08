@@ -7,6 +7,7 @@ WEB_DIR="$ROOT_DIR/apps/web"
 LOG_DIR="${DEV_STACK_LOG_DIR:-$ROOT_DIR/.dev-stack}"
 API_PORT="${API_PORT:-8000}"
 WEB_PORT="${WEB_PORT:-5173}"
+VITE_API_BASE="${VITE_API_BASE:-http://localhost:${API_PORT}/api/v1}"
 
 mkdir -p "$LOG_DIR"
 
@@ -51,7 +52,7 @@ echo
 start_process api "$API_DIR" "$API_DIR/.venv/bin/uvicorn" app.main:app --reload --host 0.0.0.0 --port "$API_PORT"
 start_process scheduler "$API_DIR" "$API_DIR/.venv/bin/python" -m app.runtime.scheduler_service
 start_process worker "$API_DIR" "$API_DIR/.venv/bin/python" -m app.runtime.worker_service
-start_process web "$WEB_DIR" npm run dev -- --host 0.0.0.0 --port "$WEB_PORT"
+start_process web "$WEB_DIR" env VITE_API_BASE="$VITE_API_BASE" npm run dev -- --host 0.0.0.0 --port "$WEB_PORT"
 
 echo
 echo "API: http://localhost:$API_PORT"

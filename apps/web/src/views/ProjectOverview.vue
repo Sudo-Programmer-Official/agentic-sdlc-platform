@@ -529,12 +529,36 @@
           <el-input v-model="repoForm.default_branch" placeholder="Default branch" />
         </div>
         <el-input v-model="repoForm.installation_id" placeholder="GitHub installation ID (optional)" />
+        <el-segmented
+          v-model="repoForm.auth_strategy"
+          :options="repoAuthStrategyOptions"
+          class="w-full"
+        />
         <div class="text-xs text-slate-500">
-          You can still edit the repository URL manually if your runtime uses SSH, a local mirror, or host-level git credentials.
+          The selected strategy is saved with this project and used by the worker for every repo-backed run.
         </div>
-        <el-button type="primary" :loading="repoLoading" @click="submitConnectRepo">
-          Save Repository
-        </el-button>
+        <div
+          v-if="repoPreflightResult"
+          :class="repoPreflightResult.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-700'"
+          class="rounded-xl border px-3 py-2 text-xs"
+        >
+          <div class="font-semibold">
+            {{ repoPreflightResult.ok ? "Clone preflight passed" : "Clone preflight failed" }}
+          </div>
+          <div class="mt-1">
+            {{ repoPreflightResult.auth_strategy }} · {{ repoPreflightResult.auth_mode || "unknown" }} ·
+            {{ repoPreflightResult.transport_url || repoForm.repo_url }}
+          </div>
+          <div v-if="repoPreflightResult.error" class="mt-1">{{ repoPreflightResult.error }}</div>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <el-button :loading="repoPreflightLoading" @click="runRepoPreflight">
+            Test Clone
+          </el-button>
+          <el-button type="primary" :loading="repoLoading" @click="submitConnectRepo">
+            Save Repository
+          </el-button>
+        </div>
         <div v-if="repoMessage" class="text-sm text-emerald-700">{{ repoMessage }}</div>
         <div v-if="repoError" class="text-sm text-rose-600">{{ repoError }}</div>
       </div>
@@ -784,6 +808,7 @@ import {
   listRunEvents,
   fetchProjectRepo,
   connectProjectRepo,
+  preflightProjectRepo,
   fetchGitHubConnectInfo,
   listGitHubInstallationRepositories,
 } from "../api/lifecycle";
@@ -892,7 +917,16 @@ const repoForm = ref({
   repo_full_name: "",
   default_branch: "main",
   installation_id: "",
+  auth_strategy: "public_https",
 });
+const repoAuthStrategyOptions = [
+  { label: "Public HTTPS", value: "public_https" },
+  { label: "GitHub App", value: "github_app" },
+  { label: "SSH", value: "ssh" },
+  { label: "Runtime Default", value: "runtime_default" },
+];
+const repoPreflightLoading = ref(false);
+const repoPreflightResult = ref<any | null>(null);
 const githubConnectInfo = ref<any | null>(null);
 const githubConnectLoading = ref(false);
 const githubInstallLoading = ref(false);
@@ -1138,6 +1172,7 @@ async function runTask(task: any) {
 function openConnectRepoDialog() {
   repoMessage.value = "";
   repoError.value = "";
+  repoPreflightResult.value = null;
   githubInstallError.value = "";
   githubInstallMessage.value = "";
   repoForm.value = {
@@ -1148,6 +1183,7 @@ function openConnectRepoDialog() {
       projectRepo.value?.installation_id !== null && projectRepo.value?.installation_id !== undefined
         ? String(projectRepo.value.installation_id)
         : "",
+    auth_strategy: projectRepo.value?.auth_strategy || "public_https",
   };
   selectedGitHubRepo.value = projectRepo.value?.repo_full_name || "";
   void loadGitHubConnectInfo();
@@ -1208,8 +1244,8 @@ function applySelectedGitHubRepository(fullName: string) {
   if (!selectedRepo) return;
   selectedGitHubRepo.value = selectedRepo.full_name;
   repoForm.value.repo_full_name = selectedRepo.full_name || "";
-  const mode = String(githubConnectInfo.value?.runtime_git_auth_mode || "auto").toLowerCase();
-  if (mode === "ssh") {
+  const strategy = String(repoForm.value.auth_strategy || "public_https").toLowerCase();
+  if (strategy === "ssh") {
     repoForm.value.repo_url =
       selectedRepo.ssh_url || selectedRepo.clone_url || selectedRepo.html_url || repoForm.value.repo_url;
   } else {
@@ -1218,9 +1254,9 @@ function applySelectedGitHubRepository(fullName: string) {
   }
   repoForm.value.default_branch = selectedRepo.default_branch || repoForm.value.default_branch || "main";
   githubInstallMessage.value =
-    mode === "ssh"
+    strategy === "ssh"
       ? "Repository selected from GitHub and normalized for SSH runtime access."
-      : "Repository selected from GitHub and normalized for GitHub App HTTPS runtime access.";
+      : "Repository selected from GitHub and normalized for HTTPS runtime access.";
 }
 
 function startGitHubAppInstall() {
@@ -1301,6 +1337,7 @@ async function submitConnectRepo() {
       installation_id: repoForm.value.installation_id.trim()
         ? Number.parseInt(repoForm.value.installation_id.trim(), 10)
         : null,
+      auth_strategy: repoForm.value.auth_strategy,
       created_by: "ui-user",
     });
     if (!executorSelectionDirty.value) {
@@ -1312,6 +1349,38 @@ async function submitConnectRepo() {
     repoError.value = err?.message || "Failed to connect repository";
   } finally {
     repoLoading.value = false;
+  }
+}
+
+async function runRepoPreflight() {
+  if (!projectId.value) return;
+  if (!repoForm.value.repo_url.trim()) {
+    repoError.value = "Repository URL is required.";
+    return;
+  }
+  repoPreflightLoading.value = true;
+  repoError.value = "";
+  repoMessage.value = "";
+  repoPreflightResult.value = null;
+  try {
+    const result = await preflightProjectRepo(projectId.value, {
+      provider: "github",
+      repo_url: repoForm.value.repo_url.trim(),
+      repo_full_name: repoForm.value.repo_full_name.trim() || null,
+      default_branch: repoForm.value.default_branch.trim() || "main",
+      installation_id: repoForm.value.installation_id.trim()
+        ? Number.parseInt(repoForm.value.installation_id.trim(), 10)
+        : null,
+      auth_strategy: repoForm.value.auth_strategy,
+      clone: true,
+    });
+    repoPreflightResult.value = result;
+    repoMessage.value = result.ok ? "Repository clone preflight passed." : "";
+    repoError.value = result.ok ? "" : result.error || "Repository clone preflight failed.";
+  } catch (err: any) {
+    repoError.value = err?.message || "Repository clone preflight failed.";
+  } finally {
+    repoPreflightLoading.value = false;
   }
 }
 

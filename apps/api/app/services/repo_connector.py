@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -33,6 +34,23 @@ class RepoRuntimeAccess:
     adapter_kind: str | None = None
     credential_strategy: str = "anonymous"
     selection_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RepoPreflightResult:
+    ok: bool
+    provider: str
+    auth_strategy: str
+    auth_mode: str | None
+    credential_strategy: str | None
+    selection_reason: str | None
+    transport_url: str | None
+    repo_url: str
+    default_branch: str
+    installation_id: int | None = None
+    token_generated: bool = False
+    git_binary: str | None = None
+    error: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -186,6 +204,42 @@ def _looks_like_github_remote(repo_url: str) -> bool:
     return parsed.netloc.lower() == "github.com"
 
 
+def _is_ssh_remote(repo_url: str) -> bool:
+    value = repo_url.strip()
+    if value.startswith("git@"):
+        return True
+    parsed = urlparse(value)
+    return parsed.scheme == "ssh"
+
+
+def normalize_auth_strategy(auth_strategy: str | None) -> str:
+    value = (auth_strategy or "runtime_default").strip().lower()
+    aliases = {
+        "default": "runtime_default",
+        "auto": "runtime_default",
+        "none": "public_https",
+        "plain": "public_https",
+        "anonymous_https": "public_https",
+        "github_app_https": "github_app",
+    }
+    value = aliases.get(value, value)
+    allowed = {"runtime_default", "public_https", "github_app", "ssh"}
+    if value not in allowed:
+        raise ValueError("auth_strategy must be one of runtime_default, public_https, github_app, or ssh")
+    return value
+
+
+def _auth_mode_for_strategy(auth_strategy: str | None, runtime_auth_mode: str | None) -> str:
+    strategy = normalize_auth_strategy(auth_strategy)
+    if strategy == "public_https":
+        return "none"
+    if strategy == "github_app":
+        return "github_app_https"
+    if strategy == "ssh":
+        return "ssh"
+    return (runtime_auth_mode or "auto").strip().lower()
+
+
 def _normalize_repo_url_for_mode(
     *,
     repo_url: str,
@@ -202,8 +256,12 @@ def _normalize_repo_url_for_mode(
 
     mode = (auth_mode or "auto").strip().lower()
     if mode == "ssh":
-        return f"git@github.com:{full_name}.git"
-    if mode in {"auto", "github_app_https"}:
+        # Respect an explicit HTTPS URL even when runtime mode is ssh so
+        # public-repo testing can proceed without forcing SSH transport.
+        if _is_ssh_remote(cleaned_repo_url):
+            return f"git@github.com:{full_name}.git"
+        return f"https://github.com/{full_name}.git"
+    if mode in {"auto", "github_app_https", "none"}:
         return f"https://github.com/{full_name}.git"
     return cleaned_repo_url
 
@@ -214,21 +272,42 @@ def resolve_repo_runtime_access(
     repo_url: str,
     repo_full_name: str | None = None,
     installation_id: int | None = None,
+    auth_strategy: str | None = None,
 ) -> RepoRuntimeAccess:
     normalized_provider = _normalize_provider(provider)
-    cleaned_repo_url = repo_url.strip()
+    auth_mode = _auth_mode_for_strategy(auth_strategy, get_settings().runtime_git_auth_mode)
+    cleaned_repo_url = _normalize_repo_url_for_mode(
+        repo_url=repo_url.strip(),
+        repo_full_name=repo_full_name,
+        auth_mode=auth_mode,
+    )
     full_name = _normalize_repo_full_name(cleaned_repo_url, repo_full_name)
-    auth_mode = (get_settings().runtime_git_auth_mode or "auto").strip().lower()
     adapter = get_vcs_adapter(normalized_provider)
     if adapter is None and normalized_provider == "github":
         adapter = _lazy_github_adapter_from_env()
     adapter_kind = adapter.__class__.__name__ if adapter is not None else None
     resolved_installation_id = installation_id or get_default_installation_id(normalized_provider)
     selection_reason = "github_app_unavailable_or_not_applicable"
-    requires_authenticated_clone = auth_mode == "github_app_https" or resolved_installation_id is not None
+    # Only force authenticated GitHub App clone when explicitly requested
+    # or when running in auto mode with an installation id present.
+    # In `none` mode we should always allow plain HTTPS clone (public repos).
+    requires_authenticated_clone = auth_mode == "github_app_https" or (
+        auth_mode == "auto" and resolved_installation_id is not None
+    )
 
     if normalized_provider == "github" and full_name and _looks_like_github_remote(cleaned_repo_url):
         if auth_mode == "ssh":
+            if not _is_ssh_remote(cleaned_repo_url):
+                return RepoRuntimeAccess(
+                    auth_mode="plain",
+                    clean_repo_url=cleaned_repo_url,
+                    transport_url=cleaned_repo_url,
+                    installation_id=resolved_installation_id,
+                    token_generated=False,
+                    adapter_kind=adapter_kind,
+                    credential_strategy="anonymous_https",
+                    selection_reason="ssh_mode_https_repo_url",
+                )
             return RepoRuntimeAccess(
                 auth_mode="ssh",
                 clean_repo_url=cleaned_repo_url,
@@ -318,6 +397,7 @@ async def connect_repo(
     default_branch: str,
     repo_full_name: str | None = None,
     installation_id: int | None = None,
+    auth_strategy: str | None = None,
     created_by: str | None = None,
 ) -> ProjectRepository:
     normalized_provider = _normalize_provider(provider)
@@ -325,10 +405,12 @@ async def connect_repo(
     if not cleaned_repo_url:
         raise ValueError("repo_url is required")
 
+    normalized_auth_strategy = normalize_auth_strategy(auth_strategy)
+    auth_mode = _auth_mode_for_strategy(normalized_auth_strategy, get_settings().runtime_git_auth_mode)
     normalized_repo_url = _normalize_repo_url_for_mode(
         repo_url=cleaned_repo_url,
         repo_full_name=repo_full_name,
-        auth_mode=get_settings().runtime_git_auth_mode,
+        auth_mode=auth_mode,
     )
     full_name = _normalize_repo_full_name(normalized_repo_url, repo_full_name)
     install_id = installation_id or get_default_installation_id(normalized_provider)
@@ -342,6 +424,7 @@ async def connect_repo(
     existing.repo_full_name = full_name
     existing.default_branch = (default_branch or "main").strip()
     existing.installation_id = install_id
+    existing.auth_strategy = normalized_auth_strategy
     existing.created_by = created_by or existing.created_by
     session.add(existing)
     await session.flush()
@@ -356,6 +439,7 @@ def prepare_workspace_repo(
     default_branch: str,
     repo_full_name: str | None = None,
     installation_id: int | None = None,
+    auth_strategy: str | None = None,
     work_branch: str | None = None,
 ) -> None:
     access = resolve_repo_runtime_access(
@@ -363,6 +447,7 @@ def prepare_workspace_repo(
         repo_url=repo_url,
         repo_full_name=repo_full_name,
         installation_id=installation_id,
+        auth_strategy=auth_strategy,
     )
     repo_dir = repo_dir.resolve()
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -432,12 +517,14 @@ def checkout_workspace_branch_from_head(
     branch_name: str,
     repo_full_name: str | None = None,
     installation_id: int | None = None,
+    auth_strategy: str | None = None,
 ) -> None:
     access = resolve_repo_runtime_access(
         provider=provider,
         repo_url=repo_url,
         repo_full_name=repo_full_name,
         installation_id=installation_id,
+        auth_strategy=auth_strategy,
     )
     repo_dir = repo_dir.resolve()
     target_branch = branch_name.strip()
@@ -498,11 +585,83 @@ def push_branch(
     repo_url: str,
     repo_full_name: str | None = None,
     installation_id: int | None = None,
+    auth_strategy: str | None = None,
 ) -> None:
     access = resolve_repo_runtime_access(
         provider=provider,
         repo_url=repo_url,
         repo_full_name=repo_full_name,
         installation_id=installation_id,
+        auth_strategy=auth_strategy,
     )
     _run_git(["push", "-u", "origin", branch_name], cwd=repo_dir, git_config=access.git_config)
+
+
+def preflight_repo_access(
+    *,
+    provider: str,
+    repo_url: str,
+    default_branch: str,
+    repo_full_name: str | None = None,
+    installation_id: int | None = None,
+    auth_strategy: str | None = None,
+    clone: bool = True,
+) -> RepoPreflightResult:
+    normalized_provider = _normalize_provider(provider)
+    strategy = normalize_auth_strategy(auth_strategy)
+    base_branch = (default_branch or "main").strip() or "main"
+    access: RepoRuntimeAccess | None = None
+    try:
+        access = resolve_repo_runtime_access(
+            provider=normalized_provider,
+            repo_url=repo_url,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
+            auth_strategy=strategy,
+        )
+        _run_git(["ls-remote", "--heads", access.transport_url, base_branch], git_config=access.git_config)
+        if clone:
+            root = Path(tempfile.mkdtemp(prefix="agentic-sdlc-repo-preflight-"))
+            try:
+                prepare_workspace_repo(
+                    repo_dir=root / "repo",
+                    provider=normalized_provider,
+                    repo_url=repo_url,
+                    default_branch=base_branch,
+                    repo_full_name=repo_full_name,
+                    installation_id=installation_id,
+                    auth_strategy=strategy,
+                    work_branch=base_branch,
+                )
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+        return RepoPreflightResult(
+            ok=True,
+            provider=normalized_provider,
+            auth_strategy=strategy,
+            auth_mode=access.auth_mode,
+            credential_strategy=access.credential_strategy,
+            selection_reason=access.selection_reason,
+            transport_url=_redact_transport_url(access.transport_url),
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            installation_id=access.installation_id,
+            token_generated=access.token_generated,
+            git_binary=git_binary_path(),
+        )
+    except Exception as exc:
+        return RepoPreflightResult(
+            ok=False,
+            provider=normalized_provider,
+            auth_strategy=strategy,
+            auth_mode=access.auth_mode if access else None,
+            credential_strategy=access.credential_strategy if access else None,
+            selection_reason=access.selection_reason if access else None,
+            transport_url=_redact_transport_url(access.transport_url) if access else None,
+            repo_url=repo_url,
+            default_branch=base_branch,
+            installation_id=access.installation_id if access else installation_id,
+            token_generated=access.token_generated if access else False,
+            git_binary=git_binary_path(),
+            error=str(exc),
+        )

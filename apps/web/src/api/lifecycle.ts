@@ -115,7 +115,18 @@ export type ConnectRepoPayload = {
   repo_full_name?: string | null;
   default_branch?: string;
   installation_id?: number | null;
+  auth_strategy?: string;
   created_by?: string | null;
+};
+
+export type RepoPreflightPayload = {
+  provider?: string;
+  repo_url?: string | null;
+  repo_full_name?: string | null;
+  default_branch?: string | null;
+  installation_id?: number | null;
+  auth_strategy?: string | null;
+  clone?: boolean;
 };
 
 export type GitHubConnectInfo = {
@@ -318,6 +329,15 @@ export async function connectProjectRepo(projectId: string, payload: ConnectRepo
   return parseApiResponse(resp);
 }
 
+export async function preflightProjectRepo(projectId: string, payload: RepoPreflightPayload) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/repo/preflight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
 export async function fetchProjectPreviewProfile(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/preview-profile`);
   try {
@@ -376,6 +396,64 @@ export async function deriveProjectArchitectureProfile(
   } = {}
 ) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/architecture-profile/derive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function fetchProjectContract(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/project-contract`);
+  return parseApiResponse(resp);
+}
+
+export async function fetchProjectContractSummary(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/project-contract/summary`);
+  try {
+    return await parseApiResponse(resp);
+  } catch (err) {
+    if (isApiErrorStatus(err, 404)) return null;
+    throw err;
+  }
+}
+
+export async function saveProjectContract(projectId: string, payload: {
+  status?: string;
+  source?: string;
+  summary?: string | null;
+  contract_json?: Record<string, any>;
+  created_by?: string | null;
+  updated_by?: string | null;
+}) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/project-contract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function patchProjectContract(projectId: string, payload: {
+  summary?: string | null;
+  sections?: Record<string, any>;
+  updated_by?: string | null;
+}) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/project-contract`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function bootstrapProjectContract(
+  projectId: string,
+  payload: {
+    created_by?: string | null;
+  } = {}
+) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/project-contract/bootstrap`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

@@ -69,9 +69,18 @@ def test_resolve_repo_runtime_access_requires_installation_for_explicit_github_a
         raise AssertionError("expected explicit github_app_https auth mode to require installation_id")
 
 
-def test_connect_repo_normalizes_github_url_for_ssh_mode(monkeypatch):
+def test_connect_repo_preserves_https_url_for_ssh_mode():
     normalized = repo_connector._normalize_repo_url_for_mode(
         repo_url="https://github.com/acme/private-repo",
+        repo_full_name="acme/private-repo",
+        auth_mode="ssh",
+    )
+    assert normalized == "https://github.com/acme/private-repo.git"
+
+
+def test_connect_repo_normalizes_ssh_url_for_ssh_mode():
+    normalized = repo_connector._normalize_repo_url_for_mode(
+        repo_url="git@github.com:acme/private-repo",
         repo_full_name="acme/private-repo",
         auth_mode="ssh",
     )
@@ -175,6 +184,81 @@ def test_resolve_repo_runtime_access_fails_closed_when_installation_token_genera
             repo_full_name="acme/private-repo",
             installation_id=1234,
         )
+
+
+def test_resolve_repo_runtime_access_allows_plain_mode_even_with_installation_id(monkeypatch):
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="none"),
+    )
+    monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: None)
+    monkeypatch.setattr(repo_connector, "_lazy_github_adapter_from_env", lambda: None)
+
+    access = repo_connector.resolve_repo_runtime_access(
+        provider="github",
+        repo_url="https://github.com/acme/public-repo.git",
+        repo_full_name="acme/public-repo",
+        installation_id=1234,
+    )
+
+    assert access.auth_mode == "plain"
+    assert access.transport_url == "https://github.com/acme/public-repo.git"
+
+
+def test_resolve_repo_runtime_access_public_https_strategy_overrides_ssh_runtime(monkeypatch):
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="ssh"),
+    )
+    monkeypatch.setattr(repo_connector, "get_vcs_adapter", lambda provider: None)
+    monkeypatch.setattr(repo_connector, "_lazy_github_adapter_from_env", lambda: None)
+
+    access = repo_connector.resolve_repo_runtime_access(
+        provider="github",
+        repo_url="https://github.com/acme/public-repo.git",
+        repo_full_name="acme/public-repo",
+        installation_id=1234,
+        auth_strategy="public_https",
+    )
+
+    assert access.auth_mode == "plain"
+    assert access.selection_reason == "github_app_unavailable_or_not_applicable"
+    assert access.transport_url == "https://github.com/acme/public-repo.git"
+
+
+def test_preflight_repo_access_uses_same_prepare_path(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        repo_connector,
+        "get_settings",
+        lambda: types.SimpleNamespace(runtime_git_auth_mode="ssh"),
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_git(args, cwd=None, *, git_config=None):
+        calls.append(list(args))
+        if args[:1] == ["clone"]:
+            target = Path(args[-1])
+            (target / ".git").mkdir(parents=True, exist_ok=True)
+        return ""
+
+    monkeypatch.setattr(repo_connector, "_run_git", fake_run_git)
+
+    result = repo_connector.preflight_repo_access(
+        provider="github",
+        repo_url="https://github.com/acme/public-repo.git",
+        repo_full_name="acme/public-repo",
+        default_branch="main",
+        installation_id=1234,
+        auth_strategy="public_https",
+    )
+
+    assert result.ok is True
+    assert result.auth_strategy == "public_https"
+    assert result.auth_mode == "plain"
+    assert calls[0] == ["ls-remote", "--heads", "https://github.com/acme/public-repo.git", "main"]
+    assert calls[1][0] == "clone"
 
 
 def test_resolve_repo_runtime_access_uses_lazy_env_adapter_when_provider_registry_is_empty(monkeypatch):

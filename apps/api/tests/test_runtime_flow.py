@@ -19,7 +19,7 @@ from app.runtime.leases import keep_work_item_lease_alive
 from app.runtime.scheduler_service import tick as scheduler_tick
 from app.runtime import worker_service
 from app.runtime.worker_service import tick_worker
-from app.runtime.recovery_policy import classify_failure, maybe_apply_recovery
+from app.runtime.recovery_policy import classify_failure, maybe_apply_recovery, recovery_tier_for_failure
 from app.services import run_launch as run_launch_module
 from app.services.run_launch import launch_run_for_project
 
@@ -452,6 +452,61 @@ async def test_test_failure_recovery_scopes_fix_node_to_implementation_files(mon
         assert fix_item.payload["expected_files"] == ["index.html"]
         assert fix_item.payload["related_files"] == ["test_index_html.py"]
         assert fix_item.payload["failing_test_files"] == ["test_index_html.py"]
+        assert fix_item.payload["failure_class"] == "test_assertion_failure"
+        assert fix_item.payload["recovery_tier"] == "code_repair"
+
+
+@pytest.mark.anyio
+async def test_recovery_classifier_routes_pytest_collection_errors_to_code_repair(runtime_db):
+    tenant_id = uuid.uuid4()
+    async with runtime_db() as session:
+        project = Project(name="Collection failure project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="FAILED",
+            executor="test",
+            payload={"target_files": ["test_index_html.py"], "related_files": ["index.html"]},
+            result={
+                "exit_code": 2,
+                "stdout": (
+                    "ERROR collecting test_index_html.py\n"
+                    "NameError: name 'ProjectsSectionParser' is not defined"
+                ),
+                "stderr": "",
+            },
+        )
+        session.add(work_item)
+        await session.commit()
+        work_item_id = work_item.id
+        run_id = run.id
+
+    async with runtime_db() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+
+        failure_class = classify_failure(work_item)
+        recovery = await maybe_apply_recovery(session, work_item)
+        await session.commit()
+
+        assert failure_class == "syntax_failure"
+        assert recovery_tier_for_failure(failure_class) == "code_repair"
+        assert recovery is not None
+        fix_item = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id, WorkItem.type == "FIX_TEST_FAILURE")
+            )
+        ).scalars().one()
+        assert fix_item.payload["failure_class"] == "syntax_failure"
+        assert fix_item.payload["recovery_tier"] == "code_repair"
 
 
 @pytest.mark.anyio

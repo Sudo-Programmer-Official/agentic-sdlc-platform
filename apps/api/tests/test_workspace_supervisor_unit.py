@@ -41,7 +41,11 @@ async def test_build_run_context_raises_when_repo_backed_workspace_is_in_error(m
     async def fake_architecture_meta(*_args, **_kwargs):
         return None
 
+    async def fake_project_contract_meta(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(workspace_supervisor, "get_architecture_runtime_meta", fake_architecture_meta)
+    monkeypatch.setattr(workspace_supervisor, "get_project_contract_runtime_meta", fake_project_contract_meta)
     monkeypatch.setattr(
         workspace_supervisor,
         "get_settings",
@@ -88,8 +92,17 @@ async def test_build_run_context_includes_architecture_runtime_meta(monkeypatch,
             "command_index": {"frontend_build": {"command": "npm -C apps/web run build"}},
         }
 
+    async def fake_project_contract_meta(*_args, **_kwargs):
+        return {
+            "summary": {"enforcement_enabled": True, "active_rules": ["disallow_inline_styles"]},
+            "brand_kit": {"tokens": {"brand-primary": "#2563eb"}},
+            "design_system": {"components": ["HeroSection"]},
+            "enforcement": {"enabled": True, "disallow_inline_styles": True},
+        }
+
     monkeypatch.setattr(workspace_supervisor, "ensure_run_workspace", fake_ensure_run_workspace)
     monkeypatch.setattr(workspace_supervisor, "get_architecture_runtime_meta", fake_architecture_meta)
+    monkeypatch.setattr(workspace_supervisor, "get_project_contract_runtime_meta", fake_project_contract_meta)
     monkeypatch.setattr(
         workspace_supervisor,
         "get_settings",
@@ -101,3 +114,5 @@ async def test_build_run_context_includes_architecture_runtime_meta(monkeypatch,
     assert context.architecture_profile is not None
     assert context.architecture_profile["protected_paths"] == ["apps/api/app/db/models"]
     assert context.architecture_profile["safe_paths"] == ["apps/web/src"]
+    assert context.project_contract is not None
+    assert context.project_contract["summary"]["enforcement_enabled"] is True

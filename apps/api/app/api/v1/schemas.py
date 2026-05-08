@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
+from app.schemas.project_contract import ProjectContractSummaryOut
 
 
 class CreateProjectRequest(BaseModel):
@@ -116,6 +117,7 @@ class ProjectSummaryResponse(BaseModel):
     current_stage: str
     latest_run: Optional[RunSummary] = None
     architecture_profile: ArchitectureProfileSummaryOut | None = None
+    project_contract: ProjectContractSummaryOut | None = None
     task_counts: TaskCounts
     architecture_refresh_needed: bool = False
     plan_refresh_needed: bool = False

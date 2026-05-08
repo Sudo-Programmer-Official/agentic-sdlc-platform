@@ -13,11 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Project, Run, Task
 from app.db.session import SessionLocal
 from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
+from app.schemas.project_contract import ProjectContractSummaryOut
 from app.runtime.execution_contract import build_execution_contract
 from app.runtime.orchestrator import RunOrchestrator
 from app.services.activity_log import log_activity
 from app.services.architecture_profile_service import summarize_architecture_profile
 from app.services.event_log import record_event
+from app.services.project_contract_service import summarize_project_contract
 from app.services.repo_connector import get_project_repository
 from app.services.run_resume import capture_run_checkpoint, sync_run_resume_state
 from app.services.task_branching import clean_branch_value, resolve_task_branch_plan
@@ -121,6 +123,32 @@ async def _resolve_architecture_payload(
         summary = ArchitectureProfileSummaryOut(
             summary="Architecture profile unavailable during run launch.",
             assumptions_used=["Execution contract derived from runtime defaults because architecture summary lookup failed."],
+        )
+    return summary.model_dump(mode="json")
+
+
+async def _resolve_project_contract_payload(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+) -> dict[str, object]:
+    try:
+        summary = await summarize_project_contract(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+    except Exception:
+        log.warning(
+            "Project contract summary unavailable during run launch project_id=%s tenant_id=%s",
+            project_id,
+            tenant_id,
+            exc_info=True,
+        )
+        summary = ProjectContractSummaryOut(
+            summary="Project contract unavailable during run launch.",
+            assumptions_used=["Runtime enforcement fallback applied because project contract lookup failed."],
         )
     return summary.model_dump(mode="json")
 
@@ -246,9 +274,16 @@ async def launch_run_for_project(
         touched_files=touched_files,
     )
     run_summary["architecture_profile"] = architecture_payload
+    project_contract_payload = await _resolve_project_contract_payload(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
+    run_summary["project_contract"] = project_contract_payload
     run_summary["execution_contract"] = build_execution_contract(
         run_summary=run_summary,
         architecture_profile=architecture_payload,
+        project_contract=project_contract_payload,
         plan_snapshot=None,
     ).to_dict()
 
@@ -278,6 +313,7 @@ async def launch_run_for_project(
         repo_provider=project_repo.provider if project_repo else None,
         repo_full_name=project_repo.repo_full_name if project_repo else None,
         repo_installation_id=project_repo.installation_id if project_repo else None,
+        repo_auth_strategy=project_repo.auth_strategy if project_repo else None,
     )
     if isinstance(run.summary, dict):
         run.summary = {

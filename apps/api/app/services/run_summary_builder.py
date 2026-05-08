@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections import Counter
 import uuid
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select, case, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,6 +118,99 @@ def _primary_error(run: Run, work_items: list[WorkItem]) -> str | None:
     return None
 
 
+def _coerce_project_contract_violation_records(work_item: WorkItem) -> list[dict[str, Any]]:
+    result = work_item.result if isinstance(work_item.result, dict) else {}
+    patch_guard = result.get("patch_guard") if isinstance(result.get("patch_guard"), dict) else {}
+    mode = str(patch_guard.get("project_enforcement_mode") or "off").strip().lower()
+    if mode not in {"off", "warn", "strict"}:
+        mode = "off"
+    blocking_default = mode == "strict"
+
+    records: list[dict[str, Any]] = []
+    raw_records = patch_guard.get("project_violation_records")
+    if isinstance(raw_records, list):
+        for raw in raw_records:
+            if not isinstance(raw, dict):
+                continue
+            message = raw.get("message")
+            if not isinstance(message, str) or not message.strip():
+                continue
+            record_type = str(raw.get("type") or "project_contract_violation").strip().lower()
+            rule = str(raw.get("rule") or "unknown").strip().lower()
+            file_path = raw.get("file")
+            if not isinstance(file_path, str) or not file_path.strip():
+                file_path = None
+            value = raw.get("value")
+            if not isinstance(value, str) or not value.strip():
+                value = None
+            blocking = raw.get("blocking")
+            if not isinstance(blocking, bool):
+                blocking = blocking_default
+            records.append(
+                {
+                    "work_item_id": str(work_item.id),
+                    "work_item_type": work_item.type,
+                    "mode": mode,
+                    "blocking": blocking,
+                    "type": record_type,
+                    "rule": rule,
+                    "file": file_path,
+                    "value": value,
+                    "message": message.strip(),
+                }
+            )
+
+    if records:
+        return records
+
+    fallback_warnings = patch_guard.get("project_warnings")
+    if isinstance(fallback_warnings, list):
+        for warning in fallback_warnings:
+            if not isinstance(warning, str) or not warning.strip():
+                continue
+            records.append(
+                {
+                    "work_item_id": str(work_item.id),
+                    "work_item_type": work_item.type,
+                    "mode": "warn" if mode == "off" else mode,
+                    "blocking": False,
+                    "type": "project_contract_warning",
+                    "rule": "unknown",
+                    "file": None,
+                    "value": None,
+                    "message": warning.strip(),
+                }
+            )
+    return records
+
+
+def _project_contract_violation_counts(records: list[dict[str, Any]]) -> dict[str, Any]:
+    by_rule: Counter[str] = Counter()
+    by_type: Counter[str] = Counter()
+    by_file: Counter[str] = Counter()
+    blocking_count = 0
+    for record in records:
+        rule = record.get("rule")
+        if isinstance(rule, str) and rule.strip():
+            by_rule[rule.strip().lower()] += 1
+        record_type = record.get("type")
+        if isinstance(record_type, str) and record_type.strip():
+            by_type[record_type.strip().lower()] += 1
+        file_path = record.get("file")
+        if isinstance(file_path, str) and file_path.strip():
+            by_file[file_path.strip()] += 1
+        if bool(record.get("blocking")):
+            blocking_count += 1
+    return {
+        "total": len(records),
+        "blocking": blocking_count,
+        "warning": max(0, len(records) - blocking_count),
+        "by_rule": dict(by_rule),
+        "by_type": dict(by_type),
+        "by_file": dict(by_file),
+    }
+
+
 async def upsert_run_summary(session: AsyncSession, run_id: uuid.UUID) -> RunSummary | None:
     run = await session.get(Run, run_id)
     if run is None:
@@ -197,6 +292,15 @@ async def upsert_run_summary(session: AsyncSession, run_id: uuid.UUID) -> RunSum
     summary.run_created_at = run.created_at
     summary.finished_at = run.finished_at
     summary_meta = dict(run.summary or {})
+    project_contract_violations: list[dict[str, Any]] = []
+    for item in work_items:
+        project_contract_violations.extend(_coerce_project_contract_violation_records(item))
+    if project_contract_violations:
+        summary_meta["project_contract_violations"] = project_contract_violations[:100]
+        summary_meta["project_contract_violation_counts"] = _project_contract_violation_counts(project_contract_violations)
+    else:
+        summary_meta.pop("project_contract_violations", None)
+        summary_meta.pop("project_contract_violation_counts", None)
     if diff_summary:
         summary_meta["diff_summary"] = diff_summary
     else:

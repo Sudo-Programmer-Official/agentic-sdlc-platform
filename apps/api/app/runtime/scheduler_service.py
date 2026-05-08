@@ -11,8 +11,61 @@ from app.db.session import SessionLocal
 from app.runtime.leases import reclaim_expired_work_items
 from app.services.event_log import record_event
 from app.services.run_delivery import publish_run_branch_if_ready
+from app.services.work_item_state import is_blocking_failure, is_superseded_failure
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
+
+VALIDATION_TERMINAL_TYPES = {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
+
+
+def _is_recovery_item(item: WorkItem) -> bool:
+    payload = item.payload if isinstance(item.payload, dict) else {}
+    result = item.result if isinstance(item.result, dict) else {}
+    return item.type == "FIX_TEST_FAILURE" or any(
+        payload.get(key) for key in ("recovery_action", "recovery_source_id", "failed_work_item_id")
+    ) or any(result.get(key) for key in ("recovery_action", "retry_state"))
+
+
+async def _supersede_stale_failed_recoveries(session, run: Run) -> None:
+    work_items = (
+        await session.execute(select(WorkItem).where(WorkItem.run_id == run.id))
+    ).scalars().all()
+    validation_items = [
+        item
+        for item in work_items
+        if item.type in VALIDATION_TERMINAL_TYPES and not is_superseded_failure(item)
+    ]
+    if not validation_items or not all(item.status in {"DONE", "SKIPPED"} for item in validation_items):
+        return
+
+    finished_at = datetime.now(timezone.utc)
+    changed = False
+    for item in work_items:
+        if item.status != "FAILED" or not _is_recovery_item(item) or is_superseded_failure(item):
+            continue
+        result = dict(item.result or {})
+        result["superseded"] = True
+        result["superseded_reason"] = "validation_path_passed_after_recovery_failure"
+        result["superseded_at"] = finished_at.isoformat()
+        item.result = result
+        session.add(item)
+        changed = True
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            work_item_id=item.id,
+            event_type="WORK_ITEM_SUPERSEDED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            message="Failed recovery item superseded because validation and integration passed.",
+            payload={
+                "work_item_id": str(item.id),
+                "reason": "validation_path_passed_after_recovery_failure",
+            },
+        )
+    if changed:
+        await session.flush()
 
 
 async def _cancel_terminally_blocked_items(session, run: Run) -> int:
@@ -109,9 +162,11 @@ async def tick(session):
                     pass
             continue
 
-        failed_results = (
+        await _supersede_stale_failed_recoveries(session, run)
+
+        failed_items = (
             await session.execute(
-                select(WorkItem.result).where(
+                select(WorkItem).where(
                     WorkItem.run_id == run.id,
                     WorkItem.status == "FAILED",
                 )
@@ -119,8 +174,8 @@ async def tick(session):
         ).scalars().all()
         failed_non_superseded = sum(
             1
-            for result in failed_results
-            if not (isinstance(result, dict) and result.get("superseded") is True)
+            for item in failed_items
+            if is_blocking_failure(item)
         )
         active = (
             await session.execute(

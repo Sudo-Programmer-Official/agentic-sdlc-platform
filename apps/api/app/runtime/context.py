@@ -12,6 +12,7 @@ class RunContext:
     run_id: uuid.UUID
     plan_snapshot: dict | None = None
     architecture_profile: dict | None = None
+    project_contract: dict | None = None
     execution_contract: ExecutionContract | None = None
     workspace_root: str | None = None
     repo_path: str | None = None

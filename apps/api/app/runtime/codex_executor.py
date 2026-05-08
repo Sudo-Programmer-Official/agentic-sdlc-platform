@@ -11,12 +11,13 @@ from app.db.models import Run, WorkItem
 from app.db.session import SessionLocal
 from app.runtime.executor import TaskExecutor, TaskResult
 from app.runtime.context import RunContext
-from app.runtime.execution_contract import ExecutionContract, record_run_budget_usage
+from app.runtime.execution_contract import ExecutionContract, is_recovery_work_item, record_run_budget_usage
 from app.runtime.patch_guard import (
     DEFAULT_MAX_PATCH_FILES,
     HARD_MAX_PATCH_FILES,
     build_patch_guard_meta,
     derive_allowed_files,
+    evaluate_project_contract_precheck,
     evaluate_patch_guard,
     has_mutating_actions,
 )
@@ -150,6 +151,19 @@ def _looks_like_test_path(value: str) -> bool:
 
 def _non_test_paths(values: list[str]) -> list[str]:
     return [path for path in _unique_paths(values) if not _looks_like_test_path(path)]
+
+
+def _project_contract_enforcement_mode(project_contract: dict[str, Any] | None) -> str:
+    payload = project_contract if isinstance(project_contract, dict) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    enforcement = payload.get("enforcement") if isinstance(payload.get("enforcement"), dict) else {}
+    raw_mode = enforcement.get("mode", summary.get("enforcement_mode"))
+    if isinstance(raw_mode, str):
+        normalized = raw_mode.strip().lower()
+        if normalized in {"off", "warn", "strict"}:
+            return normalized
+    enabled = bool(enforcement.get("enabled", summary.get("enforcement_enabled", False)))
+    return "warn" if enabled else "off"
 
 
 def _fix_test_failure_writable_scope(
@@ -327,7 +341,7 @@ class CodexExecutor(TaskExecutor):
             return policy.selected_model_tier
         if retry_reason in {"rate_limit", "timeout", "transient_network_failure"}:
             return policy.selected_model_tier
-        if retry_reason in {"structured_parser_failure", "stage_scope_violation"} and work_item.type in {
+        if retry_reason in {"structured_parser_failure", "stage_scope_violation", "project_contract_violation"} and work_item.type in {
             "PLAN_DAG",
             "WRITE_TESTS",
             "CODE_FRONTEND",
@@ -357,6 +371,11 @@ class CodexExecutor(TaskExecutor):
             },
             "warnings": ["run_budget_exhausted"],
         }
+
+    def _budget_next_action(self, work_item: WorkItem) -> str:
+        if is_recovery_work_item(work_item):
+            return "Increase recovery budget, fork with a higher cap, or manually repair the workspace."
+        return "Split the run or reset the run budget before executing more autonomous work."
 
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
@@ -422,6 +441,8 @@ class CodexExecutor(TaskExecutor):
         }
         if isinstance(context.architecture_profile, dict):
             context_bundle["meta"]["architecture_profile"] = context.architecture_profile
+        if isinstance(context.project_contract, dict):
+            context_bundle["meta"]["project_contract"] = context.project_contract
         if contract is not None:
             context_bundle["meta"]["execution_contract"] = contract.to_dict()
         if isinstance(context.plan_snapshot, dict):
@@ -448,6 +469,29 @@ class CodexExecutor(TaskExecutor):
             scope_mode=str(edit_budget["mode"]) if edit_budget.get("mode") else None,
             target_files=target_files,
         )
+        recovery_mode = is_recovery_work_item(work_item)
+        if contract is not None:
+            contract.budget.refresh(recovery_mode=recovery_mode)
+            context_bundle["meta"]["execution_contract"] = contract.to_dict()
+        if contract is not None and contract.budget.budget_mode == "BLOCKED":
+            next_action = (
+                "Increase recovery budget, fork with a higher cap, or manually repair the workspace."
+                if recovery_mode
+                else self._budget_next_action(work_item)
+            )
+            return {
+                "status": "FAILED",
+                "message": "run_budget_exhausted",
+                "payload": {
+                    "next_action": next_action,
+                    "budget": contract.budget.to_dict(),
+                    "validation_state": contract.validation_state,
+                    "retry_state": contract.retry_state,
+                    "recovery_blocked": recovery_mode,
+                },
+                "warnings": ["run_budget_exhausted"],
+            }
+
         graph_context = await self._load_graph_context(work_item)
         if graph_context:
             context_bundle["graph_context"] = graph_context
@@ -463,19 +507,6 @@ class CodexExecutor(TaskExecutor):
 
         # Adaptive patch ratio based on stage
         ratio = self._patch_ratio_for(work_item)
-
-        if contract is not None and contract.budget.budget_mode == "BLOCKED":
-            return {
-                "status": "FAILED",
-                "message": "run_budget_exhausted",
-                "payload": {
-                    "next_action": "Split the run or reset the run budget before executing more autonomous work.",
-                    "budget": contract.budget.to_dict(),
-                    "validation_state": contract.validation_state,
-                    "retry_state": contract.retry_state,
-                },
-                "warnings": ["run_budget_exhausted"],
-            }
 
         # Build minimal context (future: fetch relevant files)
         user_prompt = json.dumps(
@@ -635,7 +666,7 @@ class CodexExecutor(TaskExecutor):
                     output_tokens=current_output_tokens,
                 )
                 if contract is not None and contract.budget.budget_mode == "BLOCKED":
-                    next_action = "Split the run or reset the run budget before executing more autonomous work."
+                    next_action = self._budget_next_action(work_item)
                     await self._job_manager.fail_job(
                         prepared.job_id,
                         reason="run_budget_exhausted",
@@ -792,13 +823,99 @@ class CodexExecutor(TaskExecutor):
         patch_guard = None
         patch_repair_attempted = False
         stage_scope_repair_attempted = False
+        project_contract_repair_attempted = False
         while True:
+            project_contract_check = evaluate_project_contract_precheck(
+                actions=plan.actions,
+                project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
+            )
+            if (
+                project_contract_check.violations
+                and not project_contract_repair_attempted
+                and self._is_project_contract_repair_candidate(
+                    work_item=work_item,
+                    violations=project_contract_check.violations,
+                )
+            ):
+                project_contract_repair_attempted = True
+                await self._job_manager.record_retry(prepared.job_id, "project_contract_violation")
+                try:
+                    plan, raw, repair_usage, repair_model_tier, repair_model_name = (
+                        await self._repair_plan_after_project_contract_violation(
+                            client=client,
+                            prepared=prepared,
+                            user_prompt=user_prompt,
+                            allowed_files=allowed_files,
+                            violations=project_contract_check.violations,
+                            work_item=work_item,
+                            contract=contract,
+                            enforcement_mode=project_contract_check.mode,
+                        )
+                    )
+                except Exception as repair_exc:
+                    plan.warnings.append(f"project_contract_repair_failed:{repair_exc}")
+                else:
+                    repair_input_tokens = int(
+                        repair_usage.get("input_tokens") or estimate_tokens(system_prompt + user_prompt)
+                    )
+                    repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
+                    usage_input_tokens += repair_input_tokens
+                    usage_output_tokens += repair_output_tokens
+                    usage_cost_cents = round(
+                        usage_cost_cents
+                        + self._job_manager.estimate_cost_cents(
+                            repair_model_tier,
+                            repair_input_tokens,
+                            repair_output_tokens,
+                        ),
+                        4,
+                    )
+                    usage = {
+                        "input_tokens": usage_input_tokens,
+                        "output_tokens": usage_output_tokens,
+                    }
+                    attempt_tiers.append(repair_model_tier)
+                    effective_model_tier = repair_model_tier
+                    effective_model_name = repair_model_name
+                    contract = await self._record_execution_budget(
+                        context,
+                        prepared_job_id=str(prepared.job_id),
+                        work_item_id=str(work_item.id),
+                        selected_model_tier=repair_model_tier,
+                        input_tokens=repair_input_tokens,
+                        output_tokens=repair_output_tokens,
+                    )
+                    if contract is not None and contract.budget.budget_mode == "BLOCKED":
+                        next_action = self._budget_next_action(work_item)
+                        await self._job_manager.fail_job(
+                            prepared.job_id,
+                            reason="run_budget_exhausted",
+                            next_action=next_action,
+                            error_kind="run_budget_exhausted",
+                            input_tokens=usage_input_tokens,
+                            output_tokens=usage_output_tokens,
+                            actual_cost_cents=usage_cost_cents,
+                            details={
+                                "attempt_tiers": attempt_tiers,
+                                "provider": self.settings.llm_provider,
+                                "model_name": repair_model_name,
+                                "budget": contract.budget.to_dict(),
+                            },
+                        )
+                        return self._run_budget_exhausted_result(
+                            contract=contract,
+                            prepared_job_id=str(prepared.job_id),
+                            next_action=next_action,
+                        )
+                    continue
+
             patch_guard = evaluate_patch_guard(
                 actions=plan.actions,
                 allowed_files=allowed_files,
                 file_budget=int(edit_budget["file_budget"]),
                 hard_file_budget=int(edit_budget["hard_file_budget"]),
                 contract=contract,
+                project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
             )
             stage_violations = _stage_scope_violations(work_item, plan.actions, patch_guard.touched_files)
             if stage_violations:
@@ -886,7 +1003,7 @@ class CodexExecutor(TaskExecutor):
                             output_tokens=repair_output_tokens,
                         )
                         if contract is not None and contract.budget.budget_mode == "BLOCKED":
-                            next_action = "Split the run or reset the run budget before executing more autonomous work."
+                            next_action = self._budget_next_action(work_item)
                             await self._job_manager.fail_job(
                                 prepared.job_id,
                                 reason="run_budget_exhausted",
@@ -929,6 +1046,10 @@ class CodexExecutor(TaskExecutor):
                         "touched_files": patch_guard.touched_files,
                         "protected_zones": patch_guard.protected_zones,
                         "safe_zones": patch_guard.safe_zones,
+                        "project_rules_applied": patch_guard.project_rules_applied,
+                        "project_warnings": patch_guard.project_warnings,
+                        "project_enforcement_mode": patch_guard.project_enforcement_mode,
+                        "project_violation_records": patch_guard.project_violation_records,
                     },
                     "warnings": ["patch_guard_violation"],
                 }
@@ -1054,7 +1175,7 @@ class CodexExecutor(TaskExecutor):
                             output_tokens=repair_output_tokens,
                         )
                         if contract is not None and contract.budget.budget_mode == "BLOCKED":
-                            next_action = "Split the run or reset the run budget before executing more autonomous work."
+                            next_action = self._budget_next_action(work_item)
                             await self._job_manager.fail_job(
                                 prepared.job_id,
                                 reason="run_budget_exhausted",
@@ -1134,6 +1255,7 @@ class CodexExecutor(TaskExecutor):
             review_metrics["patch_complexity"] = plan.patch_complexity
         if 'git_diff' in {a["type"] for a in artifacts}:
             review_metrics["patch_lines"] = changed_lines if 'changed_lines' in locals() else None
+        combined_warnings = list(dict.fromkeys([*plan.warnings, *patch_guard.project_warnings]))
         final_status = "completed" if effective_status in {"DONE", "SKIPPED"} else "failed"
         if final_status == "completed":
             await self._job_manager.complete_job(
@@ -1144,7 +1266,7 @@ class CodexExecutor(TaskExecutor):
                 confidence_score=plan.confidence,
                 details={
                     "review_metrics": review_metrics,
-                    "warnings": plan.warnings,
+                    "warnings": combined_warnings,
                     "attempt_tiers": attempt_tiers,
                     "effective_model_tier": effective_model_tier,
                     "model_name": effective_model_name,
@@ -1162,7 +1284,7 @@ class CodexExecutor(TaskExecutor):
                 actual_cost_cents=usage_cost_cents,
                 details={
                     "review_metrics": review_metrics,
-                    "warnings": plan.warnings,
+                    "warnings": combined_warnings,
                     "attempt_tiers": attempt_tiers,
                     "effective_model_tier": effective_model_tier,
                     "model_name": effective_model_name,
@@ -1174,7 +1296,7 @@ class CodexExecutor(TaskExecutor):
             "message": effective_message,
             "payload": {
                 "artifacts": artifacts,
-                "warnings": plan.warnings,
+                "warnings": combined_warnings,
                 "ai_job_id": str(prepared.job_id),
                 "ai_selected_tier": prepared.policy.selected_model_tier,
                 "ai_effective_tier": effective_model_tier,
@@ -1188,6 +1310,10 @@ class CodexExecutor(TaskExecutor):
                     "hard_file_budget": patch_guard.hard_file_budget,
                     "protected_zones": patch_guard.protected_zones,
                     "safe_zones": patch_guard.safe_zones,
+                    "project_rules_applied": patch_guard.project_rules_applied,
+                    "project_warnings": patch_guard.project_warnings,
+                    "project_enforcement_mode": patch_guard.project_enforcement_mode,
+                    "project_violation_records": patch_guard.project_violation_records,
                 },
                 "review": review_metrics,
                 "usage": usage,
@@ -1490,6 +1616,20 @@ class CodexExecutor(TaskExecutor):
         if work_item.type == "WRITE_TESTS":
             return any("WRITE_TESTS may only modify Python test files" in violation for violation in violations)
         return False
+
+    def _is_project_contract_repair_candidate(
+        self,
+        *,
+        work_item: WorkItem,
+        violations: list[str],
+    ) -> bool:
+        if not violations:
+            return False
+        if "PLAN" in work_item.type:
+            return False
+        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION", "RUN_TESTS"}:
+            return False
+        return True
 
     def _is_likely_truncated_json_output(self, raw: str, error: Exception) -> bool:
         if not isinstance(error, json.JSONDecodeError):
@@ -1818,6 +1958,110 @@ class CodexExecutor(TaskExecutor):
         )
         return plan, raw, usage, effective_model_tier, effective_model_name
 
+    async def _repair_plan_after_project_contract_violation(
+        self,
+        *,
+        client: OpenAIClient,
+        prepared,
+        user_prompt: str,
+        allowed_files: list[str],
+        violations: list[str],
+        work_item: WorkItem,
+        contract: ExecutionContract | None,
+        enforcement_mode: str,
+    ) -> tuple[CodexPlan, str, dict[str, Any], str, str]:
+        allowed_text = ", ".join(allowed_files[:6]) if allowed_files else "the scoped files"
+        repair_prompt = (
+            f"{user_prompt}\n\n"
+            "Your previous response violated the project contract.\n"
+            f"Violations: {'; '.join(violations)}\n"
+            "Do not redesign the feature or broaden the run plan. Repair only the scoped change.\n"
+            f"Stay within these files: {allowed_text}.\n"
+            "Replace inline styles with classes/tokens and replace ad-hoc hex colors with approved tokenized styles.\n"
+            "Return a corrected JSON object matching the schema.\n"
+            "Do not include prose outside the JSON object."
+        )
+        if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND"}:
+            repair_prompt += (
+                "\nIf a long apply_patch diff risks malformed hunks, prefer write_file for one scoped file with full contents."
+            )
+        if work_item.type == "WRITE_TESTS":
+            repair_prompt += (
+                "\nWRITE_TESTS may only modify scoped test files. Never modify non-test implementation files."
+            )
+        if enforcement_mode == "strict":
+            repair_prompt += "\nStrict enforcement is active. Any contract violation will be rejected."
+        else:
+            repair_prompt += "\nWarn enforcement is active. Violations are logged, but you should still correct them now."
+
+        current_prompt = repair_prompt
+        current_max_tokens = self.settings.codex_max_tokens
+        raw = ""
+        usage: dict[str, Any] = {}
+        retry_reason = "project_contract_violation"
+        effective_model_tier = prepared.policy.selected_model_tier
+        effective_model_name = prepared.model_name or self.settings.codex_model
+        system_prompt = self._system_prompt_for(work_item)
+        for retry_count in range(REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT + 1):
+            effective_model_tier = self._effective_model_tier(
+                policy=prepared.policy,
+                work_item=work_item,
+                attempt=retry_count + 1,
+                retry_reason=retry_reason,
+            )
+            effective_model_name = self._model_name_for_tier(
+                effective_model_tier,
+                fallback=prepared.model_name or self.settings.codex_model,
+            )
+            raw, usage = await client.generate(
+                system_prompt,
+                current_prompt,
+                model=effective_model_name,
+                temperature=self.settings.codex_temperature,
+                max_tokens=current_max_tokens,
+                timeout=self.settings.codex_timeout_seconds,
+            )
+            try:
+                data = json.loads(raw)
+                plan = CodexPlan.model_validate(data)
+                break
+            except Exception as exc:
+                parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
+                if parse_failure and retry_count < REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT:
+                    await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
+                    retry_reason = "structured_parser_failure"
+                    next_retry_tier = self._effective_model_tier(
+                        policy=prepared.policy,
+                        work_item=work_item,
+                        attempt=retry_count + 2,
+                        retry_reason=retry_reason,
+                    )
+                    current_max_tokens = self._parse_retry_max_tokens(
+                        current_max_tokens=current_max_tokens,
+                        selected_model_tier=next_retry_tier,
+                        work_item=work_item,
+                        contract=contract,
+                    )
+                    current_prompt = self._build_parse_retry_prompt(
+                        user_prompt=repair_prompt,
+                        raw=raw,
+                        error=exc,
+                        work_item=work_item,
+                        allowed_files=allowed_files,
+                        retry_count=retry_count + 1,
+                    )
+                    continue
+                raise ValueError(f"Project-contract repair output was invalid: {exc}") from exc
+        log.warning(
+            "AI project-contract repair retry run_id=%s work_item_id=%s ai_job_id=%s work_item_type=%s mode=%s",
+            work_item.run_id,
+            work_item.id,
+            prepared.job_id,
+            work_item.type,
+            enforcement_mode,
+        )
+        return plan, raw, usage, effective_model_tier, effective_model_name
+
     async def _record_execution_budget(
         self,
         context: RunContext,
@@ -1870,6 +2114,7 @@ class CodexExecutor(TaskExecutor):
             and all(Path(path).suffix.lower() in {".html", ".css", ".js", ".mjs", ".cjs"} for path in target_files)
         )
         architecture = context.architecture_profile if context and isinstance(context.architecture_profile, dict) else {}
+        project_contract = context.project_contract if context and isinstance(context.project_contract, dict) else {}
         review_stage = work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}
         if review_stage:
             base = (
@@ -1916,6 +2161,62 @@ class CodexExecutor(TaskExecutor):
         recipe_names = list(contract.validation_recipes) if contract is not None else []
         if recipe_names:
             base += " Validation recipes available: " + ", ".join(recipe_names[:4]) + "."
+        project_summary = project_contract.get("summary") if isinstance(project_contract.get("summary"), dict) else {}
+        project_enforcement = (
+            project_contract.get("enforcement") if isinstance(project_contract.get("enforcement"), dict) else {}
+        )
+        project_enforcement_mode = _project_contract_enforcement_mode(project_contract)
+        brand_kit = project_contract.get("brand_kit") if isinstance(project_contract.get("brand_kit"), dict) else {}
+        design_system = (
+            project_contract.get("design_system") if isinstance(project_contract.get("design_system"), dict) else {}
+        )
+        if isinstance(project_summary, dict):
+            active_rules = [
+                item
+                for item in project_summary.get("active_rules", [])
+                if isinstance(item, str) and item.strip()
+            ]
+            if active_rules:
+                base += " Project contract rules: " + ", ".join(active_rules[:4]) + "."
+        brand_tokens = brand_kit.get("tokens") if isinstance(brand_kit.get("tokens"), dict) else {}
+        token_names: list[str] = []
+        if brand_tokens:
+            token_names = [str(name).strip() for name in list(brand_tokens.keys())[:6] if str(name).strip()]
+            if token_names:
+                base += " Use brand tokens when styling UI changes: " + ", ".join(token_names) + "."
+        components_value = design_system.get("components")
+        components: list[str] = []
+        if isinstance(components_value, list):
+            for item in components_value:
+                if isinstance(item, str) and item.strip():
+                    components.append(item.strip())
+                elif isinstance(item, dict):
+                    name = item.get("name")
+                    if isinstance(name, str) and name.strip():
+                        components.append(name.strip())
+            if components:
+                base += " Prefer approved design-system components: " + ", ".join(components[:6]) + "."
+        if project_enforcement_mode in {"warn", "strict"} and not review_stage:
+            base += (
+                f" Project contract enforcement mode: {project_enforcement_mode.upper()}. "
+                "You MUST follow project contract rules for this task."
+            )
+            if bool(project_enforcement.get("disallow_inline_styles")):
+                base += " Do NOT use inline style attributes."
+            if bool(project_enforcement.get("enforce_color_tokens")):
+                base += " Do NOT introduce raw hex colors outside approved tokens."
+            if components:
+                base += " Use approved components when relevant: " + ", ".join(components[:6]) + "."
+            if token_names:
+                base += " Use approved brand tokens: " + ", ".join(token_names[:6]) + "."
+            if project_enforcement_mode == "strict":
+                base += " Violation of these rules will cause rejection."
+            else:
+                base += " Violations are logged and trigger corrective retries; return a contract-compliant patch."
+        if bool(project_enforcement.get("disallow_inline_styles")):
+            base += " Avoid inline style attributes; prefer tokenized classes or shared styles."
+        if bool(project_enforcement.get("enforce_color_tokens")):
+            base += " Avoid introducing ad-hoc hex colors outside the brand token palette."
         if contract is not None and contract.validation_state not in {"", "NOT_REQUIRED"}:
             base += f" Current validation state: {contract.validation_state}."
         if contract is not None and contract.retry_state not in {"", "IDLE"}:
@@ -2014,12 +2315,49 @@ class CodexExecutor(TaskExecutor):
             "feature_key": payload.get("feature_key"),
             "surface": payload.get("surface"),
         }
+        project_contract = (
+            context_bundle.get("meta", {}).get("project_contract")
+            if isinstance(context_bundle.get("meta"), dict)
+            else None
+        )
+        if isinstance(project_contract, dict):
+            summary = project_contract.get("summary") if isinstance(project_contract.get("summary"), dict) else {}
+            if isinstance(summary, dict):
+                status = summary.get("status")
+                if isinstance(status, str) and status.strip():
+                    metadata["project_contract_status"] = status.strip()
+                if isinstance(summary.get("enforcement_enabled"), bool):
+                    metadata["project_contract_enforcement"] = summary.get("enforcement_enabled")
+                mode = _project_contract_enforcement_mode(project_contract)
+                metadata["project_contract_enforcement_mode"] = mode
+                active_rules = [
+                    item
+                    for item in summary.get("active_rules", [])
+                    if isinstance(item, str) and item.strip()
+                ]
+                if active_rules:
+                    metadata["project_contract_rules"] = active_rules[:8]
         if execution_contract is not None:
             metadata["validation_state"] = execution_contract.validation_state
             metadata["retry_state"] = execution_contract.retry_state
             metadata["budget_mode"] = execution_contract.budget.budget_mode
+            metadata["active_budget_partition"] = execution_contract.budget.active_budget_partition
+            metadata["recovery_reserve_cost_cents"] = execution_contract.budget.recovery_reserve_cost_cents
+            metadata["remaining_recovery_cost_cents"] = execution_contract.budget.remaining_recovery_cost_cents
             if execution_contract.budget.model_tier_cap:
                 metadata["max_model_tier_cap"] = execution_contract.budget.model_tier_cap
+        recovery_tier = payload.get("recovery_tier")
+        if isinstance(recovery_tier, str) and recovery_tier.strip():
+            recovery_tier = recovery_tier.strip()
+            metadata["recovery_tier"] = recovery_tier
+            if recovery_tier == "cheap_recovery":
+                metadata["selected_model_tier_override"] = "tier_economy"
+                metadata["max_model_tier_cap"] = "tier_economy"
+            elif recovery_tier == "code_repair":
+                metadata["selected_model_tier_override"] = "tier_standard"
+            elif recovery_tier == "deterministic":
+                metadata["selected_model_tier_override"] = "tier_economy"
+                metadata["max_model_tier_cap"] = "tier_economy"
         return AIJobRequest(
             workflow_type=workflow_type,
             role=role,

@@ -70,6 +70,7 @@ async def create_pr_from_artifact(
         repo_provider=project_repo.provider,
         repo_full_name=project_repo.repo_full_name,
         repo_installation_id=project_repo.installation_id,
+        repo_auth_strategy=project_repo.auth_strategy,
     )
     repo_path = Path(run.repo_path or "")
     if not repo_path.exists():
@@ -82,6 +83,7 @@ async def create_pr_from_artifact(
         default_branch=project_repo.default_branch,
         repo_full_name=project_repo.repo_full_name,
         installation_id=project_repo.installation_id,
+        auth_strategy=project_repo.auth_strategy,
         work_branch=working_branch,
     )
 
@@ -145,6 +147,7 @@ async def create_pr_from_artifact(
             repo_url=project_repo.repo_url,
             repo_full_name=project_repo.repo_full_name,
             installation_id=project_repo.installation_id,
+            auth_strategy=project_repo.auth_strategy,
         )
     else:
         commit_sha = str(summary.get("remote_branch_commit_sha") or "").strip() or current_head_sha(repo_path)

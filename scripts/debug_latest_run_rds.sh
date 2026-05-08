@@ -88,6 +88,18 @@ echo
 
 psql "${DB_URL}" -v ON_ERROR_STOP=1 <<SQL
 \pset pager off
+\echo '== project contract =='
+select
+  id,
+  status,
+  source,
+  version,
+  left(coalesce(summary,''), 180) as summary,
+  left(coalesce(derived_json::text,''), 420) as derived_json
+from project_contracts
+where project_id = '${PROJECT_ID}';
+
+\echo ''
 \echo '== run summary =='
 select
   id,

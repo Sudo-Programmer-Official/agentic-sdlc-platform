@@ -54,6 +54,7 @@ async def publish_run_branch_if_ready(
         repo_url=project_repo.repo_url,
         repo_full_name=project_repo.repo_full_name,
         installation_id=project_repo.installation_id,
+        auth_strategy=project_repo.auth_strategy,
     )
 
     pushed_at = datetime.now(timezone.utc).isoformat()

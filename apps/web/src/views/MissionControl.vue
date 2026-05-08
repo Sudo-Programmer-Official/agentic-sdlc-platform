@@ -521,6 +521,79 @@
               <strong>Assumptions:</strong> {{ architectureProfile.assumptions_used.join(" · ") }}
             </div>
           </div>
+          <div v-if="projectContract" class="mission-subcard p-3 text-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div class="text-xs uppercase tracking-wide text-slate-400">Project Contract</div>
+                <div class="mt-1 font-semibold text-slate-900">
+                  {{ projectContract.status || "MISSING" }}
+                  <span class="text-slate-500">· v{{ projectContract.version ?? "—" }}</span>
+                </div>
+              </div>
+              <el-tag
+                size="small"
+                effect="light"
+                :type="projectContractEnforcementMode === 'strict' ? 'danger' : projectContractEnforcementMode === 'warn' ? 'warning' : 'info'"
+              >
+                {{
+                  projectContractEnforcementMode === "strict"
+                    ? "STRICT enforcement active"
+                    : projectContractEnforcementMode === "warn"
+                    ? "ENABLED (WARN)"
+                    : "Enforcement OFF"
+                }}
+              </el-tag>
+            </div>
+            <div class="mt-2 text-slate-600">
+              {{ projectContract.summary || "No project contract summary recorded." }}
+            </div>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <el-button
+                size="small"
+                plain
+                :loading="projectContractBootstrapLoading"
+                :disabled="projectContractActionInFlight"
+                @click="bootstrapProjectContractFromMissionControl"
+              >
+                {{ projectContractProfileExists ? "Re-sync Contract" : "Initialize Contract" }}
+              </el-button>
+              <el-button
+                size="small"
+                type="success"
+                plain
+                :loading="projectContractEnforcementLoading"
+                :disabled="projectContractActionInFlight"
+                @click="enableProjectContractEnforcement"
+              >
+                Enable Enforcement (WARN)
+              </el-button>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :loading="projectContractStrictLoading"
+                :disabled="projectContractActionInFlight || projectContractEnforcementMode === 'strict'"
+                @click="upgradeProjectContractEnforcementToStrict"
+              >
+                Upgrade to Strict
+              </el-button>
+            </div>
+            <div v-if="projectContractActionError" class="mt-2 text-xs text-rose-600">
+              {{ projectContractActionError }}
+            </div>
+            <div class="mt-2 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+              <div><strong>Brand tokens:</strong> {{ projectContract.brand_token_count || 0 }}</div>
+              <div><strong>Components:</strong> {{ projectContract.component_count || 0 }}</div>
+              <div><strong>Active rules:</strong> {{ projectContract.active_rules?.join(", ") || "—" }}</div>
+              <div><strong>Blocked patterns:</strong> {{ projectContract.blocked_patterns?.join(", ") || "—" }}</div>
+            </div>
+            <div v-if="projectContract.allowed_css_var_prefixes?.length" class="mt-2 text-xs text-slate-500">
+              <strong>CSS var prefixes:</strong> {{ projectContract.allowed_css_var_prefixes.join(", ") }}
+            </div>
+            <div v-if="projectContract.assumptions_used?.length" class="mt-2 text-xs text-slate-500">
+              <strong>Assumptions:</strong> {{ projectContract.assumptions_used.join(" · ") }}
+            </div>
+          </div>
           <div v-if="latestExecutionContract" class="mission-subcard p-3 text-sm">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <div>
@@ -546,6 +619,8 @@
               <div><strong>Allowed files:</strong> {{ latestExecutionContract.allowed_file_count }}</div>
               <div><strong>Token budget:</strong> {{ formatBudgetTokenUsage(latestExecutionContract.budget?.used_tokens, latestExecutionContract.budget?.max_tokens) }}</div>
               <div><strong>Cost budget:</strong> {{ formatBudgetCents(latestExecutionContract.budget?.used_cost_cents) }} / {{ formatBudgetCents(latestExecutionContract.budget?.max_cost_cents) }}</div>
+              <div><strong>Recovery reserve:</strong> {{ formatBudgetCents(latestExecutionContract.budget?.remaining_recovery_cost_cents) }} / {{ formatBudgetCents(latestExecutionContract.budget?.recovery_reserve_cost_cents) }}</div>
+              <div><strong>Budget partition:</strong> {{ humanizeToken(latestExecutionContract.budget?.active_budget_partition || "main") }}</div>
               <div><strong>Model cap:</strong> {{ latestExecutionContract.budget?.model_tier_cap || "open" }}</div>
               <div><strong>Completion cap:</strong> {{ latestExecutionContract.budget?.completion_token_cap ?? "—" }}</div>
             </div>
@@ -989,7 +1064,7 @@
       </div>
     </div>
 
-    <div v-if="project" class="grid gap-4 lg:grid-cols-2">
+    <div v-if="project" class="grid gap-4 xl:grid-cols-3">
       <div class="premium-card mission-panel p-6">
         <div class="flex items-center justify-between gap-3">
           <div>
@@ -1073,6 +1148,108 @@
           </div>
         </div>
         <div v-else class="mt-4 text-sm text-slate-500">No system insights yet.</div>
+      </div>
+
+      <div class="premium-card mission-panel p-6">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <div class="text-sm uppercase tracking-wide text-slate-400">Contract Violations</div>
+            <div class="text-xs text-slate-500">Recent design-rule violations observed by patch guard.</div>
+          </div>
+          <el-tag
+            v-if="violationInsights"
+            effect="light"
+            :type="violationSummaryTagType(violationInsights)"
+          >
+            {{
+              violationInsights.latest_run_blocking > 0
+                ? "BLOCKING"
+                : violationInsights.latest_run_warning > 0
+                ? "WARNINGS"
+                : "CLEAN"
+            }}
+          </el-tag>
+        </div>
+        <div v-if="violationInsights" class="mt-4 space-y-4">
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="mission-subcard p-3 text-sm">
+              <div class="text-xs uppercase tracking-wide text-slate-400">Latest Run</div>
+              <div class="mt-1 text-lg font-semibold text-slate-900">{{ violationInsights.latest_run_total }}</div>
+            </div>
+            <div class="mission-subcard p-3 text-sm">
+              <div class="text-xs uppercase tracking-wide text-slate-400">Recent Window</div>
+              <div class="mt-1 text-lg font-semibold text-slate-900">
+                {{ violationInsights.recent_total }} / {{ violationInsights.recent_run_window }} runs
+              </div>
+            </div>
+            <div class="mission-subcard p-3 text-sm">
+              <div class="text-xs uppercase tracking-wide text-slate-400">Blocking</div>
+              <div class="mt-1 text-lg font-semibold text-rose-600">{{ violationInsights.latest_run_blocking }}</div>
+            </div>
+            <div class="mission-subcard p-3 text-sm">
+              <div class="text-xs uppercase tracking-wide text-slate-400">Warnings</div>
+              <div class="mt-1 text-lg font-semibold text-amber-600">{{ violationInsights.latest_run_warning }}</div>
+            </div>
+          </div>
+          <div class="grid gap-4 sm:grid-cols-3">
+            <div>
+              <div class="text-xs uppercase tracking-wide text-slate-400">Top Rules</div>
+              <ul class="mt-2 space-y-1 text-sm text-slate-600">
+                <li v-for="item in violationInsights.top_rules" :key="`rule-${item.name}`">
+                  {{ humanizeToken(item.name) }} · {{ item.count }}
+                </li>
+                <li v-if="!violationInsights.top_rules.length">—</li>
+              </ul>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-slate-400">Top Types</div>
+              <ul class="mt-2 space-y-1 text-sm text-slate-600">
+                <li v-for="item in violationInsights.top_types" :key="`type-${item.name}`">
+                  {{ humanizeToken(item.name) }} · {{ item.count }}
+                </li>
+                <li v-if="!violationInsights.top_types.length">—</li>
+              </ul>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-slate-400">Top Files</div>
+              <ul class="mt-2 space-y-1 text-sm text-slate-600">
+                <li v-for="item in violationInsights.top_files" :key="`file-${item.name}`">
+                  {{ item.name }} · {{ item.count }}
+                </li>
+                <li v-if="!violationInsights.top_files.length">—</li>
+              </ul>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs uppercase tracking-wide text-slate-400">Recent Samples</div>
+            <div v-if="violationInsights.recent_samples.length" class="mt-2 space-y-2">
+              <div
+                v-for="(sample, index) in violationInsights.recent_samples"
+                :key="`${sample.run_id}-${sample.rule}-${index}`"
+                class="mission-subcard p-3 text-xs text-slate-600"
+              >
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <div class="font-mono text-[11px] text-slate-700">
+                    {{ shortRunId(sample.run_id) }} · {{ sample.work_item_type || "WORK_ITEM" }}
+                  </div>
+                  <el-tag size="small" effect="light" :type="sample.blocking ? 'danger' : 'warning'">
+                    {{ sample.blocking ? "BLOCKING" : "WARN" }}
+                  </el-tag>
+                </div>
+                <div class="mt-1">
+                  {{ sample.message || `${humanizeToken(sample.rule)} triggered` }}
+                </div>
+                <div class="mt-1 text-[11px] text-slate-500">
+                  Rule: {{ humanizeToken(sample.rule) }}
+                  <span v-if="sample.file"> · File: {{ sample.file }}</span>
+                  <span v-if="sample.value"> · Value: {{ sample.value }}</span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="mt-2 text-sm text-slate-500">No recent violations captured.</div>
+          </div>
+        </div>
+        <div v-else class="mt-4 text-sm text-slate-500">No violation insights yet.</div>
       </div>
     </div>
 
@@ -1976,6 +2153,7 @@ import ExecutionConsolePanel from "../components/workbench/ExecutionConsolePanel
 import ReviewSurfacePanel from "../components/workbench/ReviewSurfacePanel.vue";
 import TaskQueuePanel from "../components/workbench/TaskQueuePanel.vue";
 import {
+  bootstrapProjectContract,
   compareRuns,
   createApproval,
   createRun,
@@ -2001,6 +2179,7 @@ import {
   listRunEvents,
   listRuns,
   listWorkItems,
+  patchProjectContract,
   reportRunIssue,
   resumeRun,
   updateRunStatus,
@@ -2105,6 +2284,10 @@ const resumeLoading = ref(false);
 const runNarrativeLoading = ref(false);
 const runNarrativeError = ref("");
 const runNarrative = ref<any | null>(null);
+const projectContractBootstrapLoading = ref(false);
+const projectContractEnforcementLoading = ref(false);
+const projectContractStrictLoading = ref(false);
+const projectContractActionError = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
 const latestRun = computed(() => runs.value[0] || null);
@@ -2141,6 +2324,21 @@ const recentRunCards = computed(() => missionOverview.value?.recent_runs || []);
 const latestChangeImpact = computed(() => missionOverview.value?.latest_change_impact || null);
 const previewsAndPrs = computed(() => missionOverview.value?.previews_and_prs || null);
 const architectureProfile = computed(() => missionOverview.value?.architecture_profile || null);
+const projectContract = computed(() => missionOverview.value?.project_contract || null);
+const projectContractProfileExists = computed(() => Boolean(projectContract.value?.profile_exists));
+const projectContractActionInFlight = computed(
+  () =>
+    projectContractBootstrapLoading.value
+    || projectContractEnforcementLoading.value
+    || projectContractStrictLoading.value
+);
+const projectContractEnforcementMode = computed<"off" | "warn" | "strict">(() => {
+  const rawMode = String(projectContract.value?.enforcement_mode || "").toLowerCase();
+  if (rawMode === "warn" || rawMode === "strict" || rawMode === "off") {
+    return rawMode;
+  }
+  return projectContract.value?.enforcement_enabled ? "warn" : "off";
+});
 const latestExecutionContract = computed(
   () => missionOverview.value?.latest_execution_contract || executionConsole.value?.summary?.execution_contract || null
 );
@@ -2149,6 +2347,7 @@ const previewRunId = computed(
 );
 const strategyLearning = computed(() => missionOverview.value?.strategy_learning || []);
 const systemInsights = computed(() => missionOverview.value?.system_insights || null);
+const violationInsights = computed(() => missionOverview.value?.violation_insights || null);
 const latestArtifactApproval = computed(() => createPrApprovals.value[0] || null);
 const latestArtifactApprovalStatus = computed(() => latestArtifactApproval.value?.status || null);
 const createPrReady = computed(
@@ -2502,6 +2701,10 @@ function resetState() {
   runNarrativeLoading.value = false;
   runNarrativeError.value = "";
   runNarrative.value = null;
+  projectContractBootstrapLoading.value = false;
+  projectContractEnforcementLoading.value = false;
+  projectContractStrictLoading.value = false;
+  projectContractActionError.value = "";
 }
 
 function primeContext() {
@@ -2579,6 +2782,113 @@ async function loadMissionOverview() {
   } catch (err: any) {
     missionOverview.value = null;
     overviewError.value = err?.message || "Failed to load Mission Control overview.";
+  }
+}
+
+async function bootstrapProjectContractFromMissionControl() {
+  if (!projectId.value) return;
+  projectContractBootstrapLoading.value = true;
+  projectContractActionError.value = "";
+  try {
+    await bootstrapProjectContract(projectId.value, {
+      created_by: "ui-user",
+    });
+    await loadMissionOverview();
+    ElMessage.success("Project contract initialized.");
+  } catch (err: any) {
+    projectContractActionError.value = err?.message || "Failed to initialize project contract.";
+  } finally {
+    projectContractBootstrapLoading.value = false;
+  }
+}
+
+async function enableProjectContractEnforcement() {
+  if (!projectId.value) return;
+  projectContractEnforcementLoading.value = true;
+  projectContractActionError.value = "";
+  const shouldBootstrap = !projectContractProfileExists.value;
+  try {
+    if (shouldBootstrap) {
+      await bootstrapProjectContract(projectId.value, {
+        created_by: "ui-user",
+      });
+    }
+    await patchProjectContract(projectId.value, {
+      sections: {
+        enforcement: {
+          enabled: true,
+          mode: "warn",
+          disallow_inline_styles: true,
+          enforce_color_tokens: true,
+          require_known_css_variables: false,
+        },
+        design_system: {
+          rules: {
+            enabled: true,
+            mode: "warn",
+            disallow_inline_styles: true,
+            enforce_color_tokens: true,
+            require_known_css_variables: false,
+          },
+        },
+      },
+      updated_by: "ui-user",
+    });
+    await loadMissionOverview();
+    ElMessage.success(
+      shouldBootstrap
+        ? "Project contract initialized and WARN enforcement enabled."
+        : "Project contract WARN enforcement enabled."
+    );
+  } catch (err: any) {
+    projectContractActionError.value = err?.message || "Failed to enable project contract enforcement.";
+  } finally {
+    projectContractEnforcementLoading.value = false;
+  }
+}
+
+async function upgradeProjectContractEnforcementToStrict() {
+  if (!projectId.value) return;
+  projectContractStrictLoading.value = true;
+  projectContractActionError.value = "";
+  const shouldBootstrap = !projectContractProfileExists.value;
+  try {
+    if (shouldBootstrap) {
+      await bootstrapProjectContract(projectId.value, {
+        created_by: "ui-user",
+      });
+    }
+    await patchProjectContract(projectId.value, {
+      sections: {
+        enforcement: {
+          enabled: true,
+          mode: "strict",
+          disallow_inline_styles: true,
+          enforce_color_tokens: true,
+          require_known_css_variables: true,
+        },
+        design_system: {
+          rules: {
+            enabled: true,
+            mode: "strict",
+            disallow_inline_styles: true,
+            enforce_color_tokens: true,
+            require_known_css_variables: true,
+          },
+        },
+      },
+      updated_by: "ui-user",
+    });
+    await loadMissionOverview();
+    ElMessage.success(
+      shouldBootstrap
+        ? "Project contract initialized and STRICT enforcement enabled."
+        : "Project contract upgraded to STRICT enforcement."
+    );
+  } catch (err: any) {
+    projectContractActionError.value = err?.message || "Failed to upgrade enforcement to strict mode.";
+  } finally {
+    projectContractStrictLoading.value = false;
   }
 }
 
@@ -3257,6 +3567,13 @@ function impactRiskTagType(riskTier?: string | null) {
   return "success";
 }
 
+function violationSummaryTagType(insights?: any | null) {
+  if (!insights) return "info";
+  if ((insights.latest_run_blocking || 0) > 0) return "danger";
+  if ((insights.latest_run_warning || 0) > 0) return "warning";
+  return "success";
+}
+
 function budgetModeTagType(mode?: string | null) {
   if (mode === "BLOCKED") return "danger";
   if (mode === "CONSTRAINED") return "warning";
@@ -3368,6 +3685,11 @@ function comparisonSummaryLabel(runId?: string | null) {
   if (runId === compareResult.value?.run_a?.id) return "Run A";
   if (runId === compareResult.value?.run_b?.id) return "Run B";
   return runId;
+}
+
+function shortRunId(runId?: string | null) {
+  if (!runId) return "—";
+  return String(runId).slice(0, 8);
 }
 
 function formatElapsed(seconds?: number | null) {

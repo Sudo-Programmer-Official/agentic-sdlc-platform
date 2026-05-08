@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     ai_budget_standard_cents: float = 8.0
     ai_budget_economy_cents: float = 2.0
     ai_budget_background_cents: float = 0.5
+    ai_recovery_reserve_fraction: float = 0.25
+    ai_recovery_reserve_min_cents: float = 12.0
     ai_max_context_premium_tokens: int = 20_000
     ai_max_context_standard_tokens: int = 20_000
     ai_max_context_economy_tokens: int = 4_000

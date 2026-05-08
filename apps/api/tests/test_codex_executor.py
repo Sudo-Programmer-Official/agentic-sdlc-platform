@@ -277,6 +277,83 @@ def test_instructions_for_static_frontend_prefer_write_file_when_exact_diff_is_a
     assert "never use placeholder headers such as @@ ... @@" in instructions
 
 
+def test_instructions_include_project_contract_brand_and_design_rules():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"expected_files": ["index.html"]},
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        project_contract={
+            "summary": {
+                "active_rules": ["disallow_inline_styles", "enforce_color_tokens"],
+            },
+            "brand_kit": {
+                "tokens": {
+                    "brand-primary": "#2563eb",
+                    "brand-accent": "#ec4899",
+                }
+            },
+            "design_system": {
+                "components": ["HeroSection", "PrimaryButton"],
+            },
+            "enforcement": {
+                "disallow_inline_styles": True,
+                "enforce_color_tokens": True,
+            },
+        },
+    )
+
+    instructions = executor._instructions_for(work_item, context=context)
+
+    assert "Project contract rules" in instructions
+    assert "Use brand tokens when styling UI changes" in instructions
+    assert "Prefer approved design-system components" in instructions
+    assert "Avoid inline style attributes" in instructions
+    assert "Avoid introducing ad-hoc hex colors" in instructions
+
+
+def test_instructions_include_strict_project_contract_rejection_notice():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"expected_files": ["index.html"]},
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        project_contract={
+            "summary": {
+                "enforcement_enabled": True,
+                "enforcement_mode": "strict",
+                "active_rules": ["disallow_inline_styles", "enforce_color_tokens"],
+            },
+            "brand_kit": {
+                "tokens": {
+                    "brand-primary": "#2563eb",
+                }
+            },
+            "design_system": {
+                "components": ["HeroSection"],
+            },
+            "enforcement": {
+                "enabled": True,
+                "mode": "strict",
+                "disallow_inline_styles": True,
+                "enforce_color_tokens": True,
+            },
+        },
+    )
+
+    instructions = executor._instructions_for(work_item, context=context)
+
+    assert "Project contract enforcement mode: STRICT." in instructions
+    assert "You MUST follow project contract rules for this task." in instructions
+    assert "Violation of these rules will cause rejection." in instructions
+
+
 def test_instructions_for_plan_stage_forbid_mutations():
     executor = CodexExecutor()
     work_item = SimpleNamespace(
@@ -579,6 +656,118 @@ async def test_codex_executor_repairs_plan_stage_mutation_by_regenerating_notes(
     assert result["payload"]["patch_guard"]["touched_files"] == []
     assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
     assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+
+@pytest.mark.anyio
+async def test_codex_executor_retries_project_contract_violation_before_patch_guard(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main><h1>Portfolio</h1></main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Project contract retry", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "index.html"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequencePlanClient(
+        [
+            {
+                "status": "DONE",
+                "message": "initial patch",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main style='color:#ff00aa'><h1>Portfolio</h1></main>\n",
+                    }
+                ],
+                "artifacts": [],
+            },
+            {
+                "status": "DONE",
+                "message": "contract-compliant patch",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main class='hero-shell'><h1>Portfolio</h1></main>\n",
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Retheme the hero section",
+                    "expected_files": ["index.html"],
+                },
+                project_contract={
+                    "summary": {
+                        "enforcement_enabled": True,
+                        "enforcement_mode": "strict",
+                        "active_rules": ["disallow_inline_styles", "enforce_color_tokens"],
+                    },
+                    "enforcement": {
+                        "enabled": True,
+                        "mode": "strict",
+                        "disallow_inline_styles": True,
+                        "enforce_color_tokens": True,
+                        "allowed_hex_values": ["#2563eb"],
+                        "active_rules": ["disallow_inline_styles", "enforce_color_tokens"],
+                    },
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "style=" not in index_path.read_text(encoding="utf-8")
+    assert len(client.prompts) == 2
+    assert "violated the project contract" in client.prompts[1]
+    assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
+    assert result["payload"]["ai_effective_tier"] == "tier_premium"
+    assert result["payload"]["patch_guard"]["project_enforcement_mode"] == "strict"
 
 
 @pytest.mark.anyio
@@ -1938,6 +2127,109 @@ async def test_codex_executor_stops_before_mutation_when_run_budget_is_exhausted
     assert result["status"] == "FAILED"
     assert result["message"] == "run_budget_exhausted"
     assert "Rethemed portfolio" not in index_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.anyio
+async def test_codex_executor_uses_recovery_reserve_for_fix_items(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    contract = build_execution_contract(
+        run_summary={"target_files": ["index.html"]},
+        architecture_profile=None,
+        plan_snapshot={"expected_files": ["index.html"]},
+    )
+    contract.budget.max_cost_cents = 0.0001
+    contract.budget.recovery_reserve_cost_cents = 12.0
+    contract.budget.refresh(recovery_mode=True)
+
+    async with db_session_factory() as session:
+        project = Project(name="Recovery reserve project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            summary={
+                "plan_snapshot": {"expected_files": ["index.html"]},
+                "execution_contract": contract.to_dict(),
+            },
+        )
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="FIX_TEST_FAILURE",
+            key="FIX_TEST_FAILURE_1",
+            status="QUEUED",
+            executor="codex",
+            payload={
+                "target_files": ["index.html"],
+                "expected_files": ["index.html"],
+                "failed_work_item_id": str(uuid.uuid4()),
+                "recovery_action": "spawn_fix_node",
+                "recovery_tier": "code_repair",
+            },
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            {
+                "status": "DONE",
+                "message": "patched",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main>Recovered portfolio</main>\n",
+                    }
+                ],
+                "artifacts": [],
+            }
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={"goal": "Recover failed tests", "expected_files": ["index.html"]},
+                repo_path=str(tmp_path),
+                execution_contract=contract,
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert "Recovered portfolio" in index_path.read_text(encoding="utf-8")
+    assert client.models
+    assert "mini" in str(client.models[0])
 
 
 @pytest.mark.anyio

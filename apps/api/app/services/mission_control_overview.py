@@ -19,6 +19,8 @@ from app.schemas.mission_control import (
     MissionControlRunCard,
     MissionControlStrategyInsight,
     MissionControlSystemInsights,
+    MissionControlViolationInsights,
+    MissionControlViolationSample,
     MissionControlWorkIntakeItem,
 )
 from app.services.artifact_diff import parse_unified_diff, resolve_artifact_content
@@ -27,6 +29,7 @@ from app.services.run_memory import find_similar_runs
 from app.services.run_summary_builder import ensure_project_run_summaries
 from app.services.architecture_profile_service import summarize_architecture_profile
 from app.services.execution_contract_telemetry import build_execution_contract_telemetry
+from app.services.project_contract_service import summarize_project_contract
 
 _HTTP_ROUTE_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[A-Za-z0-9_./:-]+)")
 
@@ -471,6 +474,132 @@ def _top_counts(counter: Counter[str], limit: int = 5) -> list[MissionControlNam
     return [MissionControlNamedCount(name=name, count=count) for name, count in counter.most_common(limit)]
 
 
+def _normalize_violation_mode(mode: str | None) -> str:
+    normalized = str(mode or "off").strip().lower()
+    if normalized in {"off", "warn", "strict"}:
+        return normalized
+    return "off"
+
+
+def _parse_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return uuid.UUID(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _project_contract_violation_records_for_run(run: Run | None) -> list[dict[str, object]]:
+    if run is None or not isinstance(run.summary, dict):
+        return []
+    raw_records = run.summary.get("project_contract_violations")
+    if not isinstance(raw_records, list):
+        return []
+    records: list[dict[str, object]] = []
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            continue
+        mode = _normalize_violation_mode(raw.get("mode"))
+        blocking_value = raw.get("blocking")
+        blocking = bool(blocking_value) if isinstance(blocking_value, bool) else mode == "strict"
+        violation_type = str(raw.get("type") or "project_contract_violation").strip().lower()
+        rule = str(raw.get("rule") or "unknown").strip().lower()
+        file_path = raw.get("file")
+        if not isinstance(file_path, str) or not file_path.strip():
+            file_path = None
+        value = raw.get("value")
+        if not isinstance(value, str) or not value.strip():
+            value = None
+        message = raw.get("message")
+        if not isinstance(message, str) or not message.strip():
+            message = None
+        work_item_type = raw.get("work_item_type")
+        if not isinstance(work_item_type, str) or not work_item_type.strip():
+            work_item_type = None
+        records.append(
+            {
+                "work_item_id": _parse_uuid(raw.get("work_item_id")),
+                "work_item_type": work_item_type,
+                "mode": mode,
+                "blocking": blocking,
+                "type": violation_type,
+                "rule": rule,
+                "file": file_path,
+                "value": value,
+                "message": message,
+            }
+        )
+    return records
+
+
+def _build_violation_insights(
+    summaries: list[RunSummary],
+    runs: dict[uuid.UUID, Run],
+    *,
+    recent_window: int = 5,
+    sample_limit: int = 8,
+) -> MissionControlViolationInsights | None:
+    if not summaries:
+        return None
+
+    windowed = summaries[: max(1, recent_window)]
+    latest_summary = windowed[0]
+    latest_records = _project_contract_violation_records_for_run(runs.get(latest_summary.run_id))
+    latest_blocking = sum(1 for record in latest_records if bool(record.get("blocking")))
+
+    rule_counter: Counter[str] = Counter()
+    type_counter: Counter[str] = Counter()
+    file_counter: Counter[str] = Counter()
+    recent_total = 0
+    samples: list[MissionControlViolationSample] = []
+
+    for summary in windowed:
+        run_records = _project_contract_violation_records_for_run(runs.get(summary.run_id))
+        recent_total += len(run_records)
+        for record in run_records:
+            rule = record.get("rule")
+            if isinstance(rule, str) and rule.strip():
+                rule_counter[rule] += 1
+            violation_type = record.get("type")
+            if isinstance(violation_type, str) and violation_type.strip():
+                type_counter[violation_type] += 1
+            file_path = record.get("file")
+            if isinstance(file_path, str) and file_path.strip():
+                file_counter[file_path] += 1
+
+            if len(samples) < sample_limit:
+                samples.append(
+                    MissionControlViolationSample(
+                        run_id=summary.run_id,
+                        work_item_id=record.get("work_item_id"),
+                        work_item_type=record.get("work_item_type"),
+                        mode=record.get("mode") if isinstance(record.get("mode"), str) else "off",
+                        blocking=bool(record.get("blocking")),
+                        type=record.get("type") if isinstance(record.get("type"), str) else "project_contract_violation",
+                        rule=record.get("rule") if isinstance(record.get("rule"), str) else "unknown",
+                        file=record.get("file") if isinstance(record.get("file"), str) else None,
+                        value=record.get("value") if isinstance(record.get("value"), str) else None,
+                        message=record.get("message") if isinstance(record.get("message"), str) else None,
+                    )
+                )
+
+    return MissionControlViolationInsights(
+        latest_run_id=latest_summary.run_id,
+        latest_run_total=len(latest_records),
+        latest_run_blocking=latest_blocking,
+        latest_run_warning=max(0, len(latest_records) - latest_blocking),
+        recent_run_window=min(len(summaries), max(1, recent_window)),
+        recent_total=recent_total,
+        top_rules=_top_counts(rule_counter),
+        top_types=_top_counts(type_counter),
+        top_files=_top_counts(file_counter),
+        recent_samples=samples,
+    )
+
+
 def _build_system_insights(summaries: list[RunSummary]) -> MissionControlSystemInsights:
     total_runs = len(summaries)
     successful = sum(1 for summary in summaries if summary.status == "COMPLETED")
@@ -564,15 +693,22 @@ async def build_mission_control_overview(
         project_id=project_id,
         touched_files=change_impact.files_changed if change_impact else [],
     )
+    project_contract_summary = await summarize_project_contract(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
     return MissionControlOverviewResponse(
         work_intake=work_intake,
         recent_runs=recent_runs,
         latest_change_impact=change_impact,
         previews_and_prs=preview_panel,
         architecture_profile=architecture_summary,
+        project_contract=project_contract_summary,
         latest_execution_contract=build_execution_contract_telemetry(
             latest_run.summary if latest_run is not None and isinstance(latest_run.summary, dict) else None
         ),
         strategy_learning=_build_strategy_learning(runs),
         system_insights=_build_system_insights(summaries),
+        violation_insights=_build_violation_insights(summaries, run_by_id),
     )

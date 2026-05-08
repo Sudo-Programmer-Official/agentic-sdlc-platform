@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Approval, Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, Task
+from app.db.models import Approval, Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, Task, WorkItem
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -246,10 +246,160 @@ async def test_mission_control_overview_returns_intake_impact_and_insights(db_se
     assert data["architecture_profile"]["repo_full_name"] == "acme/example"
     assert data["architecture_profile"]["package_count"] >= 2
     assert "apps/web" in data["architecture_profile"]["packages"]
+    assert data["project_contract"]["status"] in {"MISSING", "DRAFT"}
     assert data["latest_execution_contract"]["lifecycle_state"] == "PENDING"
     assert data["latest_execution_contract"]["validation_state"] == "PENDING"
     assert data["latest_execution_contract"]["budget"]["budget_mode"] == "NORMAL"
     assert data["recent_runs"][0]["execution_contract"]["test_command"] == "python3 -m pytest -q tests/test_auth.py"
+    assert data["violation_insights"]["latest_run_total"] == 0
+    assert data["violation_insights"]["recent_total"] == 0
+
+
+@pytest.mark.anyio
+async def test_mission_control_overview_surfaces_project_contract_violation_insights(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Violation analytics", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    started = datetime.utcnow() - timedelta(minutes=5)
+    latest_run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="FAILED",
+        executor="codex",
+        branch_name="run/strict-enforcement",
+        workspace_status="SEEDED",
+        started_at=started + timedelta(minutes=2),
+        finished_at=started + timedelta(minutes=2, seconds=40),
+        summary={
+            "goal": "Apply hero styling with project contract enforcement",
+        },
+    )
+    older_run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/warn-enforcement",
+        workspace_status="SEEDED",
+        started_at=started,
+        finished_at=started + timedelta(seconds=75),
+        summary={
+            "goal": "Retry hero change in warn mode",
+        },
+    )
+    session.add_all([older_run, latest_run])
+    await session.flush()
+
+    session.add_all(
+        [
+            WorkItem(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=latest_run.id,
+                type="WRITE_TESTS",
+                status="FAILED",
+                executor="codex",
+                result={
+                    "patch_guard": {
+                        "project_enforcement_mode": "strict",
+                        "project_violation_records": [
+                            {
+                                "work_item_id": str(uuid.uuid4()),
+                                "work_item_type": "WRITE_TESTS",
+                                "mode": "strict",
+                                "blocking": True,
+                                "type": "raw_hex_color",
+                                "rule": "no_raw_hex_colors",
+                                "file": "index.html",
+                                "value": "#ff00ff",
+                                "message": "Raw hex color '#ff00ff' is not allowed.",
+                            }
+                        ],
+                    }
+                },
+            ),
+            WorkItem(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=latest_run.id,
+                type="CODE_FRONTEND",
+                status="DONE",
+                executor="codex",
+                result={
+                    "patch_guard": {
+                        "project_enforcement_mode": "warn",
+                        "project_violation_records": [
+                            {
+                                "work_item_id": str(uuid.uuid4()),
+                                "work_item_type": "CODE_FRONTEND",
+                                "mode": "warn",
+                                "blocking": False,
+                                "type": "inline_style",
+                                "rule": "no_inline_styles",
+                                "file": "index.html",
+                                "value": "style=\"color:#fff\"",
+                                "message": "Inline style detected.",
+                            }
+                        ],
+                    }
+                },
+            ),
+            WorkItem(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                run_id=older_run.id,
+                type="CODE_FRONTEND",
+                status="DONE",
+                executor="codex",
+                result={
+                    "patch_guard": {
+                        "project_enforcement_mode": "warn",
+                        "project_violation_records": [
+                            {
+                                "work_item_id": str(uuid.uuid4()),
+                                "work_item_type": "CODE_FRONTEND",
+                                "mode": "warn",
+                                "blocking": False,
+                                "type": "inline_style",
+                                "rule": "no_inline_styles",
+                                "file": "components/hero.html",
+                                "message": "Inline style detected.",
+                            }
+                        ],
+                    }
+                },
+            ),
+        ]
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/mission-control/overview")
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    insights = data["violation_insights"]
+    assert insights["latest_run_id"] == str(latest_run.id)
+    assert insights["latest_run_total"] == 2
+    assert insights["latest_run_blocking"] == 1
+    assert insights["latest_run_warning"] == 1
+    assert insights["recent_run_window"] == 2
+    assert insights["recent_total"] == 3
+
+    assert insights["top_rules"][0] == {"name": "no_inline_styles", "count": 2}
+    assert insights["top_types"][0] == {"name": "inline_style", "count": 2}
+    assert insights["top_files"][0] == {"name": "index.html", "count": 2}
+
+    assert len(insights["recent_samples"]) == 3
+    assert all(sample["run_id"] in {str(latest_run.id), str(older_run.id)} for sample in insights["recent_samples"])
+    assert any(
+        sample["run_id"] == str(latest_run.id)
+        and sample["blocking"] is True
+        and sample["rule"] == "no_raw_hex_colors"
+        for sample in insights["recent_samples"]
+    )
 
 
 @pytest.mark.anyio

@@ -94,6 +94,51 @@ Notes:
 - These values belong on the API task, not the static web task.
 - These values also belong on the worker task when you deploy one. Repo-backed runs can prepare workspaces in the API bootstrap path and later execute repo mutations in the worker path, but API-only deployment is also supported through embedded fallback when no worker heartbeats exist.
 
+## Repo Auth Strategy Contract
+
+Repository identity and repository auth are separate concerns.
+
+Project repository rows should persist the canonical repo plus an explicit `auth_strategy`:
+
+- `public_https`: public GitHub HTTPS clone. Uses `auth_mode=plain`.
+- `github_app`: GitHub App installation token over HTTPS. Uses `auth_mode=github_app_https`.
+- `ssh`: runtime SSH credentials. Uses `auth_mode=ssh`.
+- `runtime_default`: legacy fallback to `RUNTIME_GIT_AUTH_MODE`.
+
+Do not rely on the saved `repo_url` alone to infer runtime auth. A GitHub repo can have both SSH and HTTPS URLs, and a global env var can drift from the project-level intent.
+
+Before starting repo-backed runs, verify the project with the preflight endpoint:
+
+```bash
+curl -sS -X POST \
+  http://127.0.0.1:8000/api/v1/projects/<project_id>/repo/preflight \
+  -H 'Content-Type: application/json' \
+  -d '{"clone":true}'
+```
+
+Healthy public HTTPS output includes:
+
+```json
+{
+  "ok": true,
+  "auth_strategy": "public_https",
+  "auth_mode": "plain",
+  "credential_strategy": "anonymous_https"
+}
+```
+
+Healthy GitHub App output should include:
+
+```json
+{
+  "ok": true,
+  "auth_strategy": "github_app",
+  "auth_mode": "github_app_https",
+  "credential_strategy": "http.extraheader",
+  "token_generated": true
+}
+```
+
 ## Private Key Format
 
 `GITHUB_PRIVATE_KEY` must be the raw GitHub App PEM with the header/footer intact:
@@ -118,6 +163,39 @@ If you run SSH mode instead of GitHub App HTTPS, you also need:
 - `RUNTIME_GIT_AUTH_MODE=ssh`
 
 Do not combine SSH runtime auth with GitHub App HTTPS unless you have a specific migration reason.
+
+## Worker Freshness Guard
+
+Repo-backed execution can happen in the worker, not only the API.
+
+If a run fails with SSH clone errors even though API health and repo preflight show `public_https/plain`, check worker rows:
+
+```sql
+select id, name, status, last_heartbeat_at, executors, capabilities
+from agents
+where kind = 'worker'
+order by last_heartbeat_at desc
+limit 20;
+```
+
+Expected state:
+
+- one or more intentionally deployed current workers are `ACTIVE`
+- old local workers are `INACTIVE`
+- no stale worker with old code/config has `codex` or `test` in `executors`
+
+Local dev safety:
+
+- `worker_service.py` deactivates existing local active workers before registering a new local worker.
+- Still restart the full dev stack after changing runtime auth or repo connector code.
+- Do not rely on API hot reload for worker changes. The worker process does not hot reload.
+
+Production safety:
+
+- deploy API and worker from the same image/build revision
+- restart worker services after repo auth changes
+- expose API runtime auth and worker runtime auth separately in logs/health dashboards
+- alert if old worker revisions keep heartbeating after deploy
 
 ## GitHub App Settings
 

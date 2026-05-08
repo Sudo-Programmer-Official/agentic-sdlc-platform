@@ -29,6 +29,7 @@
         </div>
         <div class="operator-hero__controls">
           <el-button :loading="loading" @click="loadDashboard">Refresh</el-button>
+          <el-button plain :disabled="!forkEnabled" @click="openForkDialog">Fork Run</el-button>
           <el-button plain :disabled="!projectId" @click="goToMissionControl">Execution View</el-button>
           <el-button plain :disabled="!projectId" @click="goToAutomationMap">Repository Map</el-button>
           <el-button plain :disabled="!selectedRunId" @click="goToRuns">Open Run Viewer</el-button>
@@ -470,6 +471,62 @@
         </div>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="forkDialogOpen" title="Fork Run" width="560px">
+      <div class="space-y-4">
+        <div class="text-sm text-slate-600">
+          Clone the selected run DAG, workspace settings, and execution metadata into a new run.
+        </div>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Executor</span>
+            <select
+              v-model="forkExecutor"
+              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              <option v-for="option in forkExecutorOptions" :key="option" :value="option">
+                {{ option }}
+              </option>
+            </select>
+          </label>
+          <label class="space-y-1 text-sm text-slate-700">
+            <span class="block font-medium text-slate-800">Branch Name</span>
+            <input
+              v-model="forkBranchName"
+              type="text"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              placeholder="run/my-fork"
+            />
+          </label>
+        </div>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">Fork Notes</span>
+          <textarea
+            v-model="forkNotes"
+            rows="3"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Why this fork exists, policy overrides, or operator notes"
+          />
+        </label>
+        <label class="flex items-center gap-2 text-sm text-slate-700">
+          <input v-model="forkStartNow" type="checkbox" class="rounded border-slate-300" />
+          Start the forked run immediately
+        </label>
+        <div class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+          Source run
+          <span class="ml-2 font-mono text-slate-800">{{ selectedRun?.id || latestRun?.id || "—" }}</span>
+        </div>
+        <div v-if="forkError" class="text-sm text-rose-600">{{ forkError }}</div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <el-button :disabled="forkLoading" @click="forkDialogOpen = false">Cancel</el-button>
+          <el-button type="primary" :loading="forkLoading" :disabled="!forkEnabled" @click="submitForkRun">
+            Fork Run
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -490,6 +547,7 @@ import {
   fetchRunPreview,
   fetchRunTimeline,
   findSimilarRuns,
+  forkRun,
   hasRunMemorySearchContext,
   launchRunPreview,
   listRuns,
@@ -628,6 +686,13 @@ const previewProfileError = ref("");
 const previewLaunchLoading = ref(false);
 const previewLaunchError = ref("");
 const selectedRunPreview = ref<RunPreviewRecord | null>(null);
+const forkDialogOpen = ref(false);
+const forkLoading = ref(false);
+const forkError = ref("");
+const forkExecutor = ref("dummy");
+const forkBranchName = ref("");
+const forkNotes = ref("");
+const forkStartNow = ref(true);
 const workers = ref<AgentRecord[]>([]);
 const selectedRunId = ref("");
 const selectedTimeline = ref<RunTimelineResponse | null>(null);
@@ -685,6 +750,16 @@ const previewDeliveryStatus = computed(() => {
   if (selectedRunPreview.value?.status) return selectedRunPreview.value.status;
   if (!previewProfileConfigured.value) return "PROFILE_NEEDED";
   return "READY_TO_LAUNCH";
+});
+const forkEnabled = computed(() => Boolean(selectedRun.value?.id || latestRun.value?.id));
+const forkExecutorOptions = computed(() => {
+  const options = new Set<string>();
+  for (const run of runs.value) {
+    if (run?.executor) options.add(String(run.executor));
+  }
+  options.add("codex");
+  options.add("dummy");
+  return Array.from(options);
 });
 
 const visibleTasks = computed(() => {
@@ -932,6 +1007,47 @@ async function stopSelectedRunPreview() {
     previewLaunchError.value = err?.message || "Failed to stop preview.";
   } finally {
     previewLaunchLoading.value = false;
+  }
+}
+
+function openForkDialog() {
+  const source = selectedRun.value || latestRun.value;
+  if (!source?.id) return;
+  forkDialogOpen.value = true;
+  forkError.value = "";
+  forkExecutor.value = source.executor || "dummy";
+  forkBranchName.value = source.branch_name ? `${source.branch_name}-fork` : "";
+  forkNotes.value = "";
+  forkStartNow.value = true;
+}
+
+async function submitForkRun() {
+  const source = selectedRun.value || latestRun.value;
+  if (!source?.id) return;
+  forkLoading.value = true;
+  forkError.value = "";
+  try {
+    const forked = await forkRun(source.id, {
+      executor: forkExecutor.value || undefined,
+      branch_name: forkBranchName.value.trim() || undefined,
+      start_now: forkStartNow.value,
+      summary_overrides: forkNotes.value.trim()
+        ? {
+            fork_notes: forkNotes.value.trim(),
+          }
+        : {},
+    });
+    forkDialogOpen.value = false;
+    await loadDashboard();
+    const newRunId = forked?.id || runs.value[0]?.id;
+    if (newRunId) {
+      selectedRunId.value = newRunId;
+      await loadRunDetail(newRunId);
+    }
+  } catch (err: any) {
+    forkError.value = err?.message || "Failed to fork run.";
+  } finally {
+    forkLoading.value = false;
   }
 }
 

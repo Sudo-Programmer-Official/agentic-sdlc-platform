@@ -35,6 +35,8 @@ from app.schemas.persistence import (
     RunCreate,
     ProjectRepositoryConnect,
     ProjectRepositoryOut,
+    ProjectRepositoryPreflightRequest,
+    ProjectRepositoryPreflightOut,
     GitHubConnectInfoOut,
     GitHubInstallationRepositoryOut,
     PullRequestCreate,
@@ -67,7 +69,7 @@ from app.runtime.orchestrator import RunOrchestrator
 from app.runtime.recovery_policy import maybe_apply_recovery
 from app.db.session import SessionLocal
 from app.services.run_replay import fork_run
-from app.services.repo_connector import connect_repo, get_project_repository
+from app.services.repo_connector import connect_repo, get_project_repository, preflight_repo_access
 from app.services.pr_service import create_pr_from_artifact
 from app.services.preview_service import (
     get_project_preview_profile,
@@ -87,6 +89,7 @@ from app.services.workspace_supervisor import ensure_run_workspace
 from app.services.requirements_bridge import ensure_legacy_project, load_requirements_plan_state
 from app.services.run_summary_builder import ensure_project_run_summaries
 from app.services.architecture_profile_service import bootstrap_architecture_profile, summarize_architecture_profile
+from app.services.project_contract_service import summarize_project_contract
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
     TaskCounts,
@@ -498,6 +501,7 @@ async def connect_project_repo(
             repo_full_name=payload.repo_full_name,
             default_branch=payload.default_branch,
             installation_id=payload.installation_id,
+            auth_strategy=payload.auth_strategy,
             created_by=payload.created_by or ctx.user_id,
         )
         await log_activity(
@@ -510,6 +514,7 @@ async def connect_project_repo(
                 "provider": repo.provider,
                 "repo_url": repo.repo_url,
                 "default_branch": repo.default_branch,
+                "auth_strategy": repo.auth_strategy,
             },
         )
         await bootstrap_architecture_profile(
@@ -524,6 +529,38 @@ async def connect_project_repo(
         return _project_repo_out(repo)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/repo/preflight", response_model=ProjectRepositoryPreflightOut)
+@public_router.post("/projects/{project_id}/repo/preflight", response_model=ProjectRepositoryPreflightOut)
+async def preflight_project_repo(
+    project_id: uuid.UUID,
+    payload: ProjectRepositoryPreflightRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectRepositoryPreflightOut:
+    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    repo = await get_project_repository(session, project_id=project_id, tenant_id=ctx.tenant_id)
+    repo_url = (payload.repo_url or (repo.repo_url if repo else "")).strip()
+    if not repo_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Repository URL is required")
+
+    try:
+        result = preflight_repo_access(
+            provider=payload.provider or (repo.provider if repo else "github"),
+            repo_url=repo_url,
+            repo_full_name=payload.repo_full_name if payload.repo_full_name is not None else (repo.repo_full_name if repo else None),
+            default_branch=payload.default_branch or (repo.default_branch if repo else "main"),
+            installation_id=payload.installation_id if payload.installation_id is not None else (repo.installation_id if repo else None),
+            auth_strategy=payload.auth_strategy or (repo.auth_strategy if repo else "runtime_default"),
+            clone=payload.clone,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return ProjectRepositoryPreflightOut(**result.__dict__)
 
 
 @router.get("/integrations/github/connect", response_model=GitHubConnectInfoOut)
@@ -1492,6 +1529,7 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
     )
     latest_run = None
     architecture_summary = None
+    project_contract_summary = None
     if latest_run_row is not None:
         latest_summary = latest_summary_rows[0] if latest_summary_rows else None
         run_summary_meta = latest_run_row.summary if isinstance(latest_run_row.summary, dict) else {}
@@ -1542,8 +1580,18 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
             project_id=project.id,
             touched_files=list(latest_summary.changed_files) if latest_summary is not None else [],
         )
+        project_contract_summary = await summarize_project_contract(
+            session,
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+        )
     else:
         architecture_summary = await summarize_architecture_profile(
+            session,
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+        )
+        project_contract_summary = await summarize_project_contract(
             session,
             tenant_id=project.tenant_id,
             project_id=project.id,
@@ -1554,6 +1602,7 @@ async def project_summary(project_id: uuid.UUID, session: AsyncSession = Depends
         current_stage=project.status,
         latest_run=latest_run,
         architecture_profile=architecture_summary,
+        project_contract=project_contract_summary,
         task_counts=task_counts,
         architecture_refresh_needed=legacy_project.architecture_refresh_needed,
         plan_refresh_needed=legacy_project.plan_refresh_needed,

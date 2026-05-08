@@ -15,6 +15,7 @@ from app.runtime.context import RunContext
 from app.runtime.execution_contract import build_execution_contract, coerce_execution_contract
 from app.services.event_log import record_event
 from app.services.architecture_profile_service import get_architecture_runtime_meta
+from app.services.project_contract_service import get_project_contract_runtime_meta
 from app.services.repo_connector import (
     checkout_workspace_branch_from_head,
     get_project_repository,
@@ -147,6 +148,7 @@ async def ensure_run_workspace(
     repo_provider: str | None = None,
     repo_full_name: str | None = None,
     repo_installation_id: int | None = None,
+    repo_auth_strategy: str | None = None,
     prefer_local_source: bool = True,
 ) -> WorkspacePaths:
     if require_repo and (not repo_url or not repo_provider):
@@ -157,6 +159,7 @@ async def ensure_run_workspace(
             repo_provider = repo_provider or project_repo.provider
             repo_full_name = repo_full_name or project_repo.repo_full_name
             repo_installation_id = repo_installation_id or project_repo.installation_id
+            repo_auth_strategy = repo_auth_strategy or project_repo.auth_strategy
 
     source = (
         repo_source_path.resolve()
@@ -184,6 +187,7 @@ async def ensure_run_workspace(
                 repo_url=repo_url,
                 repo_full_name=repo_full_name,
                 installation_id=repo_installation_id,
+                auth_strategy=repo_auth_strategy,
             )
         for directory in (paths.root, paths.repo, paths.artifacts, paths.logs, paths.patches, paths.context):
             directory.mkdir(parents=True, exist_ok=True)
@@ -198,6 +202,7 @@ async def ensure_run_workspace(
                     repo_url=repo_url,
                     repo_full_name=repo_full_name,
                     installation_id=repo_installation_id,
+                    auth_strategy=repo_auth_strategy,
                     branch_name=paths.branch_name,
                 )
         if require_repo and not repo_seeded and repo_url:
@@ -208,6 +213,7 @@ async def ensure_run_workspace(
                 default_branch=repo_branch or "main",
                 repo_full_name=repo_full_name,
                 installation_id=repo_installation_id,
+                auth_strategy=repo_auth_strategy,
                 work_branch=paths.branch_name,
             )
             repo_seeded = True
@@ -317,6 +323,7 @@ async def build_run_context(
     repo_provider: str | None = None,
     repo_full_name: str | None = None,
     repo_installation_id: int | None = None,
+    repo_auth_strategy: str | None = None,
 ) -> RunContext:
     settings = get_settings()
     architecture_profile = await get_architecture_runtime_meta(
@@ -324,13 +331,21 @@ async def build_run_context(
         tenant_id=run.tenant_id,
         project_id=run.project_id,
     )
+    project_contract = await get_project_contract_runtime_meta(
+        session,
+        tenant_id=run.tenant_id,
+        project_id=run.project_id,
+    )
     summary = dict(run.summary or {})
+    if project_contract is None and isinstance(summary.get("project_contract"), dict):
+        project_contract = {"summary": dict(summary.get("project_contract") or {})}
     execution_contract = coerce_execution_contract(summary.get("execution_contract"))
     if execution_contract is None:
         execution_contract = build_execution_contract(
             run_summary=summary,
             architecture_profile=architecture_profile,
             plan_snapshot=(summary.get("plan_snapshot") if isinstance(summary.get("plan_snapshot"), dict) else None),
+            project_contract=project_contract,
             previous_contract=None,
             settings=settings,
         )
@@ -349,6 +364,7 @@ async def build_run_context(
         repo_provider=repo_provider,
         repo_full_name=repo_full_name,
         repo_installation_id=repo_installation_id,
+        repo_auth_strategy=repo_auth_strategy,
     )
     if require_repo:
         if run.workspace_status == "ERROR":
@@ -359,11 +375,16 @@ async def build_run_context(
     execution_contract_path = paths.context / "execution_contract.json"
     execution_contract_path.parent.mkdir(parents=True, exist_ok=True)
     execution_contract_path.write_text(json.dumps(execution_contract.to_dict(), indent=2) + "\n", encoding="utf-8")
+    if isinstance(project_contract, dict):
+        project_contract_path = paths.context / "project_contract.json"
+        project_contract_path.parent.mkdir(parents=True, exist_ok=True)
+        project_contract_path.write_text(json.dumps(project_contract, indent=2) + "\n", encoding="utf-8")
     return RunContext(
         project_id=run.project_id,
         run_id=run.id,
         plan_snapshot=(run.summary or {}).get("plan_snapshot") if isinstance(run.summary, dict) else None,
         architecture_profile=architecture_profile,
+        project_contract=project_contract,
         execution_contract=execution_contract,
         workspace_root=str(paths.root),
         repo_path=str(paths.repo),

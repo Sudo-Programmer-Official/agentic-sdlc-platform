@@ -19,6 +19,7 @@ from app.api.v1.mission_control import public_router as public_mission_control_r
 from app.api.v1.operator import public_router as public_operator_router
 from app.api.v1.repo_map import public_router as public_repo_map_router
 from app.api.v1.architecture_profile import router as architecture_profile_router, public_router as public_architecture_profile_router
+from app.api.v1.project_contract import router as project_contract_router, public_router as public_project_contract_router
 from app.api.v1.snapshot import router as snapshot_router
 from app.api.v1.health import router as health_router, public_router as public_health_router
 from app.api.v1.lifecycle_score import router as lifecycle_router, public_router as public_lifecycle_router
@@ -147,6 +148,7 @@ def create_app() -> FastAPI:
     app.include_router(public_operator_router, prefix=settings.api_prefix)
     app.include_router(public_repo_map_router, prefix=settings.api_prefix)
     app.include_router(public_architecture_profile_router, prefix=settings.api_prefix)
+    app.include_router(public_project_contract_router, prefix=settings.api_prefix)
     app.include_router(public_health_router, prefix=settings.api_prefix)
     app.include_router(public_lifecycle_router, prefix=settings.api_prefix)
     app.include_router(public_lifecycle_history_router, prefix=settings.api_prefix)
@@ -157,6 +159,7 @@ def create_app() -> FastAPI:
     app.include_router(impact_router, prefix=settings.api_prefix)
     app.include_router(activity_router, prefix=settings.api_prefix)
     app.include_router(architecture_profile_router, prefix=settings.api_prefix)
+    app.include_router(project_contract_router, prefix=settings.api_prefix)
     app.include_router(snapshot_router, prefix=settings.api_prefix)
     app.include_router(health_router, prefix=settings.api_prefix)
     app.include_router(lifecycle_router, prefix=settings.api_prefix)

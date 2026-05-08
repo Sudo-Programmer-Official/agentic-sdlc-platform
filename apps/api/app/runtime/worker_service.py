@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from sqlalchemy import select, and_, exists
+from sqlalchemy import select, and_, exists, update
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
@@ -235,6 +235,13 @@ async def main():
     )
     # Register ephemeral worker agent record
     async with SessionLocal() as session:
+        if settings.env == "local":
+            await session.execute(
+                update(Agent)
+                .where(Agent.kind == "worker", Agent.status == "ACTIVE")
+                .values(status="INACTIVE", executors=[], capabilities=[])
+            )
+            log.info("Marked existing local worker agents inactive before registering worker_id=%s", agent_id)
         agent = Agent(
             id=agent_id,
             name=f"worker-{agent_id.hex[:8]}",
@@ -247,6 +254,7 @@ async def main():
         )
         session.add(agent)
         await session.commit()
+        log.info("Registered worker agent_id=%s name=%s", agent.id, agent.name)
 
     while True:
         try:

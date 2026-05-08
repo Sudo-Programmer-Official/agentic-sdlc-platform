@@ -27,4 +27,5 @@ class ProjectRepository(TimestampMixin, Base):
     repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     default_branch: Mapped[str] = mapped_column(String(120), nullable=False, default="main")
     installation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    auth_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="runtime_default")
     created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)

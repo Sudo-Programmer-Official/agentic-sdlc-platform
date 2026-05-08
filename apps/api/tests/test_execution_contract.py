@@ -99,6 +99,38 @@ def test_execution_budget_ledger_blocks_when_remaining_budget_is_exhausted():
     assert ledger.completion_token_cap == 0
 
 
+def test_execution_budget_ledger_allows_recovery_reserve_after_main_cost_is_exhausted():
+    ledger = ExecutionBudgetLedger(
+        max_tokens=20_000,
+        max_cost_cents=30.0,
+        used_cost_cents=31.0,
+        recovery_reserve_cost_cents=12.0,
+    )
+
+    ledger.refresh(recovery_mode=True)
+
+    assert ledger.active_budget_partition == "recovery"
+    assert ledger.remaining_cost_cents == 11.0
+    assert ledger.remaining_recovery_cost_cents == 12.0
+    assert ledger.budget_mode == "NORMAL"
+
+
+def test_execution_budget_ledger_blocks_when_recovery_reserve_is_exhausted():
+    ledger = ExecutionBudgetLedger(
+        max_tokens=20_000,
+        max_cost_cents=30.0,
+        used_cost_cents=31.0,
+        recovery_reserve_cost_cents=12.0,
+        used_recovery_cost_cents=11.7,
+    )
+
+    ledger.refresh(recovery_mode=True)
+
+    assert ledger.budget_mode == "BLOCKED"
+    assert ledger.escalation_reason == "recovery_budget_exhausted"
+    assert ledger.completion_token_cap == 0
+
+
 def test_build_execution_contract_scales_run_cost_budget_with_ai_backed_steps():
     contract = build_execution_contract(
         run_summary={"goal": "Polish the landing page"},
@@ -116,3 +148,22 @@ def test_build_execution_contract_scales_run_cost_budget_with_ai_backed_steps():
     )
 
     assert contract.budget.max_cost_cents == 40.0
+
+
+def test_build_execution_contract_merges_project_contract_assumptions():
+    contract = build_execution_contract(
+        run_summary={
+            "goal": "Apply design system update",
+            "project_contract": {
+                "assumptions_used": ["Branch strategy: run_branch_then_pr", "Default branch: main"],
+            },
+        },
+        architecture_profile={
+            "summary": {"assumptions_used": ["Repository: acme/example"]},
+        },
+        plan_snapshot=None,
+    )
+
+    assert "Repository: acme/example" in contract.assumptions_used
+    assert "Branch strategy: run_branch_then_pr" in contract.assumptions_used
+    assert "Default branch: main" in contract.assumptions_used

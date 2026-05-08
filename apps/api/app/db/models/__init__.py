@@ -1,5 +1,6 @@
 from app.db.models.project import Project
 from app.db.models.architecture_profile import ArchitectureProfile
+from app.db.models.project_contract import ProjectContract
 from app.db.models.document import Document
 from app.db.models.task import Task
 from app.db.models.artifact import Artifact
@@ -35,6 +36,7 @@ from app.db.models.knowledge import (
 __all__ = [
     "Project",
     "ArchitectureProfile",
+    "ProjectContract",
     "Document",
     "Task",
     "Artifact",

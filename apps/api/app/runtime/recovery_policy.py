@@ -15,6 +15,23 @@ from app.services.event_log import record_event
 from app.services.runtime_lineage import link_run_to_work_item
 
 
+RECOVERY_TIER_BY_FAILURE_CLASS: dict[str, str] = {
+    "clone_auth_failure": "deterministic",
+    "environment_failure": "deterministic",
+    "transient": "cheap_recovery",
+    "syntax_failure": "code_repair",
+    "dependency_failure": "code_repair",
+    "test_assertion_failure": "code_repair",
+    "test_failure": "code_repair",
+    "policy_failure": "architectural_recovery",
+    "multi_file_behavior_failure": "architectural_recovery",
+    "missing_context": "architectural_recovery",
+    "logic_failure": "architectural_recovery",
+    "budget_exhausted": "deterministic",
+    "fix_applied": "deterministic",
+}
+
+
 @dataclass(frozen=True)
 class RecoveryRule:
     when_status: str
@@ -28,6 +45,9 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         "max_retries": 2,
         "rules": (
             RecoveryRule("FAILED", "transient", "retry"),
+            RecoveryRule("FAILED", "syntax_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
+            RecoveryRule("FAILED", "dependency_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
+            RecoveryRule("FAILED", "test_assertion_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
             RecoveryRule("FAILED", "test_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
         ),
     },
@@ -108,6 +128,10 @@ def _error_text(work_item: WorkItem) -> str:
     return "\n".join(bits).lower()
 
 
+def recovery_tier_for_failure(failure_class: str) -> str:
+    return RECOVERY_TIER_BY_FAILURE_CLASS.get(failure_class, "architectural_recovery")
+
+
 def classify_failure(work_item: WorkItem) -> str:
     if work_item.type == "FIX_TEST_FAILURE" and work_item.status == "DONE":
         return "fix_applied"
@@ -115,8 +139,49 @@ def classify_failure(work_item: WorkItem) -> str:
         return "policy_failure"
 
     text = _error_text(work_item)
+    if "run_budget_exhausted" in text or "budget_exhausted" in text:
+        return "budget_exhausted"
+    if any(
+        token in text
+        for token in (
+            "host key verification failed",
+            "could not read from remote repository",
+            "github runtime clone auth is unavailable",
+            "repository not found",
+            "permission denied (publickey)",
+            "auth_mode=ssh",
+            "auth_mode=github_app",
+        )
+    ):
+        return "clone_auth_failure"
+    if any(
+        token in text
+        for token in (
+            "no such file or directory",
+            "command not found",
+            "executable not found",
+            "could not resolve hostname",
+        )
+    ):
+        return "environment_failure"
+    if any(
+        token in text
+        for token in (
+            "syntaxerror",
+            "indentationerror",
+            "nameerror",
+            "importerror",
+            "modulenotfounderror",
+            "error collecting",
+        )
+    ):
+        return "syntax_failure"
+    if any(token in text for token in ("cannot import name", "no module named", "missing dependency")):
+        return "dependency_failure"
     if any(token in text for token in ("timeout", "temporarily unavailable", "connection reset", "network")):
         return "transient"
+    if work_item.type == "RUN_TESTS" and work_item.status == "FAILED" and "failed " in text:
+        return "test_assertion_failure"
     if work_item.type == "RUN_TESTS" and work_item.status == "FAILED":
         return "test_failure"
     if any(token in text for token in ("file not found", "missing document", "missing graph", "not found")):
@@ -161,6 +226,7 @@ async def _emit_recovery_event(
         payload={
             "work_item_id": str(work_item.id),
             "failure_class": failure_class,
+            "recovery_tier": recovery_tier_for_failure(failure_class),
             "recovery_action": action,
             "recovery_work_item_id": str(recovery_work_item_id) if recovery_work_item_id else None,
             "recovery_type": recovery_type,
@@ -190,6 +256,7 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         "failed_work_item_id": str(failed_work_item.id),
         "failure_class": failure_class,
         "recovery_action": "spawn_fix_node",
+        "recovery_tier": recovery_tier_for_failure(failure_class),
     }
     if implementation_files:
         fix_payload["target_files"] = implementation_files
@@ -371,6 +438,7 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         work_item,
         failure_class=failure_class,
         recovery_action=rule.action,
+        recovery_tier=recovery_tier_for_failure(failure_class),
         retry_state="PENDING",
     )
     session.add(work_item)

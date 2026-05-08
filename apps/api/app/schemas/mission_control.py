@@ -6,6 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
+from app.schemas.project_contract import ProjectContractSummaryOut
 
 
 class MissionControlArtifactRef(BaseModel):
@@ -113,6 +114,32 @@ class MissionControlSystemInsights(BaseModel):
     most_impacted_files: list[MissionControlNamedCount] = Field(default_factory=list)
 
 
+class MissionControlViolationSample(BaseModel):
+    run_id: uuid.UUID
+    work_item_id: uuid.UUID | None = None
+    work_item_type: str | None = None
+    mode: str = "off"
+    blocking: bool = False
+    type: str = "project_contract_violation"
+    rule: str = "unknown"
+    file: str | None = None
+    value: str | None = None
+    message: str | None = None
+
+
+class MissionControlViolationInsights(BaseModel):
+    latest_run_id: uuid.UUID | None = None
+    latest_run_total: int = 0
+    latest_run_blocking: int = 0
+    latest_run_warning: int = 0
+    recent_run_window: int = 5
+    recent_total: int = 0
+    top_rules: list[MissionControlNamedCount] = Field(default_factory=list)
+    top_types: list[MissionControlNamedCount] = Field(default_factory=list)
+    top_files: list[MissionControlNamedCount] = Field(default_factory=list)
+    recent_samples: list[MissionControlViolationSample] = Field(default_factory=list)
+
+
 class MissionControlExecutionEnvironment(BaseModel):
     workspace_root: str | None = None
     repo_path: str | None = None
@@ -192,6 +219,10 @@ class MissionControlExecutionBudgetTelemetry(BaseModel):
     max_cost_cents: float = 0.0
     used_cost_cents: float = 0.0
     remaining_cost_cents: float = 0.0
+    recovery_reserve_cost_cents: float = 0.0
+    used_recovery_cost_cents: float = 0.0
+    remaining_recovery_cost_cents: float = 0.0
+    active_budget_partition: str = "main"
     budget_mode: str = "NORMAL"
     model_tier_cap: str | None = None
     completion_token_cap: int | None = None
@@ -233,6 +264,8 @@ class MissionControlOverviewResponse(BaseModel):
     latest_change_impact: MissionControlChangeImpact | None = None
     previews_and_prs: MissionControlPreviewAndPrs
     architecture_profile: ArchitectureProfileSummaryOut | None = None
+    project_contract: ProjectContractSummaryOut | None = None
     latest_execution_contract: MissionControlExecutionContractTelemetry | None = None
     strategy_learning: list[MissionControlStrategyInsight] = Field(default_factory=list)
     system_insights: MissionControlSystemInsights
+    violation_insights: MissionControlViolationInsights | None = None

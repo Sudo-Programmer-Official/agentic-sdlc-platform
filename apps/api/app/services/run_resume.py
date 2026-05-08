@@ -209,6 +209,7 @@ async def _ensure_resume_workspace(session: AsyncSession, run: Run) -> bool:
         repo_provider=project_repo.provider,
         repo_full_name=project_repo.repo_full_name,
         repo_installation_id=project_repo.installation_id,
+        repo_auth_strategy=project_repo.auth_strategy,
         prefer_local_source=False,
     )
     if run.workspace_status == "ERROR":

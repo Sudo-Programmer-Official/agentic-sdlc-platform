@@ -32,6 +32,7 @@ class RetryState(StrEnum):
     RECOVERED = "RECOVERED"
     EXHAUSTED = "EXHAUSTED"
     BLOCKED = "BLOCKED"
+    BLOCKED_BUDGET = "BLOCKED_BUDGET"
 
 
 class BudgetMode(StrEnum):

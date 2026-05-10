@@ -9,8 +9,9 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Trace, WorkItem, WorkItemEdge
+from app.db.models import Run, Trace, WorkItem, WorkItemEdge
 from app.runtime.run_state import RetryState
+from app.runtime.runtime_recovery_service import RuntimeRecoveryService
 from app.services.event_log import record_event
 from app.services.runtime_lineage import link_run_to_work_item
 
@@ -29,6 +30,7 @@ RECOVERY_TIER_BY_FAILURE_CLASS: dict[str, str] = {
     "logic_failure": "architectural_recovery",
     "budget_exhausted": "deterministic",
     "fix_applied": "deterministic",
+    "patch_apply_failure": "cheap_recovery",
 }
 
 
@@ -41,6 +43,20 @@ class RecoveryRule:
 
 
 RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
+    "CODE_FRONTEND": {
+        "max_retries": 3,
+        "rules": (
+            RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "transient", "retry"),
+        ),
+    },
+    "CODE_BACKEND": {
+        "max_retries": 3,
+        "rules": (
+            RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "transient", "retry"),
+        ),
+    },
     "RUN_TESTS": {
         "max_retries": 2,
         "rules": (
@@ -64,6 +80,8 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         ),
     },
 }
+
+RECOVERY_TERMINAL_STATUSES = {"QUEUED", "RUNNING", "CLAIMED"}
 
 
 def _unique_paths(values: list[str]) -> list[str]:
@@ -180,6 +198,19 @@ def classify_failure(work_item: WorkItem) -> str:
         return "dependency_failure"
     if any(token in text for token in ("timeout", "temporarily unavailable", "connection reset", "network")):
         return "transient"
+    if any(
+        token in text
+        for token in (
+            "patch apply error",
+            "patch apply failed",
+            "patch check failed",
+            "patch does not apply",
+            "error: patch failed:",
+            "corrupt patch",
+            "patch fragment without header",
+        )
+    ):
+        return "patch_apply_failure"
     if work_item.type == "RUN_TESTS" and work_item.status == "FAILED" and "failed " in text:
         return "test_assertion_failure"
     if work_item.type == "RUN_TESTS" and work_item.status == "FAILED":
@@ -203,6 +234,40 @@ def _merge_result_metadata(work_item: WorkItem, **updates: Any) -> None:
     payload = dict(work_item.result or {})
     payload.update({key: value for key, value in updates.items() if value is not None})
     work_item.result = payload
+
+
+def _is_recovery_work_item(work_item: WorkItem) -> bool:
+    if work_item.type == "FIX_TEST_FAILURE":
+        return True
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    return any(key in payload for key in ("recovery_source_id", "failed_work_item_id", "recovery_action"))
+
+
+async def has_pending_recovery_work(session: AsyncSession, run_id: uuid.UUID) -> bool:
+    items = (
+        await session.execute(
+            select(WorkItem).where(
+                WorkItem.run_id == run_id,
+                WorkItem.status.in_(list(RECOVERY_TERMINAL_STATUSES)),
+            )
+        )
+    ).scalars().all()
+    return any(_is_recovery_work_item(item) for item in items)
+
+
+async def sync_run_recovery_latch(session: AsyncSession, run_id: uuid.UUID) -> bool:
+    pending = await has_pending_recovery_work(session, run_id)
+    run = await session.get(Run, run_id)
+    if run is None:
+        return pending
+    summary = dict(run.summary or {})
+    summary["recovery_in_progress"] = pending
+    if not pending:
+        summary["pending_recovery_count"] = 0
+    run.summary = summary
+    session.add(run)
+    await session.flush()
+    return pending
 
 
 async def _emit_recovery_event(
@@ -312,6 +377,14 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         recovery_type=fix.type,
         message=f"Auto recovery queued {fix.type} for failed {failed_work_item.type}.",
     )
+    run = await session.get(Run, failed_work_item.run_id)
+    if run is not None:
+        summary = dict(run.summary or {})
+        summary["recovery_in_progress"] = True
+        summary["pending_recovery_count"] = int(summary.get("pending_recovery_count") or 0) + 1
+        run.summary = summary
+        session.add(run)
+        await session.flush()
     return {"work_item_id": fix.id, "type": fix.type}
 
 
@@ -425,73 +498,145 @@ async def _spawn_test_retry(session: AsyncSession, source_work_item: WorkItem) -
         recovery_type=test.type,
         message=f"Recovery queued {test.type} retry after {source_work_item.type}.",
     )
+    run = await session.get(Run, source_work_item.run_id)
+    if run is not None:
+        summary = dict(run.summary or {})
+        summary["recovery_in_progress"] = True
+        summary["pending_recovery_count"] = int(summary.get("pending_recovery_count") or 0) + 1
+        run.summary = summary
+        session.add(run)
+        await session.flush()
     return {"work_item_id": test.id, "type": test.type}
 
 
 async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> dict[str, Any] | None:
+    runtime_recovery = RuntimeRecoveryService(session)
     failure_class = classify_failure(work_item)
     rule = plan_recovery(work_item, failure_class)
     if not rule:
         return None
+    stable_failure_type = runtime_recovery.classify_failure_type(failure_class)
+    run = await session.get(Run, work_item.run_id)
+    if run is None:
+        return None
+
+    await runtime_recovery.emit_classified_event(work_item, stable_failure_type)
+    prior_attempts = int(work_item.result.get("recovery_attempts", 0)) if isinstance(work_item.result, dict) else 0
+    recovery_action, failure_signature = await runtime_recovery.select_recovery_action_with_memory(
+        work_item,
+        rule_action=rule.action,
+        failure_type=stable_failure_type,
+        attempt_number=prior_attempts + 1,
+    )
+    await runtime_recovery.emit_action_selected_event(work_item, recovery_action)
+    budget_decision = await runtime_recovery.check_budget(run, work_item, stable_failure_type)
+    if not budget_decision.allowed:
+        _merge_result_metadata(
+            work_item,
+            failure_class=failure_class,
+            failure_type=stable_failure_type,
+            recovery_action="escalate_to_human",
+            failure_signature=failure_signature,
+            retry_state=RetryState.EXHAUSTED,
+            recovery_exhausted_reason=budget_decision.reason,
+            suggested_next_action="Review failure evidence and continue manually.",
+        )
+        session.add(work_item)
+        await session.flush()
+        await runtime_recovery.emit_escalated_event(work_item, reason=f"recovery_budget_exhausted:{budget_decision.reason}")
+        return {"action": "escalate_to_human", "reason": budget_decision.reason}
 
     _merge_result_metadata(
         work_item,
         failure_class=failure_class,
-        recovery_action=rule.action,
+        failure_type=stable_failure_type,
+        failure_signature=failure_signature,
+        recovery_action=recovery_action,
         recovery_tier=recovery_tier_for_failure(failure_class),
         retry_state="PENDING",
+        recovery_attempts=prior_attempts + 1,
     )
     session.add(work_item)
     await session.flush()
+    recovery_attempt = await runtime_recovery.create_attempt(
+        run=run,
+        work_item=work_item,
+        failure_type=stable_failure_type,
+        recovery_action=recovery_action,
+        rationale=f"class={failure_class}, rule={rule.action}",
+    )
 
+    outcome: dict[str, Any] | None = None
     if rule.action == "retry":
         if work_item.attempt + 1 >= work_item.max_attempts:
             _merge_result_metadata(work_item, retry_state=RetryState.EXHAUSTED)
             session.add(work_item)
             await session.flush()
-            return None
-        work_item.status = "QUEUED"
-        work_item.attempt += 1
-        work_item.assigned_agent_id = None
-        work_item.lease_expires_at = None
-        work_item.finished_at = None
-        _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
-        session.add(work_item)
-        await session.flush()
-        await record_event(
-            session,
-            project_id=work_item.project_id,
-            run_id=work_item.run_id,
-            work_item_id=work_item.id,
-            event_type="WORK_ITEM_RETRIED",
-            actor_type="SYSTEM",
-            payload={"work_item_id": str(work_item.id), "attempt": work_item.attempt},
-            tenant_id=work_item.tenant_id,
-        )
-        await _emit_recovery_event(
-            session,
-            work_item,
-            failure_class=failure_class,
-            action="retry",
-            message=f"Retry queued for {work_item.type} after transient failure.",
-        )
-        return {"action": "retry", "work_item_id": work_item.id}
+        else:
+            payload = dict(work_item.payload or {})
+            payload["recovery_action"] = recovery_action
+            if recovery_action == "retry_with_write_file":
+                payload["recovery_strategy"] = "write_file_preferred"
+                payload["recovery_reason"] = "patch_apply_failed"
+            elif recovery_action == "retry_with_smaller_patch":
+                payload["recovery_strategy"] = "minimal_patch_preferred"
+                payload["recovery_reason"] = "patch_apply_failed"
+            elif recovery_action == "refresh_context":
+                payload["recovery_strategy"] = "refresh_context"
+            work_item.payload = payload
+            work_item.status = "QUEUED"
+            work_item.attempt += 1
+            work_item.assigned_agent_id = None
+            work_item.lease_expires_at = None
+            work_item.finished_at = None
+            _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
+            session.add(work_item)
+            await session.flush()
+            await record_event(
+                session,
+                project_id=work_item.project_id,
+                run_id=work_item.run_id,
+                work_item_id=work_item.id,
+                event_type="WORK_ITEM_RETRIED",
+                actor_type="SYSTEM",
+                payload={"work_item_id": str(work_item.id), "attempt": work_item.attempt},
+                tenant_id=work_item.tenant_id,
+            )
+            await _emit_recovery_event(
+                session,
+                work_item,
+                failure_class=failure_class,
+                action="retry",
+                message=f"Retry queued for {work_item.type} after transient failure.",
+            )
+            if recovery_action == "retry_with_write_file":
+                await record_event(
+                    session,
+                    project_id=work_item.project_id,
+                    run_id=work_item.run_id,
+                    work_item_id=work_item.id,
+                    event_type="PATCH_STRATEGY_SWITCHED_TO_WRITE_FILE",
+                    actor_type="SYSTEM",
+                    tenant_id=work_item.tenant_id,
+                    payload={"work_item_id": str(work_item.id), "reason": "patch_apply_failed"},
+                )
+            outcome = {"action": "retry", "work_item_id": work_item.id}
 
-    if rule.action == "spawn_fix_node":
+    elif rule.action == "spawn_fix_node":
         _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
         session.add(work_item)
         await session.flush()
         created = await _spawn_fix_node(session, work_item, failure_class)
-        return {"action": rule.action, "created": created}
+        outcome = {"action": rule.action, "created": created}
 
-    if rule.action == "spawn_retry_node":
+    elif rule.action == "spawn_retry_node":
         _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
         session.add(work_item)
         await session.flush()
         created = await _spawn_test_retry(session, work_item)
-        return {"action": rule.action, "created": created}
+        outcome = {"action": rule.action, "created": created}
 
-    if rule.action == "block_run":
+    elif rule.action == "block_run":
         _merge_result_metadata(work_item, retry_state=RetryState.BLOCKED)
         session.add(work_item)
         await session.flush()
@@ -502,6 +647,25 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
             action="block_run",
             message=f"{work_item.type} requires manual review; auto-healing blocked.",
         )
-        return {"action": "block_run"}
+        outcome = {"action": "block_run"}
 
-    return None
+    succeeded = bool(outcome and (outcome.get("action") != "block_run"))
+    await runtime_recovery.complete_attempt(
+        recovery_attempt,
+        succeeded=succeeded,
+        rationale=(None if succeeded else "No automatic recovery outcome produced."),
+    )
+    await runtime_recovery.record_memory_outcome(
+        work_item=work_item,
+        failure_type=stable_failure_type,
+        failure_signature=failure_signature,
+        recovery_action=recovery_action,
+        succeeded=succeeded,
+        attempt_number=recovery_attempt.attempt_number,
+    )
+    await runtime_recovery.emit_attempt_terminal_event(work_item, recovery_attempt, succeeded=succeeded)
+    if not succeeded:
+        await runtime_recovery.emit_escalated_event(work_item, reason="recovery_action_not_effective")
+
+    await sync_run_recovery_latch(session, work_item.run_id)
+    return outcome

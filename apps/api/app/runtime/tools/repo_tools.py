@@ -88,18 +88,50 @@ class RepoTools:
             if check_res.status == "BLOCKED":
                 raise ValueError(check_res.blocked_reason or "Patch check blocked by workspace policy")
             if check_res.exit_code != 0:
-                raise ValueError(f"Patch check failed: {check_res.stderr.strip() or check_res.stdout.strip()}")
-
-            res = run_workspace_command(
-                ["git", "apply", "--recount", "--whitespace=nowarn", "--reject", "-"],
-                cwd=self.root,
-                log_dir=self.logs_path,
-                label="git-apply",
-                timeout_seconds=10,
-                allowed_prefixes=self.allowed_command_prefixes,
-                stdin_text=normalized_diff,
-                output_max_bytes=self.settings.workspace_command_output_max_bytes,
-            )
+                check_error_text = (check_res.stderr or check_res.stdout or "").strip()
+                if self._should_try_three_way_fallback(check_error_text):
+                    three_way_check = run_workspace_command(
+                        ["git", "apply", "--3way", "--check", "-"],
+                        cwd=self.root,
+                        log_dir=self.logs_path,
+                        label="git-apply-3way-check",
+                        timeout_seconds=10,
+                        allowed_prefixes=self.allowed_command_prefixes,
+                        stdin_text=normalized_diff,
+                        output_max_bytes=self.settings.workspace_command_output_max_bytes,
+                    )
+                    if three_way_check.status == "BLOCKED":
+                        raise ValueError(three_way_check.blocked_reason or "Patch check blocked by workspace policy")
+                    if three_way_check.exit_code == 0:
+                        res = run_workspace_command(
+                            ["git", "apply", "--3way", "--whitespace=nowarn", "-"],
+                            cwd=self.root,
+                            log_dir=self.logs_path,
+                            label="git-apply-3way",
+                            timeout_seconds=10,
+                            allowed_prefixes=self.allowed_command_prefixes,
+                            stdin_text=normalized_diff,
+                            output_max_bytes=self.settings.workspace_command_output_max_bytes,
+                        )
+                    else:
+                        raise ValueError(
+                            "Patch check failed: "
+                            f"{check_error_text}; 3-way fallback failed: "
+                            f"{(three_way_check.stderr or three_way_check.stdout or '').strip()}"
+                        )
+                else:
+                    raise ValueError(f"Patch check failed: {check_error_text}")
+            else:
+                res = run_workspace_command(
+                    ["git", "apply", "--recount", "--whitespace=nowarn", "--reject", "-"],
+                    cwd=self.root,
+                    log_dir=self.logs_path,
+                    label="git-apply",
+                    timeout_seconds=10,
+                    allowed_prefixes=self.allowed_command_prefixes,
+                    stdin_text=normalized_diff,
+                    output_max_bytes=self.settings.workspace_command_output_max_bytes,
+                )
         except Exception as exc:
             raise ValueError(f"Patch apply error: {exc}") from exc
 
@@ -107,6 +139,15 @@ class RepoTools:
             raise ValueError(res.blocked_reason or "Patch apply blocked by workspace policy")
         if res.exit_code != 0:
             raise ValueError(f"Patch apply failed: {res.stderr.strip() or res.stdout.strip()}")
+
+    @staticmethod
+    def _should_try_three_way_fallback(error_text: str) -> bool:
+        lowered = (error_text or "").lower()
+        return (
+            "patch does not apply" in lowered
+            or "error: patch failed:" in lowered
+            or "patch check failed" in lowered
+        )
 
     def git_diff(self) -> str:
         try:

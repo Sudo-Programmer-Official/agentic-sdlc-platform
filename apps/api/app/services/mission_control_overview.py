@@ -13,6 +13,7 @@ from app.db.models import Artifact, Document, Project, ProjectPreviewProfile, Pr
 from app.schemas.mission_control import (
     MissionControlArtifactRef,
     MissionControlChangeImpact,
+    MissionControlImportedReference,
     MissionControlNamedCount,
     MissionControlOverviewResponse,
     MissionControlPreviewAndPrs,
@@ -318,6 +319,61 @@ def _build_recent_runs(
             )
         )
     return cards
+
+
+async def _load_imported_references(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    limit: int = 6,
+) -> list[MissionControlImportedReference]:
+    artifacts = (
+        await session.execute(
+            select(Artifact)
+            .where(
+                Artifact.project_id == project_id,
+                Artifact.tenant_id == tenant_id,
+                Artifact.type == "external_reference",
+                Artifact.deleted_at.is_(None),
+            )
+            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    refs: list[MissionControlImportedReference] = []
+    for artifact in artifacts:
+        metadata = artifact.extra_metadata if isinstance(artifact.extra_metadata, dict) else {}
+        imported_at_raw = metadata.get("fetched_at")
+        imported_at: datetime | None = None
+        if isinstance(imported_at_raw, str) and imported_at_raw.strip():
+            try:
+                imported_at = datetime.fromisoformat(imported_at_raw.replace("Z", "+00:00"))
+            except ValueError:
+                imported_at = None
+        freshness_score: float | None = None
+        if imported_at is not None:
+            age_days = max(0.0, (datetime.now(imported_at.tzinfo) - imported_at).total_seconds() / 86400.0)
+            freshness_score = round(max(0.0, min(1.0, 1.0 - min(age_days / 30.0, 1.0))), 3)
+        refs.append(
+            MissionControlImportedReference(
+                id=artifact.id,
+                type=artifact.type,
+                uri=artifact.uri,
+                created_at=artifact.created_at,
+                domain=str(metadata.get("domain") or "") or None,
+                label=str(metadata.get("label") or "") or None,
+                imported_at=imported_at,
+                linked_requirement_id=artifact.requirement_id,
+                linked_run_id=artifact.run_id,
+                linked_work_item_id=artifact.work_item_id,
+                linked_task_id=artifact.task_id,
+                trust_score=float(metadata.get("trust_score")) if metadata.get("trust_score") is not None else 0.8,
+                freshness_score=freshness_score,
+                used_in_execution_count=int(metadata.get("used_in_execution_count") or 0),
+            )
+        )
+    return refs
 
 
 def _build_change_impact(
@@ -698,6 +754,11 @@ async def build_mission_control_overview(
         tenant_id=tenant_id,
         project_id=project_id,
     )
+    imported_references = await _load_imported_references(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
     return MissionControlOverviewResponse(
         work_intake=work_intake,
         recent_runs=recent_runs,
@@ -711,4 +772,6 @@ async def build_mission_control_overview(
         strategy_learning=_build_strategy_learning(runs),
         system_insights=_build_system_insights(summaries),
         violation_insights=_build_violation_insights(summaries, run_by_id),
+        imported_references=imported_references,
     )
+    MissionControlImportedReference,

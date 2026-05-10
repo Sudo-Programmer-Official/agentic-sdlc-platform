@@ -689,7 +689,7 @@ const selectedRunPreview = ref<RunPreviewRecord | null>(null);
 const forkDialogOpen = ref(false);
 const forkLoading = ref(false);
 const forkError = ref("");
-const forkExecutor = ref("dummy");
+const forkExecutor = ref("codex");
 const forkBranchName = ref("");
 const forkNotes = ref("");
 const forkStartNow = ref(true);
@@ -1015,7 +1015,7 @@ function openForkDialog() {
   if (!source?.id) return;
   forkDialogOpen.value = true;
   forkError.value = "";
-  forkExecutor.value = source.executor || "dummy";
+  forkExecutor.value = source.executor || "codex";
   forkBranchName.value = source.branch_name ? `${source.branch_name}-fork` : "";
   forkNotes.value = "";
   forkStartNow.value = true;

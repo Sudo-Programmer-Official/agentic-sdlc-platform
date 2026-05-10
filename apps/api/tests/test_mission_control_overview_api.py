@@ -212,7 +212,23 @@ async def test_mission_control_overview_returns_intake_impact_and_insights(db_se
         version=1,
         extra_metadata={"content": patch},
     )
-    session.add_all([patch_artifact, pr_artifact, older_patch])
+    external_ref = Artifact(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        run_id=latest_run.id,
+        type="external_reference",
+        uri="https://docs.python.org/3/library/asyncio.html",
+        version=1,
+        extra_metadata={
+            "label": "asyncio docs",
+            "summary": "Use timeout and cancellation boundaries.",
+            "domain": "docs.python.org",
+            "trust_score": 0.9,
+            "fetched_at": datetime.utcnow().isoformat(),
+            "used_in_execution_count": 2,
+        },
+    )
+    session.add_all([patch_artifact, pr_artifact, older_patch, external_ref])
     await session.flush()
 
     session.add(
@@ -251,6 +267,12 @@ async def test_mission_control_overview_returns_intake_impact_and_insights(db_se
     assert data["latest_execution_contract"]["validation_state"] == "PENDING"
     assert data["latest_execution_contract"]["budget"]["budget_mode"] == "NORMAL"
     assert data["recent_runs"][0]["execution_contract"]["test_command"] == "python3 -m pytest -q tests/test_auth.py"
+    assert data["imported_references"]
+    assert data["imported_references"][0]["type"] == "external_reference"
+    assert "docs.python.org" in data["imported_references"][0]["uri"]
+    assert data["imported_references"][0]["domain"] == "docs.python.org"
+    assert "trust_score" in data["imported_references"][0]
+    assert "freshness_score" in data["imported_references"][0]
     assert data["violation_insights"]["latest_run_total"] == 0
     assert data["violation_insights"]["recent_total"] == 0
 

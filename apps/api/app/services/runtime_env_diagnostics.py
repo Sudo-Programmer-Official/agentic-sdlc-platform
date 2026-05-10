@@ -4,6 +4,7 @@ import os
 import shutil
 from dataclasses import dataclass
 
+from app.core.config import get_settings
 from app.services.build_info import get_current_build_info
 
 
@@ -70,6 +71,10 @@ class RuntimeStartupDiagnostics:
 
 def collect_runtime_startup_diagnostics(runtime_mode: str, runtime_git_auth_mode: str = "auto") -> RuntimeStartupDiagnostics:
     build = get_current_build_info()
+    settings = get_settings()
+    app_id = os.getenv("GITHUB_APP_ID") or settings.github_app_id
+    private_key = os.getenv("GITHUB_PRIVATE_KEY") or settings.github_private_key
+    webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET") or settings.github_webhook_secret
     return RuntimeStartupDiagnostics(
         build_version=build.get("version"),
         build_sha=build.get("short_sha"),
@@ -77,7 +82,7 @@ def collect_runtime_startup_diagnostics(runtime_mode: str, runtime_git_auth_mode
         runtime_git_auth_mode=_normalize_runtime_git_auth_mode(runtime_git_auth_mode),
         git_binary=shutil.which("git"),
         ssh_binary=shutil.which("ssh"),
-        github_app_id_present=bool(os.getenv("GITHUB_APP_ID")),
-        github_private_key_present=bool(os.getenv("GITHUB_PRIVATE_KEY")),
-        github_webhook_secret_present=bool(os.getenv("GITHUB_WEBHOOK_SECRET")),
+        github_app_id_present=bool(app_id),
+        github_private_key_present=bool(private_key),
+        github_webhook_secret_present=bool(webhook_secret),
     )

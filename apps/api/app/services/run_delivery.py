@@ -10,6 +10,8 @@ from app.services.event_log import record_event
 from app.services.repo_connector import (
     commit_all,
     current_head_sha,
+    github_app_runtime_configured,
+    normalize_auth_strategy,
     get_project_repository,
     push_branch,
     repo_has_changes,
@@ -32,6 +34,7 @@ async def publish_run_branch_if_ready(
     run: Run,
     actor_type: str = "SYSTEM",
     actor_id: str | None = None,
+    auth_strategy_override: str | None = None,
 ) -> dict | None:
     if run.workspace_status != "SEEDED" or not run.repo_path:
         return None
@@ -47,15 +50,42 @@ async def publish_run_branch_if_ready(
     branch_name = (run.branch_name or f"run/{str(run.id)[:8]}").strip()
     created_commit = repo_has_changes(repo_path)
     commit_sha = commit_all(repo_path, _commit_message_for_run(run)) if created_commit else current_head_sha(repo_path)
-    push_branch(
-        repo_path,
-        branch_name,
-        provider=project_repo.provider,
-        repo_url=project_repo.repo_url,
-        repo_full_name=project_repo.repo_full_name,
-        installation_id=project_repo.installation_id,
-        auth_strategy=project_repo.auth_strategy,
-    )
+    selected_strategy = normalize_auth_strategy(auth_strategy_override or project_repo.auth_strategy)
+    fallback_order = ["github_app", "ssh", "public_https", "runtime_default"]
+    strategy_attempts: list[str] = []
+    skip_github_app_runtime = not github_app_runtime_configured()
+    for candidate in [selected_strategy, *fallback_order]:
+        normalized = normalize_auth_strategy(candidate)
+        if skip_github_app_runtime and normalized in {"github_app", "runtime_default"}:
+            continue
+        if normalized not in strategy_attempts:
+            strategy_attempts.append(normalized)
+    if not strategy_attempts:
+        # Always keep at least one explicit non-app fallback.
+        strategy_attempts = ["ssh", "public_https"]
+
+    push_errors: list[str] = []
+    successful_strategy: str | None = None
+    for strategy in strategy_attempts:
+        try:
+            push_branch(
+                repo_path,
+                branch_name,
+                provider=project_repo.provider,
+                repo_url=project_repo.repo_url,
+                repo_full_name=project_repo.repo_full_name,
+                installation_id=project_repo.installation_id,
+                auth_strategy=strategy,
+            )
+            successful_strategy = strategy
+            break
+        except Exception as exc:
+            push_errors.append(f"{strategy}: {exc}")
+    if successful_strategy is None:
+        raise RuntimeError("Push failed across strategies: " + " | ".join(push_errors))
+    if project_repo.auth_strategy != successful_strategy:
+        project_repo.auth_strategy = successful_strategy
+        session.add(project_repo)
 
     pushed_at = datetime.now(timezone.utc).isoformat()
     summary = dict(run.summary or {})
@@ -66,6 +96,8 @@ async def publish_run_branch_if_ready(
             "remote_branch_commit_sha": commit_sha,
             "remote_branch_pushed_at": pushed_at,
             "remote_branch_created_commit": created_commit,
+            "remote_branch_auth_strategy": successful_strategy,
+            "remote_branch_push_attempts": strategy_attempts,
         }
     )
     summary.pop("remote_branch_push_error", None)

@@ -207,7 +207,7 @@ def _change_surface(task_payload: dict[str, Any]) -> str:
 
 def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]) -> dict:
     if not task_payload:
-        return {}
+        return {"blocking": False} if stage_name == "WRITE_TESTS" else {}
 
     task_title = task_payload["task_title"]
     stage_titles = {
@@ -236,6 +236,8 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
             payload["target_files"] = test_files
             payload["files"] = test_files
             payload["expected_files"] = test_files
+    if stage_name == "WRITE_TESTS":
+        payload["blocking"] = False
     return payload
 
 

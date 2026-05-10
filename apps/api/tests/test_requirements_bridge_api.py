@@ -2,11 +2,13 @@ import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.api.v1 import generation as generation_module
 from app.db.base import Base
+from app.db.models import Task, Trace
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -37,11 +39,13 @@ async def db_session(tmp_path):
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_tenant_context] = override_get_tenant_context
+    session: AsyncSession = session_factory()
     try:
-        yield
+        yield session
     finally:
         app.dependency_overrides.pop(get_session, None)
         app.dependency_overrides.pop(get_tenant_context, None)
+        await session.close()
         await engine.dispose()
 
 
@@ -251,6 +255,7 @@ async def test_approving_requirements_graph_updates_db_summary_and_creates_docum
 
 @pytest.mark.anyio
 async def test_approved_requirements_document_can_generate_tasks_for_project_overview_flow(db_session, monkeypatch):
+    session = db_session
     captured = {}
 
     async def fake_generate(self, title, body, payload):
@@ -335,6 +340,24 @@ async def test_approved_requirements_document_can_generate_tasks_for_project_ove
         assert len(tasks) == 1
         assert tasks[0]["title"] == "Build portfolio dashboard"
         assert tasks[0]["document_id"] == requirements_doc["id"]
+        assert tasks[0]["source_type"] == "requirement_propagation"
+        assert tasks[0]["derived_from_requirement_ids"] == ["FR-001", "QR-001"]
+        assert tasks[0]["capability_id"] == "CAP-001"
+
+        stored_task = await session.scalar(select(Task).where(Task.id == uuid.UUID(tasks[0]["id"])))
+        assert stored_task is not None
+        assert stored_task.architecture_slice == "frontend"
+
+        traces = (
+            await session.execute(
+                select(Trace).where(
+                    Trace.project_id == uuid.UUID(project_id),
+                    Trace.to_id == stored_task.id,
+                    Trace.from_type.in_(["requirement", "capability"]),
+                )
+            )
+        ).scalars().all()
+        assert {trace.from_type for trace in traces} == {"requirement", "capability"}
 
         assert captured["title"] == requirements_doc["title"]
         assert "Users can create a portfolio" in captured["body"]

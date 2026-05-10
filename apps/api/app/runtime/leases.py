@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Agent, WorkItem
@@ -136,3 +136,61 @@ async def keep_work_item_lease_alive(
     except Exception:
         log.exception("Failed to refresh active work item lease work_item_id=%s agent_id=%s", work_item_id, agent_id)
 
+
+async def reclaim_orphaned_work_items(
+    session: AsyncSession,
+    *,
+    run_id: uuid.UUID | None = None,
+) -> list[ReclaimedLease]:
+    """Requeue claimed/running work items whose assigned worker is missing or inactive."""
+    stmt = (
+        select(WorkItem)
+        .outerjoin(Agent, Agent.id == WorkItem.assigned_agent_id)
+        .where(
+            WorkItem.status.in_(["CLAIMED", "RUNNING"]),
+            or_(WorkItem.assigned_agent_id.is_(None), Agent.id.is_(None), Agent.status != "ACTIVE"),
+        )
+    )
+    if run_id is not None:
+        stmt = stmt.where(WorkItem.run_id == run_id)
+
+    orphaned_items = (await session.execute(stmt.order_by(WorkItem.created_at, WorkItem.id))).scalars().all()
+    recovered: list[ReclaimedLease] = []
+    for item in orphaned_items:
+        previous_status = item.status
+        previous_lease = item.lease_expires_at
+        ok = await update_work_item_status(
+            session,
+            item.id,
+            ["CLAIMED", "RUNNING"],
+            "QUEUED",
+            assigned_agent_id=None,
+            lease_expires_at=None,
+            started_at=None,
+        )
+        if not ok:
+            continue
+        await record_event(
+            session,
+            project_id=item.project_id,
+            run_id=item.run_id,
+            work_item_id=item.id,
+            event_type="WORK_ITEM_REQUEUED",
+            actor_type="SYSTEM",
+            payload={
+                "work_item_id": str(item.id),
+                "reason": "orphaned_worker_assignment",
+                "previous_status": previous_status,
+            },
+            tenant_id=item.tenant_id,
+        )
+        recovered.append(
+            ReclaimedLease(
+                work_item_id=item.id,
+                run_id=item.run_id,
+                project_id=item.project_id,
+                previous_status=previous_status,
+                lease_expires_at=previous_lease,
+            )
+        )
+    return recovered

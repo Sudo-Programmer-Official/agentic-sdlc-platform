@@ -12,6 +12,7 @@ from app.db.models import Project, Run, WorkItem
 from app.runtime.context import RunContext
 from app.runtime.codex_executor import (
     _edit_budget_from_payload,
+    _extract_structured_json_candidate,
     _fix_test_failure_writable_scope,
     _is_static_frontend_scope,
     _stage_scope_violations,
@@ -198,6 +199,75 @@ def test_edit_budget_from_payload_uses_minimal_patch_limits():
     }
 
 
+def test_extract_structured_json_candidate_from_fenced_output():
+    raw = (
+        "Here is the patch plan.\n"
+        "```json\n"
+        "{\n"
+        "  \"status\": \"DONE\",\n"
+        "  \"message\": \"wrapped\",\n"
+        "  \"warnings\": [],\n"
+        "  \"actions\": [],\n"
+        "  \"artifacts\": []\n"
+        "}\n"
+        "```\n"
+    )
+    candidate = _extract_structured_json_candidate(raw)
+    assert candidate is not None
+    payload = json.loads(candidate)
+    assert payload["status"] == "DONE"
+    assert payload["message"] == "wrapped"
+
+
+def test_codex_executor_parse_codex_plan_accepts_wrapped_json_object():
+    executor = CodexExecutor()
+    raw = (
+        "Plan follows:\n"
+        "{"
+        "\"status\":\"DONE\","
+        "\"message\":\"ok\","
+        "\"warnings\":[],"
+        "\"actions\":[],"
+        "\"artifacts\":[]"
+        "}\nThanks."
+    )
+    plan = executor._parse_codex_plan(raw)
+    assert plan.status == "DONE"
+    assert plan.message == "ok"
+
+
+def test_stage_scope_repair_candidate_allows_frontend_oversized_writefile_violation():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    allowed = executor._is_stage_scope_repair_candidate(
+        work_item=work_item,
+        violations=["CODE_FRONTEND write_file payload too large for index.html (25000 bytes > 24000)."],
+    )
+
+    assert allowed is True
+
+
+def test_frontend_writefile_violations_flags_oversized_rewrite():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"expected_files": ["index.html"]},
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="index.html",
+            content=("a" * 30000),
+        )
+    ]
+
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+
+    assert len(violations) == 1
+    assert "CODE_FRONTEND write_file payload too large" in violations[0]
+
+
 def test_static_frontend_scope_detects_html_css_only_targets():
     assert _is_static_frontend_scope({"expected_files": ["index.html", "styles.css"]}) is True
     assert _is_static_frontend_scope({"expected_files": ["index.html", "hero.py"]}) is False
@@ -257,14 +327,42 @@ def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
     instructions = executor._instructions_for(work_item)
 
     assert "Restrict edits to these files unless validation proves a neighboring file is required: index.html." in instructions
-    assert "prefer compact apply_patch updates to affected test blocks" in instructions
+    assert "prefer write_file with full file contents over fragile line-numbered patch hunks" in instructions
     assert "old and new expectations do not conflict" in instructions
+    assert "Prefer behavior-oriented assertions over brittle implementation details" in instructions
+    assert "allow equivalent outcomes aligned to the task intent" in instructions
     assert "This is a static frontend task." in instructions
     assert "Do not introduce new third-party imports such as BeautifulSoup or bs4" in instructions
     assert "html.parser" in instructions
 
 
-def test_instructions_for_static_frontend_prefer_write_file_when_exact_diff_is_awkward():
+def test_instructions_for_fix_test_failure_allow_scoped_test_refresh_for_stale_assertions():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="FIX_TEST_FAILURE",
+        payload={"expected_files": ["index.html", "test_index_html.py"]},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "update the scoped tests to verify behavior instead of forcing obsolete markup" in instructions
+    assert "Do not weaken or rewrite assertions just to make the suite pass." in instructions
+
+
+def test_instructions_for_fix_test_failure_static_frontend_targets_index_first():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="FIX_TEST_FAILURE",
+        payload={"expected_files": ["index.html", "test_index_html.py"]},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "target index.html first when it is in scope" in instructions
+    assert "Edit a test file only when validation proves the assertion is stale or contradictory." in instructions
+
+
+def test_instructions_for_static_frontend_prefer_minimal_apply_patch():
     executor = CodexExecutor()
     work_item = SimpleNamespace(
         type="CODE_FRONTEND",
@@ -273,8 +371,21 @@ def test_instructions_for_static_frontend_prefer_write_file_when_exact_diff_is_a
 
     instructions = executor._instructions_for(work_item)
 
-    assert "prefer write_file with the full updated file contents" in instructions
+    assert "prefer minimal apply_patch hunks" in instructions
     assert "never use placeholder headers such as @@ ... @@" in instructions
+
+
+def test_instructions_for_static_frontend_recovery_write_file_override():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"expected_files": ["index.html"], "recovery_strategy": "write_file_preferred"},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "Recovery override: previous patch application drifted." in instructions
+    assert "prefer write_file with full contents for the primary scoped file" in instructions
 
 
 def test_instructions_include_project_contract_brand_and_design_rules():
@@ -392,6 +503,15 @@ def test_system_prompt_for_review_stage_forbids_mutations():
     assert "Never emit apply_patch, write_file, or delete_file actions." in prompt
 
 
+def test_system_prompt_for_plan_stage_forbids_mutations():
+    executor = CodexExecutor()
+    prompt = executor._system_prompt_for(SimpleNamespace(type="PLAN_DAG"))
+
+    assert "automated code review worker" in prompt
+    assert "Return only note actions" in prompt
+    assert "Never emit apply_patch, write_file, or delete_file actions." in prompt
+
+
 def test_write_tests_stage_rejects_non_test_file_mutations():
     work_item = SimpleNamespace(type="WRITE_TESTS")
 
@@ -467,6 +587,25 @@ def test_patch_guard_accepts_index_html_apply_patch_scope():
 
     assert decision.touched_files == ["index.html"]
     assert decision.ok is True
+
+
+def test_patch_guard_rejects_pycache_and_compiled_artifacts():
+    patch = (
+        "diff --git a/__pycache__/test_index_html.cpython-312.pyc b/__pycache__/test_index_html.cpython-312.pyc\n"
+        "--- a/__pycache__/test_index_html.cpython-312.pyc\n"
+        "+++ b/__pycache__/test_index_html.cpython-312.pyc\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    decision = evaluate_patch_guard(
+        actions=[Action(type="apply_patch", patch=patch)],
+        allowed_files=["__pycache__/test_index_html.cpython-312.pyc"],
+    )
+
+    assert decision.ok is False
+    assert any("runtime cache artifacts" in msg for msg in decision.violations)
 
 
 def test_codex_executor_patch_parsers_preserve_index_html_paths():
@@ -1536,7 +1675,8 @@ async def test_codex_executor_repairs_unapplyable_patch_by_regenerating_plan(
     assert "test_index_html_has_theme_styles" in test_path.read_text(encoding="utf-8")
     assert len(client.prompts) == 2
     assert "patch does not apply" in client.prompts[1]
-    assert "regenerate a compact and exact patch for the existing test file when possible" in client.prompts[1]
+    assert "after a patch-apply failure, do not emit apply_patch" in client.prompts[1]
+    assert "Emit write_file actions with full updated contents for scoped Python test files." in client.prompts[1]
 
 
 @pytest.mark.anyio

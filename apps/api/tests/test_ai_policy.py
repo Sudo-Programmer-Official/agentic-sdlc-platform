@@ -1,5 +1,10 @@
 import uuid
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.db.base import Base
+from app.db.models import Artifact, Project
 from app.services.ai_policy import AIJobManager, AIJobRequest, contains_sensitive_paths
 
 
@@ -186,3 +191,48 @@ def test_medium_risk_reviewer_job_can_escalate_to_premium():
     assert policy.selected_model_tier == "tier_standard"
     assert policy.max_model_tier == "tier_premium"
     assert policy.max_retries == 1
+
+
+@pytest.mark.anyio
+async def test_context_pack_injects_external_reference_and_is_replay_consistent(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXTERNAL_REFERENCE_MAX_CONTEXT_CHARS", "1200")
+    tenant_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'ai_policy_refs.db'}", future=True)
+    session_factory = async_sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, class_=AsyncSession)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with session_factory() as session:
+        session.add(Project(id=project_id, tenant_id=tenant_id, name="P"))
+        session.add(
+            Artifact(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=run_id,
+                type="external_reference",
+                uri="https://example.com/ref",
+                extra_metadata={"label": "Ref", "summary": "Use bounded retries and explicit escalation."},
+            )
+        )
+        await session.commit()
+    manager = AIJobManager(session_factory=session_factory)
+    request = AIJobRequest(
+        workflow_type="repo_implementation_task",
+        role="coder",
+        task_type="implementation",
+        ambiguity_level="medium",
+        risk_level="medium",
+        tenant_id=tenant_id,
+        project_id=project_id,
+        run_id=run_id,
+        metadata={"requirement_id": "FR-001"},
+    )
+    first = await manager.load_context_pack(request)
+    second = await manager.load_context_pack(request)
+    assert "external_references" in first.fragments
+    assert "context_ranking" in first.fragments
+    assert "bounded retries" in first.fragments["external_references"]
+    assert "avg_relevance" in first.fragments["context_ranking"]
+    assert first.pack_hash == second.pack_hash
+    await engine.dispose()

@@ -18,15 +18,18 @@ from app.core.config import get_settings
 from app.db.models import (
     AIArtifactCache,
     AIJobRun,
+    Artifact,
     KnowledgeArtifact,
     KnowledgeFileMapping,
     Project,
     ProjectRepository,
     RepoFile,
     RepoSnapshot,
+    Run,
     RunSummary,
 )
 from app.db.session import SessionLocal
+from app.services.context_ranking_policy import ContextRankingPolicy, ContextScore
 
 log = logging.getLogger("app.ai_policy")
 
@@ -123,6 +126,7 @@ class AIContextPack:
     pack_key: str
     pack_hash: str
     pack_cache_hit: bool
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -206,6 +210,7 @@ class AIJobManager:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession] | None = None):
         self._session_factory = session_factory or SessionLocal
         self._settings = get_settings()
+        self._context_ranking_policy = ContextRankingPolicy()
 
     @classmethod
     def from_session(cls, session: AsyncSession) -> "AIJobManager":
@@ -336,6 +341,10 @@ class AIJobManager:
         elif request.workflow_type == "repo_implementation_task":
             budget_cents = settings.ai_budget_standard_cents
             max_context_tokens = settings.ai_max_context_standard_tokens
+            if request.task_type == "testing":
+                # Testing often needs slightly larger responses (assertions/fixtures)
+                # and can exceed the standard budget by a small margin.
+                budget_cents = max(budget_cents, round(budget_cents * 1.1, 4))
         elif request.workflow_type in {"docs_verification", "docs_proposal"}:
             budget_cents = settings.ai_budget_economy_cents
             max_context_tokens = settings.ai_max_context_economy_tokens
@@ -547,6 +556,7 @@ class AIJobManager:
             pack_key=pack_key,
             pack_hash=pack_hash,
             pack_cache_hit=pack_cache_hit,
+            metadata=(payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}),
         )
 
     async def prepare_job(
@@ -636,6 +646,7 @@ class AIJobManager:
                             "hash": context_pack.pack_hash,
                             "pack_cache_hit": context_pack.pack_cache_hit,
                             "section_keys": list(context_pack.fragments.keys()),
+                            "metadata": context_pack.metadata,
                         }
                         if context_pack
                         else None
@@ -1163,6 +1174,25 @@ class AIJobManager:
     async def _build_context_pack(self, session: AsyncSession, request: AIJobRequest) -> dict[str, Any] | None:
         cached = await self.load_cached_context_fragments(request, session=session)
         sections = {**self._context_pack_seed_sections(request), **cached.fragments}
+        authoritative_keys = [key for key in sections.keys() if key in {"architecture_summary", "conventions", "module_map", "file_ownership"}]
+        advisory_keys = [key for key in sections.keys() if key not in authoritative_keys]
+        decision_trace: dict[str, Any] = {
+            "authoritative_keys": authoritative_keys,
+            "advisory_keys": advisory_keys,
+            "context_loaded_count": len(sections),
+            "context_selected_count": len(sections),
+            "context_efficiency_ratio": 1.0,
+            "selected_context": [{"id": key, "kind": "internal", "score": 1.0} for key in sections.keys()],
+            "dropped_context": [],
+        }
+        external_refs = await self._build_external_reference_context(session, request)
+        if external_refs:
+            sections["external_references"] = external_refs["text"]
+            sections["context_ranking"] = external_refs["ranking"]
+            advisory_keys = [key for key in sections.keys() if key not in authoritative_keys]
+            decision_trace = external_refs["decision_trace"]
+            decision_trace["authoritative_keys"] = authoritative_keys
+            decision_trace["advisory_keys"] = advisory_keys
         if not sections:
             return None
         text = "\n".join(
@@ -1176,7 +1206,96 @@ class AIJobManager:
             "pack_hash": sha1(text.encode("utf-8")).hexdigest(),
             "fragment_cache_hit_count": cached.cache_hits,
             "fragment_cache_keys": cached.cache_keys,
+            "metadata": {
+                "context_decision_trace": decision_trace,
+                "context_loaded_count": int(decision_trace.get("context_loaded_count") or len(sections)),
+                "context_selected_count": int(decision_trace.get("context_selected_count") or len(sections)),
+                "context_efficiency_ratio": float(decision_trace.get("context_efficiency_ratio") or 1.0),
+                "authoritative_count": len(authoritative_keys),
+                "advisory_count": len(advisory_keys),
+            },
         }
+
+    async def _build_external_reference_context(self, session: AsyncSession, request: AIJobRequest) -> dict[str, str] | None:
+        cfg = get_settings()
+        max_chars = max(256, int(cfg.external_reference_max_context_chars))
+        top_k = max(1, int(cfg.external_reference_context_top_k))
+        stmt = (
+            select(Artifact)
+            .where(
+                Artifact.project_id == request.project_id,
+                Artifact.tenant_id == (request.tenant_id or uuid.UUID(int=0)),
+                Artifact.type == "external_reference",
+            )
+            .order_by(Artifact.created_at.desc())
+            .limit(24)
+        )
+        artifacts = (await session.execute(stmt)).scalars().all()
+        if not artifacts:
+            return None
+        requirement_id = request.metadata.get("requirement_id") if isinstance(request.metadata, dict) else None
+        filtered: list[Artifact] = []
+        for artifact in artifacts:
+            if request.run_id and artifact.run_id == request.run_id:
+                filtered.append(artifact)
+                continue
+            if request.work_item_id and artifact.work_item_id == request.work_item_id:
+                filtered.append(artifact)
+                continue
+            if requirement_id and artifact.requirement_id == requirement_id:
+                filtered.append(artifact)
+                continue
+        if not filtered:
+            filtered = artifacts[:8]
+
+        run_ids = [artifact.run_id for artifact in filtered if artifact.run_id is not None]
+        successful_run_ids: set[uuid.UUID] = set()
+        if run_ids:
+            successful_runs = (
+                await session.execute(select(Run.id).where(Run.id.in_(run_ids), Run.status == "COMPLETED"))
+            ).scalars().all()
+            successful_run_ids = set(successful_runs)
+
+        req_tokens = set(str(requirement_id or "").lower().replace("-", " ").split())
+        scored: list[tuple[Artifact, ContextScore]] = []
+        for artifact in filtered:
+            score = self._context_ranking_policy.score_external_reference(
+                artifact,
+                requirement_id=requirement_id,
+                requirement_tokens=req_tokens,
+                successful_run_ids=successful_run_ids,
+            )
+            scored.append((artifact, score))
+        selected, dropped = self._context_ranking_policy.rank(scored, top_k=top_k)
+        lines: list[str] = []
+        for artifact, metrics in selected:
+            metadata = artifact.extra_metadata if isinstance(artifact.extra_metadata, dict) else {}
+            metadata["used_in_execution_count"] = int(metadata.get("used_in_execution_count") or 0) + 1
+            artifact.extra_metadata = metadata
+            session.add(artifact)
+            label = str(metadata.get("label") or metadata.get("domain") or artifact.uri)
+            summary = _compact_text(str(metadata.get("summary") or metadata.get("sanitized_text") or ""), 360)
+            lines.append(
+                f"- {label}: {summary} (source: {artifact.uri}; relevance={metrics.relevance_score}, trust={metrics.trust_score}, freshness={metrics.freshness_score}, success={metrics.historical_success_weight}, rank={metrics.overall})"
+            )
+        await session.flush()
+        text = "External references:\\n" + "\\n".join(lines)
+        avg_relevance = round(sum(item[1].relevance_score for item in selected) / len(selected), 3) if selected else 0.0
+        avg_trust = round(sum(item[1].trust_score for item in selected) / len(selected), 3) if selected else 0.0
+        avg_freshness = round(sum(item[1].freshness_score for item in selected) / len(selected), 3) if selected else 0.0
+        avg_success = round(sum(item[1].historical_success_weight for item in selected) / len(selected), 3) if selected else 0.0
+        ranking = (
+            f"Context ranking: selected={len(selected)}/{len(filtered)} refs; avg_relevance={avg_relevance}; "
+            f"avg_trust={avg_trust}; avg_freshness={avg_freshness}; avg_historical_success={avg_success}."
+        )
+        decision_trace = self._context_ranking_policy.decision_trace(
+            selected=selected,
+            dropped=dropped,
+            authoritative_keys=[],
+            advisory_keys=[],
+            loaded_count=len(filtered),
+        )
+        return {"text": _compact_text(text, max_chars), "ranking": ranking, "decision_trace": decision_trace}
 
     async def _build_repo_summary(self, session: AsyncSession, request: AIJobRequest) -> dict[str, Any] | None:
         repo = await session.get(ProjectRepository, request.repository_id) if request.repository_id else None

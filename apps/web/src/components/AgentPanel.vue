@@ -22,8 +22,13 @@
             >
               <span class="soft-dot" :class="{ 'pulse-dot': agent.status === 'Running' }" />
             </div>
-            <div>
-              <div class="text-sm font-semibold text-slate-900">{{ agent.name }}</div>
+            <div class="min-w-0">
+              <div
+                class="agent-name-clamp text-sm font-semibold text-slate-900"
+                :title="agent.name"
+              >
+                {{ agent.name }}
+              </div>
               <div class="text-xs text-slate-500">{{ agent.taskCount }} task{{ agent.taskCount === 1 ? "" : "s" }}</div>
             </div>
           </div>
@@ -68,3 +73,12 @@ function agentTone(status: string) {
   return { background: "var(--surface-soft)", color: "var(--text-muted)" };
 }
 </script>
+
+<style scoped>
+.agent-name-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+</style>

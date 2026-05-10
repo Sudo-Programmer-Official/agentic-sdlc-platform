@@ -6,11 +6,13 @@ import json
 import os
 import time
 import urllib.request
+import urllib.error
 import base64
 from typing import Dict, List, Optional
 
 import jwt
 
+from app.core.config import get_settings
 from app.services.vcs.base import VCSAdapter
 from app.services.vcs.github_store import InMemoryGitHubIntegrationStore
 
@@ -125,8 +127,20 @@ class GitHubAppAdapter(VCSAdapter):
                 "User-Agent": "agentic-sdlc",
             },
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            # Normalize GitHub API failures so callers can render a clear user action
+            # (e.g., "A pull request already exists for ...") instead of returning 500.
+            detail = ""
+            try:
+                payload = json.loads(exc.read().decode() or "{}")
+                detail = str(payload.get("message") or "").strip()
+            except Exception:
+                detail = ""
+            message = detail or f"GitHub API error while creating PR (HTTP {exc.code})"
+            raise ValueError(message) from exc
 
     def list_installation_repositories(self, installation_id: int) -> List[dict]:
         token = self.get_installation_token(installation_id)
@@ -213,10 +227,11 @@ class GitHubAppAdapter(VCSAdapter):
 
 def build_github_adapter(store: InMemoryGitHubIntegrationStore) -> Optional[GitHubAppAdapter]:
     """Factory that reads env vars and returns adapter if configured."""
-    app_id = os.getenv("GITHUB_APP_ID")
-    private_key = os.getenv("GITHUB_PRIVATE_KEY")
-    webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET")
-    allowed_org = os.getenv("GITHUB_ALLOWED_ORG")
+    settings = get_settings()
+    app_id = os.getenv("GITHUB_APP_ID") or settings.github_app_id
+    private_key = os.getenv("GITHUB_PRIVATE_KEY") or settings.github_private_key
+    webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET") or settings.github_webhook_secret
+    allowed_org = os.getenv("GITHUB_ALLOWED_ORG") or settings.github_allowed_org
     if not (app_id and private_key):
         return None
     return GitHubAppAdapter(

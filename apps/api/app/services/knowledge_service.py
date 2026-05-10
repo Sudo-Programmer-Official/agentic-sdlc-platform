@@ -188,6 +188,15 @@ def _safe_title(event: KnowledgeEvent, snapshot: EventSnapshot) -> str:
     return f"{event.source_type} update"
 
 
+def _truncate_varchar(value: str | None, max_len: int) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_len]
+
+
 def _unique_strings(values: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -1116,15 +1125,15 @@ async def create_knowledge_event(
         tenant_id=tenant_id,
         project_id=project_id,
         repository_id=repository_id,
-        source_type=source_type,
-        source_external_id=source_external_id,
-        delivery_key=delivery_key,
-        branch_name=branch_name,
-        commit_sha=commit_sha,
+        source_type=_truncate_varchar(source_type, 32) or "agent_run",
+        source_external_id=_truncate_varchar(source_external_id, 255),
+        delivery_key=_truncate_varchar(delivery_key, 255),
+        branch_name=_truncate_varchar(branch_name, 255),
+        commit_sha=_truncate_varchar(commit_sha, 64),
         pr_number=pr_number,
-        title=title,
+        title=_truncate_varchar(title, 255),
         raw_payload_json=raw_payload_json,
-        triggered_by=triggered_by,
+        triggered_by=_truncate_varchar(triggered_by, 120),
         status="detected",
     )
     session.add(event)

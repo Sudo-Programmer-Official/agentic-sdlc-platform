@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.api.deps import TenantContext, get_tenant_context
 from app.api.v1 import generation as generation_module
 from app.db.base import Base
-from app.db.models import Document, Project, Task, Trace
+from app.db.models import AIJobRun, ArchitectureProfile, Document, Project, ProjectRepository, ProjectBlueprint, ProjectGenesisRun, ProjectTopologySnapshot, Run, RunSummary, Task, Trace
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -96,6 +96,9 @@ async def test_public_generate_tasks_route_creates_tenant_scoped_tasks_and_trace
     tasks = (await session.execute(select(Task).where(Task.project_id == project.id))).scalars().all()
     assert len(tasks) == 1
     assert tasks[0].tenant_id == tenant_id
+    assert tasks[0].source_type == "document_generation"
+    assert tasks[0].source_node_id == str(document.id)
+    assert tasks[0].architecture_slice == "application"
 
     traces = (
         await session.execute(
@@ -104,6 +107,226 @@ async def test_public_generate_tasks_route_creates_tenant_scoped_tasks_and_trace
     ).scalars().all()
     assert traces
     assert all(trace.tenant_id == tenant_id for trace in traces)
+
+
+@pytest.mark.anyio
+async def test_foundation_readiness_reports_repo_profile_and_missing_checks(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Foundation", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            repo_url="https://github.com/example/app.git",
+            repo_full_name="example/app",
+            default_branch="main",
+            auth_strategy="public_https",
+        )
+    )
+    session.add(
+        ArchitectureProfile(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            status="ACTIVE",
+            summary="Vue and FastAPI app",
+            profile_json={
+                "repo_layout": {
+                    "packages": [
+                        {"name": "apps/web", "kind": "frontend"},
+                        {"name": "apps/api", "kind": "backend"},
+                    ]
+                },
+                "commands": {"test": {"command": "pytest -q"}, "web": {"command": "npm run build"}},
+            },
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/v1/projects/{project.id}/foundation-readiness")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "READY"
+    assert data["repo_connected"] is True
+    assert data["architecture_profile_present"] is True
+
+
+@pytest.mark.anyio
+async def test_manual_task_create_keeps_lineage_defaults_backward_compatible(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Manual Task", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/api/v1/projects/{project.id}/tasks",
+            json={"title": "Manual work item", "description": "No lineage supplied"},
+        )
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["source"] == "manual"
+    assert data["source_type"] == "manual"
+    assert data["derived_from_requirement_ids"] is None
+
+
+@pytest.mark.anyio
+async def test_project_genesis_blueprint_flow_creates_setup_tasks_and_records_blueprint(db_session):
+    session, _tenant_id = db_session
+    project = Project(name="Genesis API", tenant_id=_tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        create_resp = await client.post(
+            f"/api/v1/projects/{project.id}/blueprint",
+            json={
+                "blueprint_key": "fullstack_monorepo",
+                "stack_preset_key": "vue_fastapi",
+                "deployment_profile": "local_preview",
+                "readiness_enforced": True,
+            },
+        )
+        fetch_resp = await client.get(f"/api/v1/projects/{project.id}/blueprint")
+        runs_resp = await client.get(f"/api/v1/projects/{project.id}/genesis-runs/latest")
+
+    assert create_resp.status_code == 201
+    created = create_resp.json()
+    assert created["blueprint"]["blueprint_key"] == "fullstack_monorepo"
+    assert created["blueprint"]["readiness_enforced"] is True
+    assert len(created["genesis_run"]["created_task_ids"]) == 9
+    assert create_resp.json()["topology_snapshot"]["topology_json"]["directories"]
+
+    assert fetch_resp.status_code == 200
+    assert fetch_resp.json()["project_id"] == str(project.id)
+
+    assert runs_resp.status_code == 200
+    assert runs_resp.json()["status"] == "COMPLETED"
+
+    blueprint = await session.scalar(select(ProjectBlueprint).where(ProjectBlueprint.project_id == project.id))
+    assert blueprint is not None
+
+
+@pytest.mark.anyio
+async def test_governance_kpis_endpoint_surfaces_genesis_and_context_pack_metrics(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Governance KPIs", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    blueprint = ProjectBlueprint(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        blueprint_key="fullstack_monorepo",
+        stack_preset_key="vue_fastapi",
+        deployment_profile="local_preview",
+        architecture="fullstack_monorepo",
+        status="ACTIVE",
+        readiness_enforced=True,
+    )
+    session.add(blueprint)
+    await session.flush()
+
+    session.add(
+        ProjectTopologySnapshot(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            blueprint_id=blueprint.id,
+            version=1,
+            topology_json={"blueprint_key": "fullstack_monorepo", "directories": ["apps/web"]},
+            summary="snapshot-1",
+        )
+    )
+    session.add(
+        ProjectGenesisRun(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            blueprint_id=blueprint.id,
+            status="COMPLETED",
+            validation={"status": "READY"},
+        )
+    )
+    session.add(Run(tenant_id=tenant_id, project_id=project.id, status="COMPLETED", executor="codex", summary={"task_source": "manual"}))
+    session.add(
+        AIJobRun(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            workflow_type="runtime.run",
+            role="executor",
+            task_type="coding",
+            ambiguity_level="medium",
+            risk_level="medium",
+            max_model_tier="tier_standard",
+            selected_model_tier="tier_standard",
+            details_json={"context_pack": {"key": "scope-a", "hash": "h1", "pack_cache_hit": True}},
+            status="completed",
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/v1/projects/{project.id}/governance-kpis")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["blueprint_present"] is True
+    assert data["genesis_success_rate"] == 100.0
+    assert data["deterministic_replay_match"] == 100.0
+    assert data["feature_runs_without_genesis"] == 0
+    assert data["context_pack_usage"] == 100.0
+
+
+@pytest.mark.anyio
+async def test_run_impact_score_endpoint_compares_prediction_to_actual_files(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Impact Score", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        summary={
+            "impact_prediction": {
+                "predicted_files": ["apps/api/app/main.py", "apps/web/src/views/Home.vue"],
+                "predicted_validations": ["run_tests"],
+                "predicted_risk": "MEDIUM",
+            }
+        },
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        RunSummary(
+            run_id=run.id,
+            tenant_id=tenant_id,
+            project_id=project.id,
+            goal_text="impact",
+            status="COMPLETED",
+            executor="codex",
+            workspace_status="READY",
+            recovery_count=1,
+            artifact_count=0,
+            changed_files=["apps/api/app/main.py", "apps/api/app/routes.py"],
+            artifact_types=[],
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/v1/runs/{run.id}/impact-score")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["precision"] == 50.0
+    assert payload["recall"] == 50.0
+    assert "apps/api/app/main.py" in payload["overlap_files"]
+    assert "recovery_invoked" in payload["regression_signals"]
 
 
 @pytest.mark.anyio

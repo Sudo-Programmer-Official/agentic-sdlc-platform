@@ -66,6 +66,13 @@ def _github_app_env_presence() -> dict[str, bool]:
     }
 
 
+def github_app_runtime_configured() -> bool:
+    env_presence = _github_app_env_presence()
+    # Runtime clone/push via GitHub App only requires app id + private key.
+    # Webhook secret is required for webhook ingestion, not git transport auth.
+    return env_presence["app_id_present"] and env_presence["private_key_present"]
+
+
 def _normalize_provider(provider: str) -> str:
     value = (provider or "github").strip().lower()
     if value != "github":

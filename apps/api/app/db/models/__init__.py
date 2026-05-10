@@ -17,11 +17,28 @@ from app.db.models.memory import ProjectMemory, RunMemory, WorkItemArtifact
 from app.db.models.project_repository import ProjectRepository
 from app.db.models.project_preview_profile import ProjectPreviewProfile
 from app.db.models.run_summary import RunSummary
+from app.db.models.recovery_attempt import RecoveryAttempt
+from app.db.models.recovery_memory import RecoveryMemoryProfile
+from app.db.models.improvement_request import ImprovementRequest
+from app.db.models.requirement_memory import RequirementMemory
+from app.db.models.requirement_relationship import RequirementRelationship
+from app.db.models.project_genesis import (
+    ProjectBlueprint,
+    ProjectGenesisRun,
+    ProjectTopologySnapshot,
+    StackPreset,
+)
 from app.db.models.repo_file import RepoFile
 from app.db.models.repo_symbol import RepoSymbol
 from app.db.models.repo_edge import RepoEdge
 from app.db.models.repo_test_link import RepoTestLink
 from app.db.models.repo_snapshot import RepoSnapshot
+from app.db.models.repo_intelligence import (
+    RepoEntity,
+    RepoOwnership,
+    RepoValidation,
+    RepoChangeHistory,
+)
 from app.db.models.ai import AIArtifactCache, AIJobRun
 from app.db.models.knowledge import (
     KnowledgeArtifact,
@@ -55,11 +72,24 @@ __all__ = [
     "ProjectRepository",
     "ProjectPreviewProfile",
     "RunSummary",
+    "RecoveryAttempt",
+    "RecoveryMemoryProfile",
+    "ImprovementRequest",
+    "RequirementMemory",
+    "RequirementRelationship",
+    "StackPreset",
+    "ProjectBlueprint",
+    "ProjectTopologySnapshot",
+    "ProjectGenesisRun",
     "RepoFile",
     "RepoSymbol",
     "RepoEdge",
     "RepoTestLink",
     "RepoSnapshot",
+    "RepoEntity",
+    "RepoOwnership",
+    "RepoValidation",
+    "RepoChangeHistory",
     "AIJobRun",
     "AIArtifactCache",
     "KnowledgeEvent",

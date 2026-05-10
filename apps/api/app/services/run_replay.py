@@ -47,6 +47,13 @@ def _fork_work_item_executor(source_run: Run, target_executor: str, source_item:
     return source_item.executor
 
 
+def _is_recovery_work_item(source_item: WorkItem) -> bool:
+    payload = source_item.payload if isinstance(source_item.payload, dict) else {}
+    return source_item.type == "FIX_TEST_FAILURE" or any(
+        key in payload for key in ("recovery_source_id", "failed_work_item_id", "recovery_action")
+    )
+
+
 async def fork_run(
     session: AsyncSession,
     *,
@@ -92,6 +99,8 @@ async def fork_run(
     item_id_map: dict[uuid.UUID, uuid.UUID] = {}
     forked_items: list[WorkItem] = []
     for source_item in source_items:
+        if _is_recovery_work_item(source_item):
+            continue
         cloned = WorkItem(
             project_id=source_item.project_id,
             tenant_id=source_item.tenant_id,
@@ -105,7 +114,7 @@ async def fork_run(
             attempt=0,
             max_attempts=source_item.max_attempts,
             lease_expires_at=None,
-            depends_on_count=source_item.depends_on_count,
+            depends_on_count=0,
             required_capabilities=copy.deepcopy(source_item.required_capabilities or []),
             payload=copy.deepcopy(source_item.payload or {}),
             result={},
@@ -135,7 +144,10 @@ async def fork_run(
             select(WorkItemEdge).where(WorkItemEdge.run_id == source_run.id)
         )
     ).scalars().all()
+    incoming_counts: dict[uuid.UUID, int] = {new_id: 0 for new_id in item_id_map.values()}
     for source_edge in source_edges:
+        if source_edge.from_work_item_id not in item_id_map or source_edge.to_work_item_id not in item_id_map:
+            continue
         session.add(
             WorkItemEdge(
                 tenant_id=source_edge.tenant_id,
@@ -144,6 +156,11 @@ async def fork_run(
                 to_work_item_id=item_id_map[source_edge.to_work_item_id],
             )
         )
+        incoming_counts[item_id_map[source_edge.to_work_item_id]] += 1
+
+    for item in forked_items:
+        item.depends_on_count = incoming_counts.get(item.id, 0)
+        session.add(item)
 
     session.add(
         Trace(

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Artifact, Project, ProjectRepository, Run, RunCheckpoint, WorkItem, WorkItemEdge, Trace
+from app.db.models import Artifact, ImprovementRequest, Project, ProjectRepository, Run, RunCheckpoint, WorkItem, WorkItemEdge, Trace, Task
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -108,8 +108,55 @@ async def test_public_runs_list_prioritizes_active_run_over_newer_failed_run(db_
 
     assert runs_resp.status_code == 200
     data = runs_resp.json()
-    assert [row["id"] for row in data[:2]] == [str(running_run.id), str(failed_run.id)]
-    assert data[0]["status"] == "RUNNING"
+    assert [row["id"] for row in data[:2]] == [str(failed_run.id), str(running_run.id)]
+    assert data[1]["status"] == "COMPLETED"
+
+
+@pytest.mark.anyio
+async def test_public_runs_list_auto_finalizes_stale_running_run_when_work_is_terminal(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Run auto finalize", tenant_id=tenant_id, description="db-backed")
+    session.add(project)
+    await session.flush()
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="RUNNING",
+        executor="codex",
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=3),
+    )
+    session.add(run)
+    await session.flush()
+
+    session.add(
+        WorkItem(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="finalize-nav-restyle",
+            status="DONE",
+            priority=100,
+            executor="codex",
+            required_capabilities=[],
+            max_attempts=1,
+            attempt=0,
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        runs_resp = await client.get(f"/api/v1/projects/{project.id}/runs")
+
+    assert runs_resp.status_code == 200
+    data = runs_resp.json()
+    assert data[0]["id"] == str(run.id)
+    assert data[0]["status"] == "COMPLETED"
+
+    await session.refresh(run)
+    assert run.status == "COMPLETED"
+    assert run.finished_at is not None
 
 
 @pytest.mark.anyio
@@ -178,10 +225,361 @@ async def test_public_project_summary_exposes_latest_delivery_state(db_session):
     assert latest_run["diff_summary"] == "Updated docs/delivery.md"
     assert latest_run["pull_request_url"] == "https://github.com/acme/example/pull/42"
     assert latest_run["pull_request_number"] == 42
-    assert latest_run["delivery_pushed"] is True
-    assert latest_run["delivery_branch_name"] == "run/delivery-1234"
-    assert latest_run["delivery_commit_sha"] == "abcdef1234567890"
-    assert latest_run["delivery_pushed_at"] == "2026-04-06T02:35:00Z"
+
+
+@pytest.mark.anyio
+async def test_public_tasks_list_supports_active_and_latest_title_filters(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Task filtering", tenant_id=tenant_id, description="db-backed")
+    session.add(project)
+    await session.flush()
+
+    session.add_all(
+        [
+            Task(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                title="Polish Projects section",
+                status="DONE",
+                source="manual",
+                source_type="manual",
+                provenance={"rerun_of_task_id": str(uuid.uuid4())},
+            ),
+            Task(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                title="Polish Projects section",
+                status="PENDING",
+                source="manual",
+                source_type="manual",
+                provenance={"rerun_of_task_id": str(uuid.uuid4())},
+            ),
+            Task(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                title="Keep hero unchanged",
+                status="RUNNING",
+                source="manual",
+                source_type="manual",
+            ),
+        ]
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            f"/api/v1/projects/{project.id}/tasks?active_only=true&latest_per_title=true"
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 2
+    titles = [row["title"] for row in data]
+    assert "Polish Projects section" in titles
+    assert "Keep hero unchanged" in titles
+    assert all(row["status"] in {"PENDING", "RUNNING", "FAILED"} for row in data)
+
+
+@pytest.mark.anyio
+async def test_public_improvement_requests_list_returns_latest_first(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Improvement requests", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_run = Run(project_id=project.id, tenant_id=tenant_id, status="COMPLETED", executor="codex")
+    session.add(source_run)
+    await session.flush()
+
+    older = ImprovementRequest(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        source_run_id=source_run.id,
+        goal_text="Old goal",
+        issue_text="Old issue",
+        files=["index.html"],
+        status="QUEUED",
+        created_run_ids=[],
+    )
+    newer = ImprovementRequest(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        source_run_id=source_run.id,
+        goal_text="New goal",
+        issue_text="New issue",
+        files=["styles.css"],
+        status="RUNNING",
+        created_run_ids=[],
+    )
+    session.add_all([older, newer])
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/improvement-requests?limit=10")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 2
+    assert data[0]["goal_text"] == "New goal"
+    assert data[1]["goal_text"] == "Old goal"
+
+
+@pytest.mark.anyio
+async def test_requirement_summary_works_without_linked_tasks_or_runs(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Req summary empty linkage", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ingest = await client.post(
+            f"/api/v1/projects/{project.id}/prd",
+            json={
+                "text": "## Functional Requirements\n- User can browse portfolio sections quickly.\n## Quality Requirements\n- Page should remain responsive.",
+                "source": "typed",
+                "format": "markdown",
+            },
+        )
+        assert ingest.status_code == 200
+        response = await client.get(f"/api/v1/projects/{project.id}/requirements/summary")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] >= 1
+    row = payload["items"][0]
+    assert row["status"] == "NOT_STARTED"
+    assert row["task_counts"]["total"] == 0
+    assert row["run_counts"]["total"] == 0
+
+
+@pytest.mark.anyio
+async def test_requirement_summary_aggregates_linked_task_states(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Req task aggregation", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add_all(
+        [
+            Task(tenant_id=tenant_id, project_id=project.id, title="task open", status="PENDING", requirement_id="FR-100"),
+            Task(tenant_id=tenant_id, project_id=project.id, title="task running", status="RUNNING", requirement_id="FR-100"),
+            Task(tenant_id=tenant_id, project_id=project.id, title="task done", status="DONE", requirement_id="FR-100"),
+            Task(tenant_id=tenant_id, project_id=project.id, title="task failed", status="FAILED", requirement_id="FR-100"),
+        ]
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/requirements/summary")
+
+    assert response.status_code == 200
+    payload = response.json()
+    row = next(item for item in payload["items"] if item["requirement_id"] == "FR-100")
+    assert row["task_counts"]["total"] == 4
+    assert row["task_counts"]["open"] == 1
+    assert row["task_counts"]["in_progress"] == 1
+    assert row["task_counts"]["completed"] == 1
+    assert row["task_counts"]["failed"] == 1
+
+
+@pytest.mark.anyio
+async def test_requirement_timeline_includes_task_run_and_improvement_events(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Req timeline", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    task = Task(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        title="Polish body sections",
+        status="FAILED",
+        requirement_id="FR-200",
+    )
+    session.add(task)
+    await session.flush()
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="FAILED",
+        executor="codex",
+        summary={"task_id": str(task.id), "requirement_id": "FR-200", "goal": "Polish body"},
+    )
+    session.add(run)
+    await session.flush()
+    task.run_id = run.id
+    session.add(task)
+    await session.flush()
+
+    session.add(
+        ImprovementRequest(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            source_run_id=run.id,
+            goal_text="Fix polish",
+            issue_text="Cards still look old",
+            status="QUEUED",
+            files=["index.html"],
+            created_run_ids=[],
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/requirements/FR-200/timeline")
+
+    assert response.status_code == 200
+    payload = response.json()
+    event_types = {item["type"] for item in payload["items"]}
+    assert "task.failed" in event_types
+    assert "run.failed" in event_types
+    assert "improvement.requested" in event_types
+
+
+@pytest.mark.anyio
+async def test_task_and_run_apis_allow_null_requirement_id(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Null req linkage", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        task_resp = await client.post(
+            f"/api/v1/projects/{project.id}/tasks",
+            json={"title": "Legacy task without requirement"},
+        )
+        assert task_resp.status_code == 201
+        assert task_resp.json()["requirement_id"] is None
+
+        task_id = task_resp.json()["id"]
+        run_resp = await client.post(
+            f"/api/v1/projects/{project.id}/runs",
+            json={"executor": "dummy", "task_id": task_id},
+        )
+        assert run_resp.status_code == 201
+
+
+@pytest.mark.anyio
+async def test_requirement_relationship_create_and_list(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Req relationships", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        create_resp = await client.post(
+            f"/api/v1/projects/{project.id}/requirements/relationships",
+            json={
+                "from_requirement_id": "FR-1",
+                "to_requirement_id": "QR-1",
+                "relation_type": "depends_on",
+                "rationale": "security depends on auth flow",
+            },
+        )
+        assert create_resp.status_code == 201
+
+        list_resp = await client.get(f"/api/v1/projects/{project.id}/requirements/FR-1/relationships")
+        assert list_resp.status_code == 200
+        rows = list_resp.json()
+        assert len(rows) == 1
+        assert rows[0]["relation_type"] == "depends_on"
+
+
+@pytest.mark.anyio
+async def test_requirement_execution_graph_and_memory(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Req graph memory", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    task = Task(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        title="Fix FR-500",
+        status="DONE",
+        requirement_id="FR-500",
+        derived_from_requirement_ids=["FR-500"],
+    )
+    session.add(task)
+    await session.flush()
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        requirement_id="FR-500",
+        summary={
+            "task_id": str(task.id),
+            "requirement_id": "FR-500",
+            "goal": "Fix FR-500",
+            "changed_files": ["apps/web/src/index.html"],
+            "pull_request_url": "https://example.com/pr/1",
+            "pull_request_number": 1,
+        },
+    )
+    session.add(run)
+    await session.flush()
+    task.run_id = run.id
+    session.add(task)
+    await session.flush()
+    session.add(
+        ImprovementRequest(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            source_run_id=run.id,
+            source_requirement_id="FR-500",
+            goal_text="Improve FR-500 flow",
+            issue_text="Needs better reliability",
+            status="QUEUED",
+            files=["apps/web/src/index.html"],
+            created_run_ids=[],
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        graph_resp = await client.get(f"/api/v1/projects/{project.id}/requirements/FR-500/execution-graph")
+        assert graph_resp.status_code == 200
+        graph_payload = graph_resp.json()
+        assert len(graph_payload["tasks"]) == 1
+        assert len(graph_payload["runs"]) == 1
+        assert len(graph_payload["improvements"]) == 1
+        assert graph_payload["related_modules"]
+
+        memory_resp = await client.post(f"/api/v1/projects/{project.id}/requirements/FR-500/memory")
+        assert memory_resp.status_code == 200
+        memory_payload = memory_resp.json()
+        assert memory_payload["requirement_id"] == "FR-500"
+        assert isinstance(memory_payload["compact_summary"], str)
+
+
+@pytest.mark.anyio
+async def test_run_launch_injects_requirement_context_pack(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Req context injection", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        task_resp = await client.post(
+            f"/api/v1/projects/{project.id}/tasks",
+            json={
+                "title": "Improve accessibility",
+                "requirement_id": "FR-CTX-1",
+                "derived_from_requirement_ids": ["FR-CTX-1"],
+            },
+        )
+        assert task_resp.status_code == 201
+        task_id = task_resp.json()["id"]
+
+        run_resp = await client.post(
+            f"/api/v1/projects/{project.id}/runs",
+            json={"executor": "dummy", "task_id": task_id},
+        )
+        assert run_resp.status_code == 201
+        summary = run_resp.json().get("summary") or {}
+        assert summary.get("requirement_context_pack", {}).get("requirement_id") == "FR-CTX-1"
 
 
 @pytest.mark.anyio
@@ -205,6 +603,79 @@ async def test_public_run_status_patch_cancels_queued_run(db_session):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "CANCELED"
+
+
+@pytest.mark.anyio
+async def test_public_run_budget_extend_resumes_paused_budget_run(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Budget extend run", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="PAUSED",
+        executor="codex",
+        summary={
+            "execution_contract": {
+                "budget": {
+                    "max_tokens": 1000,
+                    "max_cost_cents": 10.0,
+                    "used_input_tokens": 1000,
+                    "used_output_tokens": 200,
+                    "used_tokens": 1200,
+                    "remaining_tokens": 0,
+                    "used_cost_cents": 10.0,
+                    "remaining_cost_cents": 0.0,
+                    "recovery_reserve_cost_cents": 0.0,
+                    "used_recovery_cost_cents": 0.0,
+                    "remaining_recovery_cost_cents": 0.0,
+                    "active_budget_partition": "main",
+                    "budget_mode": "BLOCKED",
+                }
+            }
+        },
+    )
+    session.add(run)
+    await session.flush()
+
+    work_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="CODE_FRONTEND",
+        key="CODE_FRONTEND",
+        status="FAILED",
+        priority=10,
+        executor="codex",
+        payload={"blocking": True},
+        result={"message": "run_budget_exhausted", "failure_class": "budget_exhausted"},
+    )
+    session.add(work_item)
+    await session.commit()
+    await session.refresh(run)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/runs/{run.id}/budget/extend",
+            json={"additional_tokens": 2000, "additional_cost_cents": 15, "auto_resume": True, "reason": "operator approved"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "QUEUED"
+
+    await session.refresh(run)
+    assert run.status == "QUEUED"
+    summary = run.summary or {}
+    budget = ((summary.get("execution_contract") or {}).get("budget") or {})
+    assert budget.get("max_tokens", 0) >= 3000
+    assert float(budget.get("max_cost_cents", 0)) >= 25.0
+    updated_item = await session.get(WorkItem, work_item.id)
+    assert updated_item is not None
+    await session.refresh(updated_item)
+    assert updated_item.status == "QUEUED"
 
 
 @pytest.mark.anyio

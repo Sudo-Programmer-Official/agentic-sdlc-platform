@@ -18,6 +18,8 @@ _HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 _INLINE_STYLE_ATTR_RE = re.compile(r"<[^>]*\sstyle\s*=", re.IGNORECASE)
 _CSS_VAR_RE = re.compile(r"var\(\s*(--[A-Za-z0-9_-]+)\s*[\),]")
 _FRONTEND_SUFFIXES = {".html", ".css", ".scss", ".sass", ".less", ".vue", ".tsx", ".jsx", ".js", ".ts"}
+_FORBIDDEN_ARTIFACT_PATH_PARTS = {"__pycache__", ".pytest_cache"}
+_FORBIDDEN_ARTIFACT_SUFFIXES = {".pyc", ".pyo"}
 _MAX_PROJECT_VIOLATION_RECORDS = 64
 
 
@@ -196,6 +198,17 @@ def _is_test_file(path: str) -> bool:
         or ".test." in name
         or ".spec." in name
     )
+
+
+def _artifact_path_violation(path: str) -> str | None:
+    normalized = _normalize_path(path)
+    parts = {part.lower() for part in PurePosixPath(normalized).parts}
+    if parts.intersection(_FORBIDDEN_ARTIFACT_PATH_PARTS):
+        return f"Patch may not modify runtime cache artifacts: {normalized}."
+    suffix = PurePosixPath(normalized).suffix.lower()
+    if suffix in _FORBIDDEN_ARTIFACT_SUFFIXES:
+        return f"Patch may not modify compiled artifacts: {normalized}."
+    return None
 
 
 def _coerce_project_contract_enforcement(project_contract: dict[str, Any] | None) -> dict[str, Any]:
@@ -493,6 +506,12 @@ def evaluate_patch_guard(
                 "Patch touches files outside the planned scope: "
                 + ", ".join(extra_files[:8])
             )
+    artifact_violations = [
+        message
+        for message in (_artifact_path_violation(path) for path in touched_files)
+        if message is not None
+    ]
+    violations.extend(artifact_violations)
     if protected_zones:
         violations.append(
             "Patch touches protected architecture zones that require a narrower plan or explicit review: "

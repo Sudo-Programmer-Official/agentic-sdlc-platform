@@ -52,9 +52,11 @@ Do not invent files outside the repo. Do not include explanations outside JSON."
 
 STRUCTURED_OUTPUT_RETRY_LIMIT = 1
 REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT = 2
+MAX_FRONTEND_WRITE_FILE_BYTES = 24_000
 
 log = logging.getLogger("app.runtime.codex_executor")
 _UNIFIED_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$")
+_JSON_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL | re.IGNORECASE)
 
 
 def _verification_from_action_scope(
@@ -209,6 +211,51 @@ def _write_tests_writable_scope(
     return fallback
 
 
+def _extract_balanced_json_block(raw: str) -> str | None:
+    start = next((idx for idx, ch in enumerate(raw) if ch in "{["), -1)
+    if start < 0:
+        return None
+    opener = raw[start]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(raw)):
+        ch = raw[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return raw[start : idx + 1]
+    return None
+
+
+def _extract_structured_json_candidate(raw: str) -> str | None:
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if stripped[0] in "{[":
+        return stripped
+    fence_match = _JSON_CODE_FENCE_RE.search(raw)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+        if candidate:
+            return candidate
+    return _extract_balanced_json_block(raw)
+
+
 def _edit_budget_from_payload(payload: dict[str, Any] | None) -> dict[str, int | str | None]:
     budget = payload.get("edit_budget") if isinstance(payload, dict) else None
     mode = "minimal_patch"
@@ -293,7 +340,7 @@ class CodexExecutor(TaskExecutor):
         return ratio
 
     def _system_prompt_for(self, work_item: WorkItem) -> str:
-        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        if work_item.type in {"PLAN_DAG", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
             return REVIEW_SYSTEM_PROMPT
         return SYSTEM_PROMPT
 
@@ -366,6 +413,9 @@ class CodexExecutor(TaskExecutor):
             "payload": {
                 "ai_job_id": prepared_job_id,
                 "next_action": next_action,
+                "failure_class": "budget_exhausted",
+                "stop_reason": "run_budget_exhausted",
+                "approval_required": True,
                 "budget": contract.budget.to_dict() if contract is not None else None,
                 "execution_contract": contract.to_dict() if contract is not None else None,
             },
@@ -572,6 +622,9 @@ class CodexExecutor(TaskExecutor):
                 "message": prepared.stop_reason,
                 "payload": {
                     "ai_job_id": str(prepared.job_id),
+                    "failure_class": prepared.stop_reason,
+                    "stop_reason": prepared.stop_reason,
+                    "approval_required": prepared.stop_reason in {"budget_exceeded", "run_budget_exhausted"},
                     "next_action": prepared.next_action,
                     "estimated_cost_cents": prepared.estimated_cost_cents,
                     "context_size": prepared.context_size,
@@ -687,8 +740,7 @@ class CodexExecutor(TaskExecutor):
                         prepared_job_id=str(prepared.job_id),
                         next_action=next_action,
                     )
-                data = json.loads(raw)
-                plan = CodexPlan.model_validate(data)
+                plan = self._parse_codex_plan(raw)
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
@@ -918,6 +970,12 @@ class CodexExecutor(TaskExecutor):
                 project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
             )
             stage_violations = _stage_scope_violations(work_item, plan.actions, patch_guard.touched_files)
+            stage_violations.extend(
+                self._frontend_writefile_violations(
+                    work_item=work_item,
+                    actions=plan.actions,
+                )
+            )
             if stage_violations:
                 patch_guard.violations.extend(stage_violations)
             verification = await self._load_patch_verification(work_item, context)
@@ -1615,7 +1673,28 @@ class CodexExecutor(TaskExecutor):
             return True
         if work_item.type == "WRITE_TESTS":
             return any("WRITE_TESTS may only modify Python test files" in violation for violation in violations)
+        if work_item.type == "CODE_FRONTEND":
+            return any("CODE_FRONTEND write_file payload too large" in violation for violation in violations)
         return False
+
+    def _frontend_writefile_violations(self, *, work_item: WorkItem, actions: list[Any]) -> list[str]:
+        if work_item.type != "CODE_FRONTEND" or not _is_static_frontend_scope(work_item.payload):
+            return []
+        violations: list[str] = []
+        for action in actions:
+            if getattr(action, "type", None) != "write_file":
+                continue
+            content = getattr(action, "content", None)
+            path = getattr(action, "path", None) or "unknown"
+            if not isinstance(content, str):
+                continue
+            size = len(content.encode("utf-8"))
+            if size > MAX_FRONTEND_WRITE_FILE_BYTES:
+                violations.append(
+                    f"CODE_FRONTEND write_file payload too large for {path} ({size} bytes > {MAX_FRONTEND_WRITE_FILE_BYTES}). "
+                    "Use minimal apply_patch hunks instead of full-file rewrites."
+                )
+        return violations
 
     def _is_project_contract_repair_candidate(
         self,
@@ -1644,6 +1723,19 @@ class CodexExecutor(TaskExecutor):
             or error.pos >= max(0, len(raw) - 128)
             or stripped[-1] not in {"}", "]"}
         )
+
+    def _parse_codex_plan(self, raw: str) -> CodexPlan:
+        parse_error: Exception | None = None
+        try:
+            return CodexPlan.model_validate(json.loads(raw))
+        except Exception as exc:
+            parse_error = exc
+        candidate = _extract_structured_json_candidate(raw)
+        if not candidate or candidate == raw.strip():
+            if parse_error is not None:
+                raise parse_error
+            raise ValueError("Structured output parsing failed")
+        return CodexPlan.model_validate(json.loads(candidate))
 
     def _parse_retry_max_tokens(
         self,
@@ -1687,6 +1779,11 @@ class CodexExecutor(TaskExecutor):
         work_item: WorkItem,
         contract: ExecutionContract | None,
     ) -> int:
+        if work_item.type == "PLAN_DAG":
+            # Keep planning responses compact and schema-focused to avoid large
+            # truncated patch payloads in the planning stage.
+            planning_cap = int(getattr(self.settings, "ai_default_completion_economy_tokens", 800))
+            return max(300, min(base_max_tokens, planning_cap))
         if work_item.type == "WRITE_TESTS":
             return self._parse_retry_max_tokens(
                 current_max_tokens=base_max_tokens,
@@ -1730,10 +1827,21 @@ class CodexExecutor(TaskExecutor):
         primary_scope = _target_files_from_payload(work_item.payload) or allowed_files[:1]
         if primary_scope:
             guidance.append(f"Prefer touching only this primary file unless the schema requires otherwise: {', '.join(primary_scope[:2])}.")
-        if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND", "WRITE_TESTS"}:
+        if work_item.type in {"CODE_BACKEND", "WRITE_TESTS"}:
             guidance.append(
                 "If a long apply_patch diff risks truncation, prefer write_file for a single targeted file or a shorter patch."
             )
+        if work_item.type == "CODE_FRONTEND":
+            recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
+            if recovery_strategy == "write_file_preferred":
+                guidance.append(
+                    "Recovery override: the previous patch failed to apply."
+                    " For this retry, prefer write_file for the primary scoped file with complete updated contents."
+                )
+            else:
+                guidance.append(
+                    "If output size is large, avoid full-file write_file rewrites; emit minimal apply_patch hunks to keep JSON compact."
+                )
         if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
             guidance.append(
                 "This is a review stage. Return only note actions with concise findings or approval guidance."
@@ -1742,12 +1850,18 @@ class CodexExecutor(TaskExecutor):
                 "Never emit apply_patch, write_file, or delete_file actions, and do not reproduce the diff or file contents."
             )
         if work_item.type == "CODE_FRONTEND" and _is_static_frontend_scope(work_item.payload):
-            guidance.append(
-                "For a bounded static frontend file, prefer write_file with the full updated contents of the scoped file instead of apply_patch."
-            )
+            recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
+            if recovery_strategy == "write_file_preferred":
+                guidance.append(
+                    "For this bounded static frontend recovery attempt, use write_file for index.html when in scope."
+                )
+            else:
+                guidance.append(
+                    "For a bounded static frontend file, prefer minimal apply_patch edits. Use write_file only for new files or tiny rewrites."
+                )
         if work_item.type == "WRITE_TESTS":
             guidance.append(
-                "For WRITE_TESTS, prefer compact apply_patch edits to the affected test blocks when the file already exists; use write_file for new test files or short complete rewrites."
+                "For WRITE_TESTS, prefer write_file with full updated contents for scoped test files when patch offsets may have drifted; use apply_patch only for small, stable hunks."
             )
             guidance.append(
                 "Do not leave conflicting old-behavior and new-behavior assertions in the same suite; reconcile stale tests to the current task goal."
@@ -1778,15 +1892,24 @@ class CodexExecutor(TaskExecutor):
             "If you use apply_patch, every hunk header must use exact unified diff line numbers like @@ -10,2 +10,6 @@.\n"
             "Do not use placeholder hunk headers such as @@ ... @@.\n"
             "Do not return hunk-only patch fragments that start with @@ before file headers.\n"
-            "For single-file HTML/CSS/JS edits, prefer write_file with the full updated file contents.\n"
+            "For single-file HTML/CSS/JS edits, prefer minimal apply_patch hunks that touch only required lines.\n"
             "Do not include prose outside the JSON object."
         )
         if work_item.type == "WRITE_TESTS":
             repair_prompt += (
-                "\nFor WRITE_TESTS, regenerate a compact and exact patch for the existing test file when possible."
-                " Use write_file for new test files or short complete rewrites."
+                "\nFor WRITE_TESTS after a patch-apply failure, do not emit apply_patch."
+                " Emit write_file actions with full updated contents for scoped Python test files."
+                " Keep edits minimal and behavior-oriented."
                 " Never modify non-test files such as index.html."
             )
+        if work_item.type == "CODE_FRONTEND":
+            recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
+            if recovery_strategy == "write_file_preferred":
+                repair_prompt += (
+                    "\nFor this CODE_FRONTEND recovery retry, avoid apply_patch."
+                    " Emit write_file for the primary scoped file (index.html when present) with complete updated content."
+                    " Keep scope bounded to allowed files."
+                )
         current_prompt = repair_prompt
         current_max_tokens = self.settings.codex_max_tokens
         raw = ""
@@ -1815,8 +1938,7 @@ class CodexExecutor(TaskExecutor):
                 timeout=self.settings.codex_timeout_seconds,
             )
             try:
-                data = json.loads(raw)
-                plan = CodexPlan.model_validate(data)
+                plan = self._parse_codex_plan(raw)
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
@@ -1919,8 +2041,7 @@ class CodexExecutor(TaskExecutor):
                 timeout=self.settings.codex_timeout_seconds,
             )
             try:
-                data = json.loads(raw)
-                plan = CodexPlan.model_validate(data)
+                plan = self._parse_codex_plan(raw)
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
@@ -2022,8 +2143,7 @@ class CodexExecutor(TaskExecutor):
                 timeout=self.settings.codex_timeout_seconds,
             )
             try:
-                data = json.loads(raw)
-                plan = CodexPlan.model_validate(data)
+                plan = self._parse_codex_plan(raw)
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
@@ -2094,6 +2214,7 @@ class CodexExecutor(TaskExecutor):
 
     def _instructions_for(self, work_item: WorkItem, context: RunContext | None = None) -> str:
         payload = work_item.payload or {}
+        recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
         contract = context.execution_contract if context is not None else None
         target_files = (
             list(contract.target_files)
@@ -2225,13 +2346,18 @@ class CodexExecutor(TaskExecutor):
             base += (
                 " This is a static frontend task. Keep implementation inside the scoped HTML/CSS/JS files and "
                 "do not introduce Python helper modules or backend files unless the task explicitly asks for them. "
-                "For single-file HTML/CSS/JS edits, prefer write_file with the full updated file contents if generating an exact unified diff would be awkward."
+                "For single-file HTML/CSS/JS edits, prefer minimal apply_patch hunks; use write_file only when a tiny full-file rewrite is truly necessary."
             )
         if work_item.type == "CODE_FRONTEND" and static_frontend_scope:
             base += (
-                " For a bounded static frontend file, prefer write_file with the full updated contents of that file"
-                " instead of apply_patch so the response stays compact and structurally valid."
+                " For a bounded static frontend file, prefer tightly scoped apply_patch edits and avoid full-file rewrites unless absolutely necessary."
             )
+            if recovery_strategy == "write_file_preferred":
+                base += (
+                    " Recovery override: previous patch application drifted."
+                    " For this retry, prefer write_file with full contents for the primary scoped file (typically index.html),"
+                    " then keep any remaining edits minimal."
+                )
         test_dependency_guard = (
             " Tests must rely on the Python standard library or dependencies that are already declared in repo "
             "metadata such as requirements.txt, pyproject.toml, or package.json. Do not introduce new third-party "
@@ -2239,21 +2365,32 @@ class CodexExecutor(TaskExecutor):
             "is known to install them. For HTML validation, prefer html.parser or simple string assertions."
         )
         if work_item.type == "FIX_TEST_FAILURE":
-            return (
+            fix_prompt = (
                 base
                 + " You are fixing failing tests. Use the failing stack info and previous diff. "
                   "Make the smallest possible patch that addresses the failure; avoid broad refactors. "
                   "Prefer patching implementation files over test files. Treat test files as read-only verification "
                   "context unless the failure is clearly caused by a syntax, import, harness defect, or contradictory assertions in the test file itself. "
+                  "If assertions depend on stale implementation details (for example exact class names/selectors/DOM nesting) and the requested behavior is already satisfied, update the scoped tests to verify behavior instead of forcing obsolete markup. "
                   "If two assertions are mutually exclusive for the current task goal, reconcile the scoped test definitions instead of oscillating implementation-only patches. "
                   "Do not weaken or rewrite assertions just to make the suite pass."
                 + test_dependency_guard
             )
+            target_files = _target_files_from_payload(work_item.payload if isinstance(work_item.payload, dict) else {})
+            if static_frontend_scope or "index.html" in target_files:
+                fix_prompt += (
+                    " For static frontend recovery, target index.html first when it is in scope. "
+                    "Edit a test file only when validation proves the assertion is stale or contradictory."
+                )
+            return fix_prompt
         if work_item.type == "WRITE_TESTS":
             return (
                 base
                 + " Keep validation lightweight and directly tied to the requested behavior."
-                  " For existing large test files, prefer compact apply_patch updates to affected test blocks; use write_file for new files or short complete rewrites."
+                  " Prefer behavior-oriented assertions over brittle implementation details; avoid requiring exact CSS class names, selector shapes, or DOM nesting unless the task explicitly requires them."
+                  " When multiple valid implementations are possible (for example background image vs inline img), encode acceptance checks that allow equivalent outcomes aligned to the task intent."
+                  " For existing large or frequently edited test files, prefer write_file with full file contents over fragile line-numbered patch hunks."
+                  " Use apply_patch only for short, stable edits."
                   " Remove or update stale assertions when behavior changes so old and new expectations do not conflict in the same suite."
                   " Malformed unified diffs are treated as hard failures in this stage."
                 + test_dependency_guard

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.api.deps import TenantContext, get_tenant_context
 from app.api.v1 import persistence
 from app.db.base import Base
-from app.db.models import Artifact, Project, ProjectRepository, Run
+from app.db.models import Artifact, Project, ProjectRepository, Run, WorkItem, WorkItemEdge
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -409,6 +409,126 @@ async def test_publish_run_branch_if_ready_pushes_clean_branch_without_new_commi
 
 
 @pytest.mark.anyio
+async def test_publish_run_branch_persists_successful_fallback_strategy(db_session, monkeypatch):
+    session, tenant_id, tmp_path = db_session
+    remote = _seed_remote_repo(tmp_path)
+
+    workspace_root = tmp_path / "workspaces" / "proj" / "publish-fallback-run"
+    repo_path = workspace_root / "repo"
+    _run_git(["clone", str(remote), str(repo_path)])
+    _run_git(["checkout", "-b", "run/publish-fallback"], cwd=repo_path)
+    (repo_path / "README.md").write_text("hello fallback\n", encoding="utf-8")
+
+    project = Project(name="Publish fallback strategy project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    repo_record = ProjectRepository(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        provider="github",
+        repo_url=str(remote),
+        repo_full_name="example/repo",
+        default_branch="main",
+        auth_strategy="runtime_default",
+    )
+    session.add(repo_record)
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_path),
+        branch_name="run/publish-fallback",
+        workspace_status="SEEDED",
+        summary={"goal": "Publish fallback strategy"},
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    real_push_branch = run_delivery.push_branch
+    seen_strategies: list[str] = []
+
+    def _push_with_first_failure(*args, **kwargs):
+        strategy = kwargs.get("auth_strategy")
+        seen_strategies.append(str(strategy))
+        if strategy == "runtime_default":
+            raise RuntimeError("simulated runtime_default auth failure")
+        return real_push_branch(*args, **kwargs)
+
+    monkeypatch.setattr(run_delivery, "github_app_runtime_configured", lambda: True)
+    monkeypatch.setattr(run_delivery, "push_branch", _push_with_first_failure)
+
+    result = await run_delivery.publish_run_branch_if_ready(session, run=run)
+    assert result is not None
+    assert seen_strategies[0] == "runtime_default"
+    assert "ssh" in seen_strategies or "public_https" in seen_strategies or "github_app" in seen_strategies
+
+    updated_repo = await session.get(ProjectRepository, repo_record.id)
+    assert updated_repo is not None
+    assert updated_repo.auth_strategy != "runtime_default"
+
+
+@pytest.mark.anyio
+async def test_publish_run_branch_skips_github_app_paths_when_runtime_unconfigured(db_session, monkeypatch):
+    session, tenant_id, tmp_path = db_session
+    remote = _seed_remote_repo(tmp_path)
+
+    workspace_root = tmp_path / "workspaces" / "proj" / "publish-skip-app-run"
+    repo_path = workspace_root / "repo"
+    _run_git(["clone", str(remote), str(repo_path)])
+    _run_git(["checkout", "-b", "run/publish-skip-app"], cwd=repo_path)
+    (repo_path / "README.md").write_text("hello skip app\n", encoding="utf-8")
+
+    project = Project(name="Publish skip app fallback project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    repo_record = ProjectRepository(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        provider="github",
+        repo_url=str(remote),
+        repo_full_name="example/repo",
+        default_branch="main",
+        auth_strategy="runtime_default",
+    )
+    session.add(repo_record)
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_path),
+        branch_name="run/publish-skip-app",
+        workspace_status="SEEDED",
+        summary={"goal": "Publish skip app fallback strategy"},
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(run_delivery, "github_app_runtime_configured", lambda: False)
+
+    seen_strategies: list[str] = []
+    real_push_branch = run_delivery.push_branch
+
+    def _recorded_push(*args, **kwargs):
+        seen_strategies.append(str(kwargs.get("auth_strategy")))
+        return real_push_branch(*args, **kwargs)
+
+    monkeypatch.setattr(run_delivery, "push_branch", _recorded_push)
+
+    result = await run_delivery.publish_run_branch_if_ready(session, run=run)
+
+    assert result is not None
+    assert "runtime_default" not in seen_strategies
+    assert "github_app" not in seen_strategies
+    assert seen_strategies[0] in {"ssh", "public_https"}
+
+
+@pytest.mark.anyio
 async def test_feedback_fork_materializes_branch_before_publish(db_session):
     session, tenant_id, tmp_path = db_session
     remote = _seed_remote_repo(tmp_path)
@@ -475,6 +595,92 @@ async def test_feedback_fork_materializes_branch_before_publish(db_session):
     )
     assert show_ref.endswith("refs/heads/run/9054455f-minimal-patch")
 
+
+@pytest.mark.anyio
+async def test_fork_run_excludes_recovery_items_and_recomputes_dependencies(db_session):
+    session, tenant_id, _tmp_path = db_session
+    project = Project(name="Fork pruning project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="FAILED",
+        executor="codex",
+        summary={"goal": "stabilize homepage"},
+    )
+    session.add(source_run)
+    await session.flush()
+
+    plan = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="PLAN_DAG",
+        key="PLAN_DAG",
+        status="FAILED",
+        executor="codex",
+        priority=1,
+        depends_on_count=0,
+        payload={},
+        result={},
+    )
+    code = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="CODE_FRONTEND",
+        key="CODE_FRONTEND",
+        status="QUEUED",
+        executor="codex",
+        priority=2,
+        depends_on_count=1,
+        payload={},
+        result={},
+    )
+    fix = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="FIX_TEST_FAILURE",
+        key="FIX_TEST_FAILURE_1",
+        status="QUEUED",
+        executor="codex",
+        priority=9,
+        depends_on_count=0,
+        payload={"failed_work_item_id": "abc"},
+        result={},
+    )
+    session.add_all([plan, code, fix])
+    await session.flush()
+    session.add(
+        WorkItemEdge(
+            tenant_id=tenant_id,
+            run_id=source_run.id,
+            from_work_item_id=plan.id,
+            to_work_item_id=code.id,
+        )
+    )
+    await session.commit()
+
+    forked_run = await run_replay.fork_run(
+        session,
+        source_run=source_run,
+        executor="codex",
+        start_now=False,
+    )
+
+    items = (
+        await session.execute(select(WorkItem).where(WorkItem.run_id == forked_run.id).order_by(WorkItem.created_at.asc()))
+    ).scalars().all()
+    assert [item.type for item in items] == ["PLAN_DAG", "CODE_FRONTEND"]
+    assert all(item.status == "QUEUED" for item in items)
+
+    cloned_plan = next(item for item in items if item.type == "PLAN_DAG")
+    cloned_code = next(item for item in items if item.type == "CODE_FRONTEND")
+    assert cloned_plan.depends_on_count == 0
+    assert cloned_code.depends_on_count == 1
 
 @pytest.mark.anyio
 async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_session, monkeypatch):
@@ -730,3 +936,98 @@ async def test_create_pr_from_artifact_uses_already_published_branch(db_session,
     data = response.json()
     assert data["pull_request_url"] == "https://github.com/example/repo/pull/34"
     assert data["commit_sha"] == pushed_sha
+
+
+@pytest.mark.anyio
+async def test_create_pr_returns_409_when_provider_reports_conflict(db_session, monkeypatch):
+    session, tenant_id, tmp_path = db_session
+    remote = _seed_remote_repo(tmp_path)
+
+    workspace_root = tmp_path / "workspaces" / "proj" / "pr-conflict"
+    repo_path = workspace_root / "repo"
+    patch_dir = workspace_root / "patches"
+    patch_dir.mkdir(parents=True, exist_ok=True)
+    _run_git(["clone", str(remote), str(repo_path)])
+    _run_git(["checkout", "-b", "run/pr-conflict"], cwd=repo_path)
+    readme = repo_path / "README.md"
+    readme.write_text("hello\nconflict\n", encoding="utf-8")
+    diff = _run_git(["diff"], cwd=repo_path)
+    _run_git(["add", "README.md"], cwd=repo_path)
+    _run_git(["commit", "-m", "conflict prep"], cwd=repo_path)
+    _run_git(["push", "-u", "origin", "run/pr-conflict"], cwd=repo_path)
+    patch_path = patch_dir / "conflict.patch"
+    patch_path.write_text(diff, encoding="utf-8")
+
+    project = Project(name="PR conflict project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url=str(remote),
+            repo_full_name="example/repo",
+            default_branch="main",
+        )
+    )
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_path),
+        branch_name="run/pr-conflict",
+        workspace_status="SEEDED",
+        summary={
+            "remote_branch_pushed": True,
+            "remote_branch_name": "run/pr-conflict",
+        },
+    )
+    session.add(run)
+    await session.flush()
+    artifact = Artifact(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="git_diff",
+        uri="workspace://patches/conflict.patch",
+        version=1,
+        extra_metadata={"content": diff},
+    )
+    session.add(artifact)
+    await session.commit()
+
+    class DummyGitHubAdapter:
+        def create_pull_request(self, repo: str, title: str, body: str, head: str, base: str, installation_id=None):
+            raise ValueError("A pull request already exists for run/pr-conflict")
+
+    monkeypatch.setattr(pr_service, "get_vcs_adapter", lambda provider: DummyGitHubAdapter())
+    monkeypatch.setattr(pr_service, "push_branch", lambda *args, **kwargs: None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        approval_resp = await client.post(
+            f"/api/v1/projects/{project.id}/approvals",
+            json={
+                "target_type": "artifact",
+                "target_id": str(artifact.id),
+                "status": "APPROVED",
+                "decided_by": "ui-user",
+                "comment": "Reviewed patch artifact",
+            },
+        )
+        assert approval_resp.status_code == 201, approval_resp.text
+
+        response = await client.post(
+            f"/api/v1/runs/{run.id}/create-pr",
+            json={
+                "artifact_id": str(artifact.id),
+                "title": "Conflict case",
+                "body": "Automated fix",
+                "branch_name": "run/pr-conflict",
+            },
+        )
+
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"].lower()

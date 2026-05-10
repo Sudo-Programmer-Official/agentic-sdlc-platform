@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from collections import defaultdict
 
@@ -66,6 +67,9 @@ EXPECTED_COMMANDS_BY_TYPE = {
     "REVIEW_INTEGRATION": ["review integration"],
 }
 
+_MULTISPACE_RE = re.compile(r"\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
 
 def _humanize_token(token: str) -> str:
     return token.replace("_", " ").replace("-", " ").strip().title()
@@ -89,6 +93,81 @@ def _summary_str(summary: dict | None, key: str) -> str | None:
         cleaned = value.strip()
         return cleaned or None
     return None
+
+
+def _normalize_spaces(text: str | None) -> str:
+    if not isinstance(text, str):
+        return ""
+    return _MULTISPACE_RE.sub(" ", text).strip()
+
+
+def _token_overlap_ratio(left: str, right: str) -> float:
+    left_tokens = {token for token in _normalize_spaces(left).lower().split(" ") if token}
+    right_tokens = {token for token in _normalize_spaces(right).lower().split(" ") if token}
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap = len(left_tokens & right_tokens)
+    return overlap / max(1, min(len(left_tokens), len(right_tokens)))
+
+
+def _collapse_repeated_token_chunks(text: str, *, min_chunk: int = 6, max_chunk: int = 40) -> str:
+    tokens = [token for token in text.split(" ") if token]
+    if len(tokens) < min_chunk * 2:
+        return text
+    out: list[str] = []
+    i = 0
+    total = len(tokens)
+    while i < total:
+        max_size = min(max_chunk, (total - i) // 2)
+        matched = 0
+        for size in range(max_size, min_chunk - 1, -1):
+            if tokens[i : i + size] == tokens[i + size : i + (size * 2)]:
+                matched = size
+                break
+        if matched:
+            out.extend(tokens[i : i + matched])
+            i += matched * 2
+            continue
+        out.append(tokens[i])
+        i += 1
+    return " ".join(out)
+
+
+def _normalize_goal_text(text: str | None) -> str | None:
+    compact = _normalize_spaces(text)
+    if not compact:
+        return None
+    marker = "User goal:"
+    idx = compact.lower().find(marker.lower())
+    if idx > 0:
+        prefix = compact[:idx].strip(" :")
+        suffix = compact[idx + len(marker) :].strip()
+        if suffix and _token_overlap_ratio(prefix, suffix) >= 0.55:
+            compact = suffix
+    compact = _collapse_repeated_token_chunks(compact)
+    sentences = [segment.strip() for segment in _SENTENCE_SPLIT_RE.split(compact) if segment.strip()]
+    if len(sentences) > 1:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for sentence in sentences:
+            key = sentence.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(sentence)
+        compact = " ".join(deduped)
+    return compact.strip() or None
+
+
+def _normalize_validation_steps(steps: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for raw in steps:
+        value = _normalize_goal_text(raw)
+        if not value:
+            continue
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
 
 
 def _review_metrics(work_items: list[WorkItem]) -> tuple[float | None, float | None]:
@@ -372,23 +451,23 @@ async def build_run_narrative(
 
     goal = None
     if summary and summary.goal_text:
-        goal = summary.goal_text
+        goal = _normalize_goal_text(summary.goal_text)
     elif isinstance(run.summary, dict):
         raw_goal = run.summary.get("goal") or run.summary.get("strategy_goal")
         if isinstance(raw_goal, str) and raw_goal.strip():
-            goal = raw_goal.strip()
+            goal = _normalize_goal_text(raw_goal)
 
     stored_plan = (run.summary or {}).get("plan_snapshot") if isinstance(run.summary, dict) else None
     stored_decomposition = (run.summary or {}).get("task_decomposition") if isinstance(run.summary, dict) else None
-    validation_steps = [
+    validation_steps = _normalize_validation_steps([
         step.title
         for step in plan_steps
         if step.phase in {"verify", "review"}
-    ]
+    ])
     deduped_commands = list(dict.fromkeys(command for step in plan_steps for command in step.expected_commands))
 
     timeline_summary = RunTimelineSummary(
-        goal_text=(summary.goal_text if summary else None) or goal,
+        goal_text=_normalize_goal_text((summary.goal_text if summary else None) or goal),
         status=run.status,
         executor=run.executor,
         branch_name=run.branch_name,
@@ -430,21 +509,21 @@ async def build_run_narrative(
         if not normalized_steps:
             normalized_steps = plan_steps
         plan = RunPlanSnapshot(
-            goal=stored_plan.get("goal") or goal,
+            goal=_normalize_goal_text(stored_plan.get("goal") or goal),
             rationale=stored_plan.get("rationale") or "Execute a bounded run plan, validate the patch, and only hand off work once review signals are readable.",
             success_criteria=list(stored_plan.get("success_criteria") or list(dict.fromkeys(
                 criterion for step in normalized_steps for criterion in step.success_criteria
             ))),
             expected_files=sorted(changed_files) if changed_files else list(stored_plan.get("expected_files") or []),
             expected_commands=list(stored_plan.get("expected_commands") or deduped_commands),
-            validation_steps=list(stored_plan.get("validation_steps") or validation_steps),
+            validation_steps=_normalize_validation_steps(list(stored_plan.get("validation_steps") or validation_steps)),
             risk_level=risk_level if risk_level != "LOW" else str(stored_plan.get("risk_level") or "LOW"),
             confidence_score=confidence_score if confidence_score is not None else stored_plan.get("confidence_score"),
             steps=normalized_steps,
         )
     else:
         plan = RunPlanSnapshot(
-            goal=goal,
+            goal=_normalize_goal_text(goal),
             rationale="Execute a bounded run plan, validate the patch, and only hand off work once review signals are readable.",
             success_criteria=list(
                 dict.fromkeys(

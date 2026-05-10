@@ -5,6 +5,7 @@ import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from sqlalchemy import select, and_, exists, update
 
@@ -20,6 +21,7 @@ from app.services.run_resume import capture_run_checkpoint, sync_run_resume_stat
 from app.services.runtime_lineage import persist_work_item_artifacts
 from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.services.workspace_supervisor import build_run_context
+from app.services.work_item_state import is_dependency_satisfied
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 log = logging.getLogger("app.runtime.worker")
@@ -125,21 +127,12 @@ async def tick_worker(agent_id: uuid.UUID):
         from sqlalchemy.orm import aliased
         other = aliased(WorkItem)
         parent = aliased(WorkItem)
-        blocked_by_dependency = exists(
-            select(1)
-            .select_from(WorkItemEdge)
-            .join(parent, parent.id == WorkItemEdge.from_work_item_id)
-            .where(
-                WorkItemEdge.run_id == WorkItem.run_id,
-                WorkItemEdge.to_work_item_id == WorkItem.id,
-                parent.status.notin_(["DONE", "SKIPPED"]),
-            )
-        )
         result = await session.execute(
             select(WorkItem)
+            .join(Run, Run.id == WorkItem.run_id)
             .where(
                 WorkItem.status == "QUEUED",
-                ~blocked_by_dependency,
+                Run.status.in_(["RUNNING", "QUEUED"]),
                 ~exists().where(
                     and_(
                         other.run_id == WorkItem.run_id,
@@ -153,7 +146,40 @@ async def tick_worker(agent_id: uuid.UUID):
             .with_for_update(skip_locked=True)
         )
         wi = None
-        for candidate in result.scalars().all():
+        candidate_items = result.scalars().all()
+        dependency_rows = []
+        if candidate_items:
+            candidate_ids = [item.id for item in candidate_items]
+            candidate_run_ids = list({item.run_id for item in candidate_items})
+            dependency_rows = (
+                await session.execute(
+                    select(
+                        WorkItemEdge.to_work_item_id,
+                        parent.status,
+                        parent.payload,
+                        parent.result,
+                    ).join(parent, parent.id == WorkItemEdge.from_work_item_id)
+                    .where(
+                        WorkItemEdge.run_id.in_(candidate_run_ids),
+                        WorkItemEdge.to_work_item_id.in_(candidate_ids),
+                    )
+                )
+            ).all()
+        deps_by_child: dict[uuid.UUID, list[SimpleNamespace]] = {}
+        for to_work_item_id, status, payload, result_payload in dependency_rows:
+            deps_by_child.setdefault(to_work_item_id, []).append(
+                SimpleNamespace(status=status, payload=payload, result=result_payload)
+            )
+        for candidate in candidate_items:
+            active_run = await session.scalar(
+                select(Run)
+                .where(Run.id == candidate.run_id, Run.status.in_(["RUNNING", "QUEUED"]))
+                .with_for_update(skip_locked=True)
+            )
+            if active_run is None:
+                continue
+            if any(not is_dependency_satisfied(dep) for dep in deps_by_child.get(candidate.id, [])):
+                continue
             req_caps = set(candidate.required_capabilities or [])
             if req_caps and not req_caps.issubset(agent_caps):
                 continue

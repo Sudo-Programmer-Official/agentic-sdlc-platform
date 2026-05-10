@@ -40,6 +40,80 @@
       />
     </div>
 
+    <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-sm uppercase tracking-wide text-slate-400">Requirement Tracking</div>
+          <div class="text-xs text-slate-500">Progress cards linked to tasks, runs, and improvements.</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <el-button size="small" plain :loading="summaryLoading" @click="loadRequirementSummary">Refresh</el-button>
+          <el-button size="small" plain :disabled="!projectId" @click="exportSummaryCsv">Export CSV</el-button>
+        </div>
+      </div>
+      <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div v-for="card in requirementCards" :key="card.requirement_id" class="rounded-lg border border-slate-200 p-4">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-sm font-semibold text-slate-900">{{ card.requirement_id }}</div>
+            <el-tag size="small" effect="light" :type="riskTagType(card.risk_level)">{{ card.risk_level }}</el-tag>
+          </div>
+          <div class="mt-1 text-xs text-slate-500">{{ card.title }}</div>
+          <div class="mt-2 text-xs text-slate-600">
+            Status: <span class="font-semibold">{{ card.status }}</span> · Health: {{ card.health_score }}
+          </div>
+          <div class="mt-1 text-xs text-slate-600">
+            Stability: {{ card.stability_score }} · Retries: {{ card.retry_count }} · Unresolved: {{ card.unresolved_count }}
+          </div>
+          <div class="mt-1 text-xs text-slate-600">
+            AI spend: ${{ ((card.ai_spend_cents || 0) / 100).toFixed(4) }} · Tokens: {{ card.ai_total_tokens || 0 }}
+          </div>
+          <div class="mt-2 text-xs text-slate-600">
+            Tasks {{ card.task_counts.open }}/{{ card.task_counts.total }} open · {{ card.task_counts.completed }} done · {{ card.task_counts.failed }} failed
+          </div>
+          <div class="mt-1 text-xs text-slate-600">
+            Runs {{ card.run_counts.running }} running · {{ card.run_counts.completed }} completed · {{ card.run_counts.failed }} failed
+          </div>
+          <div class="mt-1 text-xs text-slate-600">
+            Improvements {{ card.improvement_counts.open }} open · {{ card.improvement_counts.resolved }} resolved
+          </div>
+          <div class="mt-1 text-xs text-slate-500">Last activity: {{ card.last_activity_at || "—" }}</div>
+          <div v-if="card.recurring_failure_patterns?.length" class="mt-1 text-xs text-rose-600">
+            Repeated failures: {{ card.recurring_failure_patterns.join(" · ") }}
+          </div>
+          <div v-if="card.most_impacted_modules?.length" class="mt-1 text-xs text-slate-500">
+            Impacted modules: {{ card.most_impacted_modules.join(", ") }}
+          </div>
+          <el-button class="mt-3" size="small" type="primary" plain @click="openTimeline(card.requirement_id)">
+            View Timeline
+          </el-button>
+        </div>
+      </div>
+      <div v-if="!requirementCards.length" class="text-xs text-slate-500">
+        No requirement cards yet. Ingest PRD or add FR/QR to initialize tracking.
+      </div>
+      <div v-if="summaryError" class="text-xs text-rose-600">{{ summaryError }}</div>
+    </div>
+
+    <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-sm uppercase tracking-wide text-slate-400">Requirement Evolution</div>
+          <div class="text-xs text-slate-500">Latest requirement sources and edits over time.</div>
+        </div>
+        <el-button size="small" plain :loading="historyLoading" @click="loadRequirementHistory">Refresh</el-button>
+      </div>
+      <el-table :data="requirementHistory" border size="small" max-height="280">
+        <el-table-column prop="created_at" label="Created" width="190" />
+        <el-table-column prop="type" label="Type" width="120" />
+        <el-table-column prop="title" label="Title" />
+        <el-table-column prop="created_by" label="By" width="140" />
+      </el-table>
+      <div v-if="!requirementHistory.length" class="text-xs text-slate-500">
+        No requirement history yet. Submit PRD or create requirement documents to start timeline tracking.
+      </div>
+      <div v-if="historyError" class="text-xs text-rose-600">{{ historyError }}</div>
+    </div>
+
     <div
       v-if="graph && !frNodes.length && !qrNodes.length && !edges.length"
       class="rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-700"
@@ -144,6 +218,19 @@
     </div>
 
     <div v-if="error" class="text-sm text-rose-600">{{ error }}</div>
+
+    <el-drawer v-model="timelineOpen" title="Requirement Timeline" size="45%">
+      <div class="space-y-3">
+        <div class="text-xs text-slate-500">Requirement: {{ selectedRequirementId || "—" }}</div>
+        <el-table :data="timelineItems" border size="small" max-height="560">
+          <el-table-column prop="created_at" label="When" width="190" />
+          <el-table-column prop="type" label="Type" width="170" />
+          <el-table-column prop="status" label="Status" width="130" />
+          <el-table-column prop="title" label="Title" />
+        </el-table>
+        <div v-if="timelineError" class="text-xs text-rose-600">{{ timelineError }}</div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -156,10 +243,14 @@ import { projectContext, updateProjectContext } from "../state/projectContext";
 import {
   approveGraph as approveRequirementsGraph,
   fetchGraph,
+  fetchRequirementSummary,
+  fetchRequirementTimeline,
+  requirementSummaryExportUrl,
   fetchProjectSummary,
   ingestPrd as ingestProjectPrd,
   updateGraph,
 } from "../api/requirements";
+import { listDocuments } from "../api/lifecycle";
 
 const route = useRoute();
 const projectId = computed(() => route.params.projectId as string);
@@ -175,6 +266,16 @@ const graph = ref<any | null>(null);
 const frNodes = ref<any[]>([]);
 const qrNodes = ref<any[]>([]);
 const edges = ref<any[]>([]);
+const requirementHistory = ref<any[]>([]);
+const historyLoading = ref(false);
+const historyError = ref("");
+const requirementCards = ref<any[]>([]);
+const summaryLoading = ref(false);
+const summaryError = ref("");
+const timelineOpen = ref(false);
+const selectedRequirementId = ref("");
+const timelineItems = ref<any[]>([]);
+const timelineError = ref("");
 
 const statusTag = computed(() => {
   if (graph.value?.status === "APPROVED") return "success";
@@ -365,7 +466,68 @@ async function loadSummary() {
   }
 }
 
+async function loadRequirementHistory() {
+  if (!projectId.value) return;
+  historyLoading.value = true;
+  historyError.value = "";
+  try {
+    const docs = await listDocuments(projectId.value);
+    const filtered = (Array.isArray(docs) ? docs : []).filter((doc: any) =>
+      ["prd", "requirements", "requirements_graph", "spec"].includes(String(doc?.type || "").toLowerCase())
+    );
+    requirementHistory.value = filtered
+      .sort((a: any, b: any) => String(b?.created_at || "").localeCompare(String(a?.created_at || "")))
+      .slice(0, 50);
+  } catch (err: any) {
+    requirementHistory.value = [];
+    historyError.value = err?.message || "Failed to load requirement history.";
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+async function loadRequirementSummary() {
+  if (!projectId.value) return;
+  summaryLoading.value = true;
+  summaryError.value = "";
+  try {
+    const payload = await fetchRequirementSummary(projectId.value, 100, 0);
+    requirementCards.value = Array.isArray(payload?.items) ? payload.items : [];
+  } catch (err: any) {
+    requirementCards.value = [];
+    summaryError.value = err?.message || "Failed to load requirement summary.";
+  } finally {
+    summaryLoading.value = false;
+  }
+}
+
+function riskTagType(risk: string) {
+  if (risk === "HIGH") return "danger";
+  if (risk === "MEDIUM") return "warning";
+  return "success";
+}
+
+async function openTimeline(requirementId: string) {
+  if (!projectId.value || !requirementId) return;
+  selectedRequirementId.value = requirementId;
+  timelineOpen.value = true;
+  timelineError.value = "";
+  timelineItems.value = [];
+  try {
+    const payload = await fetchRequirementTimeline(projectId.value, requirementId, 200, 0);
+    timelineItems.value = Array.isArray(payload?.items) ? payload.items : [];
+  } catch (err: any) {
+    timelineItems.value = [];
+    timelineError.value = err?.message || "Failed to load requirement timeline.";
+  }
+}
+
+function exportSummaryCsv() {
+  if (!projectId.value) return;
+  window.open(requirementSummaryExportUrl(projectId.value, "csv"), "_blank");
+}
+
 onMounted(async () => {
-  await Promise.all([loadSummary(), loadGraph()]);
+  await Promise.all([loadSummary(), loadGraph(), loadRequirementHistory(), loadRequirementSummary()]);
 });
 </script>

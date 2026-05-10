@@ -5,9 +5,10 @@ import uuid
 import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
-from sqlalchemy import select, func, and_, exists
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Agent, Run, WorkItem, WorkItemEdge
@@ -25,7 +26,7 @@ from app.runtime.plan_snapshot import persist_run_plan_snapshot
 from app.core.config import get_settings
 from app.services.run_delivery import publish_run_branch_if_ready
 from app.services.task_decomposition import persist_run_task_decomposition
-from app.services.work_item_state import is_blocking_failure
+from app.services.work_item_state import is_blocking_failure, is_dependency_satisfied
 from app.services.workspace_supervisor import build_run_context, ensure_run_workspace
 
 log = logging.getLogger("app.runtime.orchestrator")
@@ -71,24 +72,42 @@ class RunOrchestrator:
         actor_id: str | None,
     ) -> None:
         previous = run.status
-        run.status = "FAILED"
+        target_status = "COMPLETED" if self.settings.runtime_never_fail_runs else "FAILED"
+        run.status = target_status
         run.finished_at = run.finished_at or datetime.now(timezone.utc)
+        if self.settings.runtime_never_fail_runs:
+            summary = dict(run.summary or {})
+            summary["degraded_completion"] = True
+            summary["degraded_reason"] = "workspace_prepare_failed"
+            summary["workspace_error"] = run.workspace_error
+            run.summary = summary
         session.add(run)
         await record_event(
             session,
             project_id=run.project_id,
             run_id=run.id,
-            event_type="RUN_FAILED",
+            event_type="RUN_DEGRADED" if self.settings.runtime_never_fail_runs else "RUN_FAILED",
             actor_type=actor_type,
             actor_id=actor_id,
             tenant_id=run.tenant_id,
             payload={
                 "previous": previous,
-                "new": "FAILED",
+                "new": target_status,
                 "workspace_status": run.workspace_status,
                 "workspace_error": run.workspace_error,
             },
         )
+        if self.settings.runtime_never_fail_runs:
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                event_type="RUN_COMPLETED",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                tenant_id=run.tenant_id,
+                payload={"final_status": "COMPLETED", "degraded": True, "reason": "workspace_prepare_failed"},
+            )
         log.warning(
             "Run bootstrap failed due to workspace preparation error run_id=%s project_id=%s executor=%s workspace_status=%s workspace_error=%s",
             run.id,
@@ -108,27 +127,42 @@ class RunOrchestrator:
         message: str,
     ) -> None:
         previous = run.status
-        run.status = "FAILED"
+        target_status = "COMPLETED" if self.settings.runtime_never_fail_runs else "FAILED"
+        run.status = target_status
         run.finished_at = run.finished_at or datetime.now(timezone.utc)
         summary = dict(run.summary or {})
         summary["bootstrap_error"] = message
+        if self.settings.runtime_never_fail_runs:
+            summary["degraded_completion"] = True
+            summary["degraded_reason"] = "bootstrap_error"
         run.summary = summary
         session.add(run)
         await record_event(
             session,
             project_id=run.project_id,
             run_id=run.id,
-            event_type="RUN_FAILED",
+            event_type="RUN_DEGRADED" if self.settings.runtime_never_fail_runs else "RUN_FAILED",
             actor_type=actor_type,
             actor_id=actor_id,
             tenant_id=run.tenant_id,
             payload={
                 "previous": previous,
-                "new": "FAILED",
+                "new": target_status,
                 "reason": "bootstrap_error",
                 "error": message,
             },
         )
+        if self.settings.runtime_never_fail_runs:
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                event_type="RUN_COMPLETED",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                tenant_id=run.tenant_id,
+                payload={"final_status": "COMPLETED", "degraded": True, "reason": "bootstrap_error"},
+            )
         log.warning(
             "Run bootstrap failed run_id=%s project_id=%s executor=%s error=%s",
             run.id,
@@ -373,31 +407,7 @@ class RunOrchestrator:
                 # find runnable items (QUEUED and deps done/skipped)
                 runnable: list[WorkItem] = []
                 if queued_count:
-                    from sqlalchemy.orm import aliased
-
-                    parent = aliased(WorkItem)
-                    blocking_exists = exists(
-                        select(1)
-                        .select_from(WorkItemEdge)
-                        .join(parent, parent.id == WorkItemEdge.from_work_item_id)
-                        .where(
-                            WorkItemEdge.run_id == run_id,
-                            WorkItemEdge.to_work_item_id == WorkItem.id,
-                            parent.status.notin_(["DONE", "SKIPPED"]),
-                        )
-                    )
-                    runnable = (
-                        await session.execute(
-                            select(WorkItem)
-                            .where(
-                                WorkItem.run_id == run_id,
-                                WorkItem.status == "QUEUED",
-                                ~blocking_exists,
-                            )
-                            .order_by(WorkItem.priority.desc(), WorkItem.created_at)
-                            .limit(max_conc)
-                        )
-                    ).scalars().all()
+                    runnable = await self._runnable_queued_items(session, run_id=run_id, limit=max_conc)
 
                 if failed_count and active_count == 0 and not use_external_runtime:
                     if queued_count == 0:
@@ -429,7 +439,11 @@ class RunOrchestrator:
                 return
 
             # finalize run
-            final_status = "FAILED" if run_failed else ("CANCELED" if run.status == "CANCELED" else "COMPLETED")
+            final_status = (
+                "COMPLETED"
+                if run_failed and self.settings.runtime_never_fail_runs
+                else ("FAILED" if run_failed else ("CANCELED" if run.status == "CANCELED" else "COMPLETED"))
+            )
             now = datetime.now(timezone.utc)
             updated = await session.execute(
                 select(Run).where(Run.id == run_id, Run.status.notin_(["COMPLETED", "FAILED", "CANCELED"])).with_for_update()
@@ -445,9 +459,10 @@ class RunOrchestrator:
                             actor_id=actor_id,
                         )
                     except Exception as exc:
-                        final_status = "FAILED"
                         summary = dict(locked.summary or {})
                         summary["remote_branch_push_error"] = str(exc)
+                        summary["remote_branch_pushed"] = False
+                        summary["delivery_manual_push_required"] = True
                         locked.summary = summary
                         await record_event(
                             session,
@@ -461,10 +476,26 @@ class RunOrchestrator:
                             payload={
                                 "branch_name": locked.branch_name,
                                 "workspace_status": locked.workspace_status,
+                                "manual_push_required": True,
                             },
                         )
                 locked.status = final_status
                 locked.finished_at = now
+                if run_failed and self.settings.runtime_never_fail_runs:
+                    summary = dict(locked.summary or {})
+                    summary["degraded_completion"] = True
+                    summary["degraded_reason"] = "embedded_terminal_work_item_failure"
+                    locked.summary = summary
+                    await record_event(
+                        session,
+                        project_id=locked.project_id,
+                        run_id=locked.id,
+                        event_type="RUN_DEGRADED",
+                        actor_type=actor_type,
+                        actor_id=actor_id,
+                        tenant_id=locked.tenant_id,
+                        payload={"reason": "embedded_terminal_work_item_failure", "final_status": "COMPLETED"},
+                    )
                 await record_event(
                     session,
                     project_id=locked.project_id,
@@ -580,6 +611,51 @@ class RunOrchestrator:
     async def _load_run_for_update(self, session: AsyncSession, run_id: uuid.UUID) -> Run | None:
         result = await session.execute(select(Run).where(Run.id == run_id).with_for_update())
         return result.scalar_one_or_none()
+
+    async def _runnable_queued_items(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: uuid.UUID,
+        limit: int,
+    ) -> list[WorkItem]:
+        queued_items = (
+            await session.execute(
+                select(WorkItem)
+                .where(WorkItem.run_id == run_id, WorkItem.status == "QUEUED")
+                .order_by(WorkItem.priority.desc(), WorkItem.created_at)
+                .limit(max(limit, 1))
+            )
+        ).scalars().all()
+        if not queued_items:
+            return []
+        queued_ids = [item.id for item in queued_items]
+        parent = WorkItem
+        dependency_rows = (
+            await session.execute(
+                select(
+                    WorkItemEdge.to_work_item_id,
+                    parent.status,
+                    parent.payload,
+                    parent.result,
+                )
+                .join(parent, parent.id == WorkItemEdge.from_work_item_id)
+                .where(
+                    WorkItemEdge.run_id == run_id,
+                    WorkItemEdge.to_work_item_id.in_(queued_ids),
+                )
+            )
+        ).all()
+        deps_by_child: dict = {}
+        for to_work_item_id, status, payload, result_payload in dependency_rows:
+            deps_by_child.setdefault(to_work_item_id, []).append(
+                SimpleNamespace(status=status, payload=payload, result=result_payload)
+            )
+        return [
+            item
+            for item in queued_items
+            if all(is_dependency_satisfied(dep) for dep in deps_by_child.get(item.id, []))
+        ]
 
     async def _process_work_item(
         self,

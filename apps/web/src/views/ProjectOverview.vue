@@ -68,6 +68,44 @@
           · Validation recipes: {{ architectureSummary?.validation_recipe_count ?? 0 }}
         </div>
       </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Foundation Readiness</div>
+          <el-button size="small" plain :disabled="!projectId" @click="loadFoundationReadiness">
+            Refresh
+          </el-button>
+        </div>
+        <div class="mt-2 text-sm font-semibold" :class="foundationReadinessTone">
+          {{ foundationReadiness?.status || "MISSING" }}
+          <span class="text-slate-500">· {{ foundationReadiness?.mode || "new_bootstrap" }}</span>
+        </div>
+        <div class="mt-1 text-xs text-slate-600">
+          {{ foundationReadiness?.recommended_next_step || "Evaluate repository and architecture prerequisites." }}
+        </div>
+        <div class="mt-2 text-xs text-slate-500">
+          Missing: {{ foundationReadiness?.missing_prerequisites?.join(", ") || "none" }}
+        </div>
+        <div v-if="foundationReadinessError" class="mt-2 text-xs text-rose-600">{{ foundationReadinessError }}</div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Project Blueprint</div>
+          <el-button size="small" plain :disabled="!projectId" @click="openGenesisDialog">
+            {{ projectBlueprint?.id ? "Recreate" : "Create" }}
+          </el-button>
+        </div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">
+          {{ projectBlueprint?.blueprint_key || "No blueprint yet" }}
+        </div>
+        <div class="text-xs text-slate-500">
+          Preset: {{ projectBlueprint?.stack_preset_key || "—" }} · Readiness gate:
+          {{ projectBlueprint?.readiness_enforced ? "On" : "Off" }}
+        </div>
+        <div class="text-xs text-slate-500">
+          Genesis: {{ latestGenesisRun?.status || "Not run" }}
+        </div>
+        <div v-if="genesisError" class="mt-2 text-xs text-rose-600">{{ genesisError }}</div>
+      </div>
     </div>
 
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -89,6 +127,47 @@
         <div class="text-xs uppercase tracking-wide text-slate-400">Plan Metadata</div>
         <div class="mt-2 text-sm font-semibold">Plan ID: {{ planMeta?.plan_id || '—' }}</div>
         <div class="text-xs text-slate-500">Created: {{ planMeta?.plan_created_at || '—' }}</div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Task Lifecycle</div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">
+          Open {{ taskLifecycle.open }} · In Progress {{ taskLifecycle.inProgress }} · Closed {{ taskLifecycle.closed }}
+        </div>
+        <div class="text-xs text-slate-500">
+          Needs rerun: {{ taskLifecycle.needsRerun }} · Total tracked: {{ taskLifecycle.total }}
+        </div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Improvement Requests</div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">
+          Queued {{ improvementLifecycle.queued }} · Running {{ improvementLifecycle.running }}
+        </div>
+        <div class="text-xs text-slate-500">
+          Completed {{ improvementLifecycle.completed }} · Failed {{ improvementLifecycle.failed }} · Total {{ improvementLifecycle.total }}
+        </div>
+        <div v-if="improvementRequestsError" class="mt-2 text-xs text-rose-600">{{ improvementRequestsError }}</div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Requirements Needing Review</div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">{{ requirementsNeedingReview }}</div>
+        <div class="text-xs text-slate-500">
+          Count of requirements flagged by lineage status as pending review.
+        </div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Requirement AI Spend</div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">${{ totalRequirementAiSpendUsd }}</div>
+        <div class="text-xs text-slate-500">Total tracked tokens: {{ totalRequirementAiTokens.toLocaleString() }}</div>
+        <div class="mt-2 text-xs text-slate-600" v-if="topCostlyRequirements.length">
+          Top 5 costly requirements
+        </div>
+        <ul v-if="topCostlyRequirements.length" class="mt-1 space-y-1 text-xs text-slate-600">
+          <li v-for="card in topCostlyRequirements" :key="card.requirement_id" class="flex justify-between gap-2">
+            <span class="truncate" :title="card.title || card.requirement_id">{{ card.requirement_id }}</span>
+            <span class="font-medium text-slate-800">${{ (((card.ai_spend_cents || 0) as number) / 100).toFixed(4) }}</span>
+          </li>
+        </ul>
+        <div v-else class="mt-2 text-xs text-slate-500">No requirement spend data yet.</div>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div class="text-xs uppercase tracking-wide text-slate-400">Latest Delivery</div>
@@ -209,6 +288,46 @@
       </div>
     </div>
 
+    <div class="rounded-xl border border-sky-200 bg-sky-50 p-5 shadow-sm">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="text-xs uppercase tracking-wide text-sky-700">Journey Guide</div>
+          <div class="mt-1 text-sm font-semibold text-sky-900">
+            {{ journeyHeadline }}
+          </div>
+          <div class="text-xs text-sky-700">
+            {{ journeyHint }}
+          </div>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <el-button size="small" type="primary" @click="runPrimaryJourneyAction">
+            {{ journeyPrimaryActionLabel }}
+          </el-button>
+          <el-button size="small" plain :disabled="!projectId" @click="goToRequirements">
+            Requirements
+          </el-button>
+        </div>
+      </div>
+      <div class="mt-3 grid gap-2 text-xs md:grid-cols-2 xl:grid-cols-4">
+        <div class="rounded-lg border border-sky-100 bg-white px-3 py-2">
+          <span class="font-semibold text-sky-900">{{ checklistRepo ? "Done" : "Pending" }}</span>
+          · Repository connected
+        </div>
+        <div class="rounded-lg border border-sky-100 bg-white px-3 py-2">
+          <span class="font-semibold text-sky-900">{{ checklistRequirements ? "Done" : "Pending" }}</span>
+          · Requirements ready
+        </div>
+        <div class="rounded-lg border border-sky-100 bg-white px-3 py-2">
+          <span class="font-semibold text-sky-900">{{ checklistTasks ? "Done" : "Pending" }}</span>
+          · Tasks available
+        </div>
+        <div class="rounded-lg border border-sky-100 bg-white px-3 py-2">
+          <span class="font-semibold text-sky-900">{{ checklistRuns ? "Done" : "Pending" }}</span>
+          · Execution observed
+        </div>
+      </div>
+    </div>
+
     <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
       <div class="text-sm uppercase tracking-wide text-slate-400">Actions</div>
       <div class="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -233,6 +352,9 @@
         </el-button>
         <el-button type="primary" plain :disabled="!projectId" @click="openArchitectureDialog">
           Architecture Contract
+        </el-button>
+        <el-button type="primary" plain :disabled="!projectId" @click="openGenesisDialog">
+          Create Project Blueprint
         </el-button>
         <el-button type="success" plain :disabled="!projectId || !documents.length" @click="showRegenDialog = true">
           Regenerate Tasks
@@ -314,8 +436,11 @@
           <el-table-column prop="executor" label="Executor" width="100" />
           <el-table-column prop="started_at" label="Started" width="150" />
           <el-table-column prop="finished_at" label="Finished" width="150" />
-          <el-table-column label="Actions" width="160">
+          <el-table-column label="Actions" width="280">
             <template #default="{ row }">
+              <el-button size="small" plain :loading="Boolean(runUnblockLoading[row.id])" :disabled="!['RUNNING','QUEUED'].includes(row.status)" @click="unblockRunById(row.id)">
+                Unblock
+              </el-button>
               <el-button size="small" plain :disabled="!['RUNNING','QUEUED'].includes(row.status)" @click="setRunStatus(row.id, 'CANCELED')">
                 Cancel
               </el-button>
@@ -564,6 +689,20 @@
       </div>
     </el-dialog>
 
+    <el-dialog v-model="showGenesisDialog" title="Create Project Blueprint" width="560px">
+      <div class="space-y-3">
+        <el-select v-model="genesisForm.stack_preset_key" placeholder="Stack preset" style="width: 100%">
+          <el-option v-for="preset in stackPresets" :key="preset.key" :label="preset.label" :value="preset.key" />
+        </el-select>
+        <el-input v-model="genesisForm.deployment_profile" placeholder="Deployment profile (e.g. local_preview)" />
+        <el-checkbox v-model="genesisForm.readiness_enforced">Enforce readiness gate before feature runs</el-checkbox>
+        <el-button type="primary" :loading="genesisLoading" :disabled="!projectId" @click="submitGenesisBlueprint">
+          Create Blueprint
+        </el-button>
+        <div v-if="genesisError" class="text-sm text-rose-600">{{ genesisError }}</div>
+      </div>
+    </el-dialog>
+
     <el-dialog v-model="showArchitectureDialog" title="Architecture Contract" width="760px">
       <div class="space-y-4">
         <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -649,7 +788,20 @@
       </div>
       <el-table :data="tasks" size="small">
         <el-table-column prop="id" label="ID" width="240" />
-        <el-table-column prop="title" label="Title" />
+        <el-table-column label="Title" min-width="260">
+          <template #default="scope">
+            <div class="text-sm font-medium text-slate-900">{{ scope.row.title }}</div>
+            <div class="text-xs text-slate-500">
+              {{ taskLineageLabel(scope.row) }}
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="Source" width="170">
+          <template #default="scope">
+            <div class="text-sm text-slate-800">{{ scope.row.source_type || scope.row.source || "manual" }}</div>
+            <div class="text-xs text-slate-500">{{ scope.row.architecture_slice || "—" }}</div>
+          </template>
+        </el-table-column>
         <el-table-column prop="status" label="Status" width="120" />
         <el-table-column label="Branch" width="200">
           <template #default="scope">
@@ -781,9 +933,10 @@ import { ElMessage } from "element-plus";
 
 import StageBadge from "../components/StageBadge.vue";
 import { projectContext, updateProjectContext } from "../state/projectContext";
-import { fetchProjectSummary, fetchPlanHistory } from "../api/requirements";
+import { fetchProjectSummary, fetchPlanHistory, fetchRequirementSummary } from "../api/requirements";
 import {
   createEmptyArchitectureProfileSummary,
+  createEmptyFoundationReadiness,
   fetchProjectArchitectureProfile,
   bootstrapProjectArchitectureProfile,
   deriveProjectArchitectureProfile,
@@ -804,6 +957,7 @@ import {
   listRuns,
   createRun,
   updateRunStatus,
+  unblockRun,
   listWorkItems,
   listRunEvents,
   fetchProjectRepo,
@@ -811,6 +965,12 @@ import {
   preflightProjectRepo,
   fetchGitHubConnectInfo,
   listGitHubInstallationRepositories,
+  fetchFoundationReadiness,
+  listImprovementRequests,
+  listStackPresets,
+  fetchProjectBlueprint,
+  fetchLatestGenesisRun,
+  createProjectBlueprint,
 } from "../api/lifecycle";
 
 const route = useRoute();
@@ -831,6 +991,20 @@ const testRefreshNeeded = computed(() => projectContext.testRefreshNeeded);
 const planMeta = ref<any | null>(null);
 const latestDelivery = ref<any | null>(null);
 const architectureSummary = ref<any>(createEmptyArchitectureProfileSummary());
+const foundationReadiness = ref<any>(createEmptyFoundationReadiness());
+const foundationReadinessError = ref("");
+const projectBlueprint = ref<any | null>(null);
+const latestGenesisRun = ref<any | null>(null);
+const stackPresets = ref<any[]>([]);
+const showGenesisDialog = ref(false);
+const genesisLoading = ref(false);
+const genesisError = ref("");
+const genesisForm = ref({
+  blueprint_key: "fullstack_monorepo",
+  stack_preset_key: "vue_fastapi",
+  deployment_profile: "local_preview",
+  readiness_enforced: true,
+});
 const architectureProfile = ref<any | null>(null);
 const showArchitectureDialog = ref(false);
 const architectureLoading = ref(false);
@@ -885,6 +1059,10 @@ const newDocument = ref({
   created_by: "ui-user",
 });
 const tasks = ref<any[]>([]);
+const taskSnapshot = ref<any[]>([]);
+const improvementRequests = ref<any[]>([]);
+const improvementRequestsError = ref("");
+const requirementSummaryCards = ref<any[]>([]);
 const tasksError = ref("");
 const taskRunLoadingId = ref("");
 const createTaskLoading = ref(false);
@@ -943,7 +1121,8 @@ const stageError = ref("");
 const runs = ref<any[]>([]);
 const runsLoading = ref(false);
 const runError = ref("");
-const selectedExecutor = ref("dummy");
+const runUnblockLoading = ref<Record<string, boolean>>({});
+const selectedExecutor = ref("codex");
 const executorSelectionDirty = ref(false);
 const workItems = ref<any[]>([]);
 const workItemsLoading = ref(false);
@@ -953,6 +1132,46 @@ const hasCompletedRun = computed(() => runs.value.some((run) => run.status === "
 const hasRunningRun = computed(() => runs.value.some((run) => ["RUNNING", "QUEUED"].includes(run.status)));
 const taskDefaultBaseBranch = computed(() => projectRepo.value?.default_branch || "main");
 const suggestedTaskBranchName = computed(() => suggestTaskBranchName(newTask.value.title));
+const taskLifecycle = computed(() => {
+  const rows = taskSnapshot.value || [];
+  const statusOf = (row: any) => String(row?.status || "").toUpperCase();
+  const has = (row: any, statuses: string[]) => statuses.includes(statusOf(row));
+  return {
+    total: rows.length,
+    open: rows.filter((r) => has(r, ["PENDING", "QUEUED"])).length,
+    inProgress: rows.filter((r) => has(r, ["RUNNING", "IN_PROGRESS"])).length,
+    closed: rows.filter((r) => has(r, ["DONE", "COMPLETED", "CLOSED"])).length,
+    needsRerun: rows.filter((r) => has(r, ["FAILED", "CANCELED", "BLOCKED"])).length,
+  };
+});
+const improvementLifecycle = computed(() => {
+  const rows = improvementRequests.value || [];
+  const statusOf = (row: any) => String(row?.status || "").toUpperCase();
+  const count = (statuses: string[]) => rows.filter((r) => statuses.includes(statusOf(r))).length;
+  return {
+    total: rows.length,
+    queued: count(["QUEUED"]),
+    running: count(["RUNNING"]),
+    completed: count(["COMPLETED", "DONE"]),
+    failed: count(["FAILED", "CANCELED"]),
+  };
+});
+const requirementsNeedingReview = computed(
+  () => requirementSummaryCards.value.filter((card) => String(card?.status || "").toUpperCase() === "NEEDS_REVIEW").length
+);
+const totalRequirementAiSpendCents = computed(() =>
+  requirementSummaryCards.value.reduce((sum, card) => sum + Number(card?.ai_spend_cents || 0), 0)
+);
+const totalRequirementAiSpendUsd = computed(() => (totalRequirementAiSpendCents.value / 100).toFixed(4));
+const totalRequirementAiTokens = computed(() =>
+  requirementSummaryCards.value.reduce((sum, card) => sum + Number(card?.ai_total_tokens || 0), 0)
+);
+const topCostlyRequirements = computed(() =>
+  [...requirementSummaryCards.value]
+    .sort((a, b) => Number(b?.ai_spend_cents || 0) - Number(a?.ai_spend_cents || 0))
+    .filter((card) => Number(card?.ai_spend_cents || 0) > 0)
+    .slice(0, 5)
+);
 const riskClass = computed(() => {
   const risk = lifecycleScore.value?.risk_level || "UNKNOWN";
   if (risk === "HIGH") return "text-rose-600";
@@ -982,6 +1201,41 @@ const architectureStatusTone = computed(() => {
   if (status === "ACTIVE" || status === "READY") return "text-emerald-600";
   if (status === "MISSING") return "text-amber-600";
   return "text-slate-700";
+});
+const foundationReadinessTone = computed(() => {
+  const status = String(foundationReadiness.value?.status || "MISSING").toUpperCase();
+  if (status === "READY") return "text-emerald-600";
+  if (status === "PARTIAL") return "text-amber-600";
+  return "text-rose-600";
+});
+const checklistRepo = computed(() => Boolean(projectRepo.value?.repo_url || projectRepo.value?.repo_full_name));
+const checklistRequirements = computed(() => {
+  const status = String(planMeta.value?.requirements_status || "").toUpperCase();
+  return ["APPROVED", "READY", "ACTIVE"].includes(status) || requirementSummaryCards.value.length > 0;
+});
+const checklistTasks = computed(() => taskLifecycle.value.total > 0);
+const checklistRuns = computed(() => runs.value.length > 0);
+const journeyHeadline = computed(() => {
+  if (!checklistRepo.value) return "Connect a repository to unlock governed runtime execution.";
+  if (!checklistRequirements.value) return "Prepare requirements so lineage and planning stay connected.";
+  if (!checklistTasks.value) return "Generate or create tasks to make execution actionable.";
+  if (!checklistRuns.value) return "Start the first run to validate runtime confidence.";
+  if (projectStatus.value !== "RUN") return "Move to RUN stage to operate from Mission Control.";
+  return "Use Mission Control to monitor live execution and delivery outcomes.";
+});
+const journeyHint = computed(() => {
+  if (!checklistRepo.value) return "Without repo context, run previews and delivery tracking remain limited.";
+  if (!checklistRequirements.value) return "Requirement status drives task generation and run lineage quality.";
+  if (!checklistTasks.value) return "Tasks are the bridge between requirements and runs.";
+  if (!checklistRuns.value) return "A first run establishes baseline telemetry, timeline, and artifact visibility.";
+  return "You can continue iterating tasks, replaying runs, and tracking requirement health.";
+});
+const journeyPrimaryActionLabel = computed(() => {
+  if (!checklistRepo.value) return "Connect Repository";
+  if (!checklistRequirements.value) return "Open Requirements";
+  if (!checklistTasks.value) return "Create Task";
+  if (!checklistRuns.value) return "Start Run";
+  return projectStatus.value === "RUN" ? "Enter Mission Control" : "Move to RUN";
 });
 
 function syncArchitectureEditor(profile: any | null) {
@@ -1022,6 +1276,16 @@ function taskBranchDetail(task: any) {
   return "System-generated isolated branch";
 }
 
+function taskLineageLabel(task: any) {
+  const reqs = Array.isArray(task?.derived_from_requirement_ids) ? task.derived_from_requirement_ids : [];
+  const parts = [];
+  if (task?.rerun_of_task_id) parts.push(`Rerun of ${String(task.rerun_of_task_id).slice(0, 8)}`);
+  if (reqs.length) parts.push(`Derived from ${reqs.join(", ")}`);
+  if (task?.capability_id) parts.push(`Capability ${task.capability_id}`);
+  if (task?.impact_zone?.length) parts.push(`Impact ${task.impact_zone.join(", ")}`);
+  return parts.join(" · ") || "Manual or unlinked task";
+}
+
 function markExecutorSelection() {
   executorSelectionDirty.value = true;
 }
@@ -1033,6 +1297,35 @@ function goToRun() {
   }
   error.value = "";
   router.push(`/projects/${projectId.value}/run`);
+}
+
+function goToRequirements() {
+  if (!projectId.value) return;
+  router.push(`/projects/${projectId.value}/requirements`);
+}
+
+function runPrimaryJourneyAction() {
+  if (!checklistRepo.value) {
+    openConnectRepoDialog();
+    return;
+  }
+  if (!checklistRequirements.value) {
+    goToRequirements();
+    return;
+  }
+  if (!checklistTasks.value) {
+    openCreateTaskDialog();
+    return;
+  }
+  if (!checklistRuns.value) {
+    void startRun();
+    return;
+  }
+  if (projectStatus.value !== "RUN") {
+    void advanceStage("RUN");
+    return;
+  }
+  goToRun();
 }
 
 function stageBlockReason(target: string) {
@@ -1144,9 +1437,89 @@ async function loadTasks() {
   tasksError.value = "";
   if (!projectId.value) return;
   try {
-    tasks.value = await listTasks(projectId.value);
+    tasks.value = await listTasks(projectId.value, { active_only: true, latest_per_title: true });
+    taskSnapshot.value = await listTasks(projectId.value, { latest_per_title: true, include_deleted: false });
   } catch (err: any) {
     tasksError.value = err?.message || "Failed to load tasks";
+  }
+}
+
+async function loadImprovementRequests() {
+  improvementRequestsError.value = "";
+  if (!projectId.value) return;
+  try {
+    improvementRequests.value = await listImprovementRequests(projectId.value, 100);
+  } catch (err: any) {
+    improvementRequests.value = [];
+    improvementRequestsError.value = err?.message || "Failed to load improvement requests";
+  }
+}
+
+async function loadRequirementSummaryCards() {
+  if (!projectId.value) return;
+  try {
+    const payload = await fetchRequirementSummary(projectId.value, 200, 0);
+    requirementSummaryCards.value = Array.isArray(payload?.items) ? payload.items : [];
+  } catch {
+    requirementSummaryCards.value = [];
+  }
+}
+
+async function loadFoundationReadiness() {
+  foundationReadinessError.value = "";
+  if (!projectId.value) return;
+  try {
+    foundationReadiness.value = await fetchFoundationReadiness(projectId.value);
+  } catch (err: any) {
+    foundationReadinessError.value = err?.message || "Foundation readiness failed";
+  }
+}
+
+async function loadGenesisState() {
+  genesisError.value = "";
+  if (!projectId.value) return;
+  try {
+    const [presets, blueprint, latestRun] = await Promise.all([
+      listStackPresets(projectId.value),
+      fetchProjectBlueprint(projectId.value),
+      fetchLatestGenesisRun(projectId.value),
+    ]);
+    stackPresets.value = Array.isArray(presets) ? presets : [];
+    projectBlueprint.value = blueprint || null;
+    latestGenesisRun.value = latestRun || null;
+    if (stackPresets.value.length && !stackPresets.value.some((row) => row.key === genesisForm.value.stack_preset_key)) {
+      genesisForm.value.stack_preset_key = stackPresets.value[0].key;
+    }
+  } catch (err: any) {
+    genesisError.value = err?.message || "Failed to load genesis state";
+  }
+}
+
+async function openGenesisDialog() {
+  await loadGenesisState();
+  showGenesisDialog.value = true;
+}
+
+async function submitGenesisBlueprint() {
+  if (!projectId.value) return;
+  genesisLoading.value = true;
+  genesisError.value = "";
+  try {
+    const payload = await createProjectBlueprint(projectId.value, {
+      blueprint_key: genesisForm.value.blueprint_key,
+      stack_preset_key: genesisForm.value.stack_preset_key,
+      deployment_profile: genesisForm.value.deployment_profile,
+      readiness_enforced: genesisForm.value.readiness_enforced,
+    });
+    projectBlueprint.value = payload?.blueprint || null;
+    latestGenesisRun.value = payload?.genesis_run || null;
+    showGenesisDialog.value = false;
+    await Promise.all([loadTasks(), loadFoundationReadiness()]);
+    ElMessage.success("Project blueprint created");
+  } catch (err: any) {
+    genesisError.value = err?.message || "Failed to create blueprint";
+  } finally {
+    genesisLoading.value = false;
   }
 }
 
@@ -1223,14 +1596,29 @@ async function loadGitHubInstallationRepositories() {
       githubInstallMessage.value = "No repositories were returned for this installation yet.";
       return;
     }
-    const preferredRepo =
-      githubInstallationRepos.value.find((repo) => repo.full_name === repoForm.value.repo_full_name) ||
-      githubInstallationRepos.value[0];
+    const configuredFullName = String(repoForm.value.repo_full_name || "").trim();
+    const preferredRepo = githubInstallationRepos.value.find((repo) => repo.full_name === configuredFullName);
     if (preferredRepo) {
       selectedGitHubRepo.value = preferredRepo.full_name;
       applySelectedGitHubRepository(preferredRepo.full_name);
+      githubInstallMessage.value = "GitHub repositories loaded. Review the selected repo URL before saving.";
+      return;
     }
-    githubInstallMessage.value = "GitHub repositories loaded. Review the selected repo URL before saving.";
+
+    if (!configuredFullName) {
+      const defaultRepo = githubInstallationRepos.value[0];
+      if (defaultRepo) {
+        selectedGitHubRepo.value = defaultRepo.full_name;
+        applySelectedGitHubRepository(defaultRepo.full_name);
+      }
+      githubInstallMessage.value = "GitHub repositories loaded. Review the selected repo URL before saving.";
+      return;
+    }
+
+    // Keep the currently configured repository when it is outside this installation scope.
+    selectedGitHubRepo.value = configuredFullName;
+    githubInstallMessage.value =
+      "GitHub repositories loaded. Current project repo is not in this installation list; preserving configured value.";
   } catch (err: any) {
     githubInstallationRepos.value = [];
     githubInstallError.value = err?.message || "Failed to load repositories for this GitHub installation.";
@@ -1244,19 +1632,34 @@ function applySelectedGitHubRepository(fullName: string) {
   if (!selectedRepo) return;
   selectedGitHubRepo.value = selectedRepo.full_name;
   repoForm.value.repo_full_name = selectedRepo.full_name || "";
-  const strategy = String(repoForm.value.auth_strategy || "public_https").toLowerCase();
-  if (strategy === "ssh") {
-    repoForm.value.repo_url =
-      selectedRepo.ssh_url || selectedRepo.clone_url || selectedRepo.html_url || repoForm.value.repo_url;
-  } else {
-    repoForm.value.repo_url =
-      selectedRepo.clone_url || selectedRepo.ssh_url || selectedRepo.html_url || repoForm.value.repo_url;
-  }
+  repoForm.value.repo_url = normalizeRepoUrlForStrategy(
+    repoForm.value.repo_url,
+    repoForm.value.auth_strategy,
+    selectedRepo.full_name || repoForm.value.repo_full_name
+  );
   repoForm.value.default_branch = selectedRepo.default_branch || repoForm.value.default_branch || "main";
+  const strategy = String(repoForm.value.auth_strategy || "public_https").toLowerCase();
   githubInstallMessage.value =
     strategy === "ssh"
       ? "Repository selected from GitHub and normalized for SSH runtime access."
       : "Repository selected from GitHub and normalized for HTTPS runtime access.";
+}
+
+function normalizeRepoUrlForStrategy(repoUrl: string, strategy: string, repoFullName?: string | null) {
+  const normalizedStrategy = String(strategy || "public_https").toLowerCase();
+  const cleaned = String(repoUrl || "").trim();
+  const fullName = String(repoFullName || repoForm.value.repo_full_name || "").trim();
+  if (!cleaned) return cleaned;
+
+  const sshMatch = cleaned.match(/^git@github\.com:(.+?)(?:\.git)?$/i);
+  const httpsMatch = cleaned.match(/^https?:\/\/github\.com\/(.+?)(?:\.git)?$/i);
+  const path = (fullName || sshMatch?.[1] || httpsMatch?.[1] || "").replace(/\.git$/i, "");
+  if (!path || !/^[^/]+\/[^/]+$/.test(path)) return cleaned;
+
+  if (normalizedStrategy === "ssh") {
+    return `git@github.com:${path}.git`;
+  }
+  return `https://github.com/${path}.git`;
 }
 
 function startGitHubAppInstall() {
@@ -1306,12 +1709,12 @@ async function loadProjectRepo() {
   try {
     projectRepo.value = await fetchProjectRepo(projectId.value);
     if (!executorSelectionDirty.value) {
-      selectedExecutor.value = projectRepo.value ? "codex" : "dummy";
+      selectedExecutor.value = "codex";
     }
   } catch (err: any) {
     projectRepo.value = null;
     if (!executorSelectionDirty.value) {
-      selectedExecutor.value = "dummy";
+      selectedExecutor.value = "codex";
     }
     if (err?.message && !String(err.message).includes("Project repository not connected")) {
       repoError.value = err.message;
@@ -1329,6 +1732,11 @@ async function submitConnectRepo() {
   repoError.value = "";
   repoMessage.value = "";
   try {
+    repoForm.value.repo_url = normalizeRepoUrlForStrategy(
+      repoForm.value.repo_url,
+      repoForm.value.auth_strategy,
+      repoForm.value.repo_full_name
+    );
     projectRepo.value = await connectProjectRepo(projectId.value, {
       provider: "github",
       repo_url: repoForm.value.repo_url.trim(),
@@ -1343,6 +1751,7 @@ async function submitConnectRepo() {
     if (!executorSelectionDirty.value) {
       selectedExecutor.value = "codex";
     }
+    await loadFoundationReadiness();
     showConnectRepoDialog.value = false;
     repoMessage.value = "Repository connected.";
   } catch (err: any) {
@@ -1363,6 +1772,11 @@ async function runRepoPreflight() {
   repoMessage.value = "";
   repoPreflightResult.value = null;
   try {
+    repoForm.value.repo_url = normalizeRepoUrlForStrategy(
+      repoForm.value.repo_url,
+      repoForm.value.auth_strategy,
+      repoForm.value.repo_full_name
+    );
     const result = await preflightProjectRepo(projectId.value, {
       provider: "github",
       repo_url: repoForm.value.repo_url.trim(),
@@ -1383,6 +1797,17 @@ async function runRepoPreflight() {
     repoPreflightLoading.value = false;
   }
 }
+
+watch(
+  () => repoForm.value.auth_strategy,
+  () => {
+    repoForm.value.repo_url = normalizeRepoUrlForStrategy(
+      repoForm.value.repo_url,
+      repoForm.value.auth_strategy,
+      repoForm.value.repo_full_name
+    );
+  }
+);
 
 function resetCreateTaskForm() {
   newTask.value = {
@@ -1573,6 +1998,7 @@ async function bootstrapArchitectureProfile(refreshRepoMap = false) {
     });
     syncArchitectureEditor(profile);
     await loadProjectSummary();
+    await loadFoundationReadiness();
     ElMessage.success("Architecture profile bootstrapped.");
   } catch (err: any) {
     architectureError.value = err?.message || "Failed to bootstrap architecture profile";
@@ -1593,6 +2019,7 @@ async function deriveArchitectureProfile(refreshRepoMap = false) {
     });
     syncArchitectureEditor(profile);
     await loadProjectSummary();
+    await loadFoundationReadiness();
     ElMessage.success("Architecture profile derived.");
   } catch (err: any) {
     architectureError.value = err?.message || "Failed to derive architecture profile";
@@ -1617,6 +2044,7 @@ async function saveArchitectureProfileDraft() {
     });
     syncArchitectureEditor(profile);
     await loadProjectSummary();
+    await loadFoundationReadiness();
     ElMessage.success("Architecture profile saved.");
   } catch (err: any) {
     architectureError.value = err?.message || "Failed to save architecture profile";
@@ -1671,6 +2099,23 @@ async function setRunStatus(runId: string, status: string) {
     await loadLifecycleHistory();
   } catch (err: any) {
     runError.value = err?.message || "Failed to update run status";
+  }
+}
+
+async function unblockRunById(runId: string) {
+  runError.value = "";
+  runUnblockLoading.value = { ...runUnblockLoading.value, [runId]: true };
+  try {
+    const result = await unblockRun(runId);
+    const detail = result?.detail || "Unblock requested.";
+    ElMessage.success(detail);
+    await loadRuns();
+    await loadWorkItems();
+    await loadRunEvents();
+  } catch (err: any) {
+    runError.value = err?.message || "Failed to unblock run";
+  } finally {
+    runUnblockLoading.value = { ...runUnblockLoading.value, [runId]: false };
   }
 }
 
@@ -1804,6 +2249,10 @@ onMounted(async () => {
   await loadLifecycleHistory();
   await loadDocuments();
   await loadTasks();
+  await loadImprovementRequests();
+  await loadRequirementSummaryCards();
+    await loadFoundationReadiness();
+    await loadGenesisState();
   await loadProjectMeta();
   await loadRuns();
   await loadProjectRepo();

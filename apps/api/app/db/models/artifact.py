@@ -28,6 +28,7 @@ class Artifact(TimestampMixin, SoftDeleteMixin, Base):
     run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
     )
+    requirement_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     work_item_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("work_items.id", ondelete="SET NULL"), nullable=True
     )

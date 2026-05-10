@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Artifact, Project, Run, RunEvent, RunSummary, WorkItem
+from app.db.models import Artifact, ImprovementRequest, Project, Run, RunEvent, RunSummary, WorkItem
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -178,6 +178,7 @@ async def test_run_strategy_group_persists_feedback_metadata(db_session):
     forked_run = await session.scalar(select(Run).where(Run.project_id == project.id, Run.id != source_run.id))
     assert forked_run is not None
     assert forked_run.summary["strategy_mode"] == "feedback"
+    assert "improvement_request_id" in forked_run.summary
     assert forked_run.summary["feedback_text"] == "Projects section is missing on the homepage preview."
     assert forked_run.summary["feedback_source"] == "user"
     assert forked_run.summary["strategy_error"] == "Projects section is missing on the homepage preview."
@@ -196,6 +197,13 @@ async def test_run_strategy_group_persists_feedback_metadata(db_session):
         "max_files": 2,
         "hard_max_files": 4,
     }
+    request_id = uuid.UUID(forked_run.summary["improvement_request_id"])
+    improvement_request = await session.get(ImprovementRequest, request_id)
+    assert improvement_request is not None
+    assert improvement_request.source_run_id == source_run.id
+    assert improvement_request.goal_text == "Build portfolio landing page"
+    assert improvement_request.issue_text == "Projects section is missing on the homepage preview."
+    assert improvement_request.created_run_ids == [str(forked_run.id)]
 
 
 @pytest.mark.anyio

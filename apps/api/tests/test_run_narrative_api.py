@@ -238,6 +238,68 @@ async def test_run_narrative_returns_plan_reflections_and_working_context(db_ses
 
 
 @pytest.mark.anyio
+async def test_run_narrative_dedupes_repeated_goal_and_validation_text(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Narrative dedupe", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    started = datetime.utcnow() - timedelta(minutes=1)
+    duplicated_goal = (
+        "Sections To Improve 1. About Section Current Problem The About section is just plain text. "
+        "User goal: Sections To Improve 1. About Section Current Problem The About section is just plain text."
+    )
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="RUNNING",
+        executor="codex",
+        workspace_status="SEEDED",
+        started_at=started,
+        summary={
+            "goal": duplicated_goal,
+            "plan_snapshot": {
+                "goal": duplicated_goal,
+                "validation_steps": [
+                    "Validate Sections To Improve 1. About Section Current Problem The About section is just plain text.",
+                    "Validate Sections To Improve 1. About Section Current Problem The About section is just plain text.",
+                ],
+            },
+        },
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG",
+            status="DONE",
+            priority=0,
+            executor="dummy",
+            payload={"title": "Plan dedupe"},
+            result={},
+            started_at=started,
+            finished_at=started + timedelta(seconds=2),
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/runs/{run.id}/narrative")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["plan"]["goal"] == "Sections To Improve 1. About Section Current Problem The About section is just plain text."
+    assert data["summary"]["goal_text"] == "Sections To Improve 1. About Section Current Problem The About section is just plain text."
+    assert data["plan"]["validation_steps"] == [
+        "Validate Sections To Improve 1. About Section Current Problem The About section is just plain text."
+    ]
+
+
+@pytest.mark.anyio
 async def test_run_narrative_includes_delivery_metadata_in_working_context(db_session):
     session, tenant_id = db_session
     project = Project(name="Delivery narrative", tenant_id=tenant_id)

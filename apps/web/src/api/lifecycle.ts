@@ -86,6 +86,18 @@ export function createEmptyArchitectureProfileSummary(message = "No architecture
   };
 }
 
+export function createEmptyFoundationReadiness(message = "Foundation readiness has not been evaluated yet.") {
+  return {
+    status: "MISSING",
+    mode: "new_bootstrap",
+    repo_connected: false,
+    architecture_profile_present: false,
+    checks: [],
+    missing_prerequisites: [],
+    recommended_next_step: message,
+  };
+}
+
 export type CreateTaskPayload = {
   title: string;
   description?: string | null;
@@ -94,11 +106,37 @@ export type CreateTaskPayload = {
   status?: string;
   assignee?: string | null;
   source?: string;
+  source_type?: string;
+  source_node_id?: string | null;
+  requirement_id?: string | null;
+  derived_from_requirement_ids?: string[];
+  capability_id?: string | null;
+  capability_label?: string | null;
+  architecture_slice?: string | null;
+  impact_zone?: string[];
+  provenance?: Record<string, any>;
   document_id?: string | null;
   created_by?: string | null;
   branch_strategy?: "auto" | "new" | "existing";
   base_branch?: string | null;
   branch_name?: string | null;
+};
+
+export type VisionRunScreenshotPayload = {
+  filename: string;
+  content_type: string;
+  data_base64: string;
+};
+
+export type VisionRunCreatePayload = {
+  project_id: string;
+  goal_text: string;
+  screenshots: VisionRunScreenshotPayload[];
+  page_url?: string | null;
+  preferred_executor?: string;
+  auto_start?: boolean;
+  auto_deploy?: boolean;
+  metadata?: Record<string, any>;
 };
 
 export type CreateDocumentPayload = {
@@ -166,6 +204,14 @@ export type PreviewProfilePayload = {
   env_overrides?: Record<string, string>;
   ttl_hours?: number;
   max_previews_per_project?: number | null;
+  created_by?: string | null;
+};
+
+export type ProjectBlueprintPayload = {
+  blueprint_key?: string;
+  stack_preset_key?: string;
+  deployment_profile?: string;
+  readiness_enforced?: boolean;
   created_by?: string | null;
 };
 
@@ -243,8 +289,59 @@ export async function regenerateTasks(projectId: string, documentId: string, for
   return parseApiResponse(resp);
 }
 
-export async function listTasks(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/tasks`);
+export async function listTasks(
+  projectId: string,
+  options: {
+    active_only?: boolean;
+    latest_per_title?: boolean;
+    include_deleted?: boolean;
+  } = {}
+) {
+  const query = new URLSearchParams();
+  if (options.active_only !== undefined) query.set("active_only", String(Boolean(options.active_only)));
+  if (options.latest_per_title !== undefined) query.set("latest_per_title", String(Boolean(options.latest_per_title)));
+  if (options.include_deleted !== undefined) query.set("include_deleted", String(Boolean(options.include_deleted)));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/tasks${suffix}`);
+  return parseApiResponse(resp);
+}
+
+export async function listImprovementRequests(projectId: string, limit = 50) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/improvement-requests?limit=${encodeURIComponent(String(limit))}`);
+  return parseApiResponse(resp);
+}
+
+export async function fetchFoundationReadiness(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/foundation-readiness`);
+  try {
+    return await parseApiResponse(resp);
+  } catch (err) {
+    if (isApiErrorStatus(err, 404)) return createEmptyFoundationReadiness((err as any)?.message);
+    throw err;
+  }
+}
+
+export async function listStackPresets(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/stack-presets`);
+  return parseApiResponse(resp);
+}
+
+export async function fetchProjectBlueprint(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/blueprint`);
+  return parseApiResponse(resp);
+}
+
+export async function fetchLatestGenesisRun(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/genesis-runs/latest`);
+  return parseApiResponse(resp);
+}
+
+export async function createProjectBlueprint(projectId: string, payload: ProjectBlueprintPayload) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/blueprint`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
   return parseApiResponse(resp);
 }
 
@@ -512,11 +609,20 @@ export async function listRuns(projectId: string) {
   return parseApiResponse(resp);
 }
 
-export async function createRun(projectId: string, executor = "dummy", taskId?: string | null) {
+export async function createRun(projectId: string, executor = "codex", taskId?: string | null, runKind?: string | null) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ executor, task_id: taskId || null }),
+    body: JSON.stringify({ executor, task_id: taskId || null, run_kind: runKind || null }),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function createVisionRun(payload: VisionRunCreatePayload) {
+  const resp = await fetch(`${API_BASE}/tasks/vision-run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
   return parseApiResponse(resp);
 }
@@ -535,6 +641,41 @@ export async function resumeRun(runId: string, payload: { start_now?: boolean } 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ start_now: payload.start_now ?? true }),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function unblockRun(runId: string) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/unblock`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function retryRunPush(runId: string, payload: { auth_strategy?: string } = {}) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/retry-push`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function extendRunBudget(
+  runId: string,
+  payload: {
+    additional_tokens: number;
+    additional_cost_cents: number;
+    auto_resume?: boolean;
+    reason?: string | null;
+  }
+) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/budget/extend`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
   return parseApiResponse(resp);
 }

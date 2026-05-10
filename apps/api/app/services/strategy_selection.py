@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Project, Run, RunSummary
+from app.db.models import ImprovementRequest, Project, Run, RunSummary
 from app.schemas.run_strategy import (
     RunStrategyCandidate,
     RunStrategyGroupResponse,
@@ -392,15 +392,39 @@ async def create_strategy_group(
         feedback_text=request.feedback_text or request.error or goal_text,
     )
     group_id = uuid.uuid4()
+    improvement_request = ImprovementRequest(
+        tenant_id=tenant_id,
+        project_id=source_run.project_id,
+        source_run_id=source_run.id,
+        source_requirement_id=(
+            str((source_run.summary or {}).get("requirement_id"))
+            if isinstance(source_run.summary, dict) and (source_run.summary or {}).get("requirement_id")
+            else None
+        ),
+        strategy_group_id=group_id,
+        goal_text=goal_text,
+        issue_text=request.error,
+        files=[value for value in request.files if isinstance(value, str)],
+        executor=request.executor,
+        feedback_source=request.feedback_source,
+        start_now=request.start_now,
+        status="CREATED",
+        created_run_ids=[],
+    )
+    session.add(improvement_request)
+    await session.flush()
+    created_run_ids: list[uuid.UUID] = []
     for option in strategies:
         branch_name = _strategy_branch_name(source_run, option.strategy_type)
         summary_overrides = {
             "strategy_group_id": str(group_id),
+            "improvement_request_id": str(improvement_request.id),
             "strategy_source_run_id": str(source_run.id),
             "strategy_type": option.strategy_type,
             "strategy_label": option.label,
             "strategy_rationale": option.rationale,
             "strategy_prompt_hint": option.prompt_hint,
+            "goal": goal_text,
             "strategy_goal": goal_text,
             "strategy_error": request.error,
             "strategy_files": request.files,
@@ -415,7 +439,7 @@ async def create_strategy_group(
             summary_overrides["feedback_text"] = request.feedback_text
         if request.feedback_source:
             summary_overrides["feedback_source"] = request.feedback_source
-        await fork_run(
+        created_run = await fork_run(
             session,
             source_run=source_run,
             executor=request.executor,
@@ -423,5 +447,12 @@ async def create_strategy_group(
             start_now=request.start_now,
             summary_overrides=summary_overrides,
         )
+        created_run_ids.append(created_run.id)
+
+    improvement_request.created_run_ids = [str(run_id) for run_id in created_run_ids]
+    if created_run_ids:
+        improvement_request.status = "RUNNING" if request.start_now else "QUEUED"
+        improvement_request.resulting_run_id = created_run_ids[0]
+    session.add(improvement_request)
 
     return await get_strategy_group(session, tenant_id=tenant_id, run_id=source_run_id)

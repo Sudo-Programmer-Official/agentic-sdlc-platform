@@ -90,16 +90,16 @@ class Settings(BaseSettings):
     ai_tier_economy_output_cents_per_1k_tokens: float = 0.3
     ai_budget_premium_cents: float = 25.0
     ai_budget_standard_cents: float = 8.0
-    ai_budget_economy_cents: float = 2.0
+    ai_budget_economy_cents: float = 8.0
     ai_budget_background_cents: float = 0.5
-    ai_recovery_reserve_fraction: float = 0.25
-    ai_recovery_reserve_min_cents: float = 12.0
+    ai_recovery_reserve_fraction: float = 0.35
+    ai_recovery_reserve_min_cents: float = 40.0
     ai_max_context_premium_tokens: int = 20_000
     ai_max_context_standard_tokens: int = 20_000
     ai_max_context_economy_tokens: int = 4_000
     ai_default_completion_premium_tokens: int = 2_000
     ai_default_completion_standard_tokens: int = 1_200
-    ai_default_completion_economy_tokens: int = 800
+    ai_default_completion_economy_tokens: int = 1200
     ai_low_confidence_threshold: float = 0.55
     ai_medium_confidence_threshold: float = 0.8
     ai_human_review_file_threshold: int = 8
@@ -114,8 +114,8 @@ class Settings(BaseSettings):
     codex_max_context_bytes: int = 400_000
     codex_max_write_bytes_total: int = 200_000
     codex_redaction_enabled: bool = True
-    codex_max_run_tokens: int = 200_000
-    codex_max_run_cost_cents: float = 30.0
+    codex_max_run_tokens: int = 400_000
+    codex_max_run_cost_cents: float = 120.0
     max_fix_attempts_per_run: int = 2
     test_command: str = "pytest -q"
     test_timeout_seconds: int = 180
@@ -129,6 +129,26 @@ class Settings(BaseSettings):
     )
     workspace_command_output_max_bytes: int = 200_000
     run_auto_push_branch_on_completion: bool = True
+    runtime_never_fail_runs: bool = False
+    runtime_goal_orchestration_enabled: bool = False
+    runtime_goal_max_recovery_cycles: int = 6
+    runtime_recovery_max_attempts_per_work_item: int = 4
+    runtime_recovery_max_attempts_per_failure_type: int = 6
+    runtime_recovery_max_attempts_per_run: int = 24
+    runtime_recovery_max_runtime_minutes: int = 90
+    runtime_recovery_max_cost_estimate_cents: float = 160.0
+    runtime_recovery_memory_enabled: bool = False
+    runtime_recovery_memory_min_samples: int = 3
+    runtime_recovery_memory_min_success_rate: float = 0.7
+    external_reference_domain_allowlist: str = (
+        "docs.python.org,developer.mozilla.org,fastapi.tiangolo.com,docs.github.com,platform.openai.com"
+    )
+    external_reference_fetch_timeout_seconds: int = 8
+    external_reference_max_content_bytes: int = 120_000
+    external_reference_max_sanitized_chars: int = 8_000
+    external_reference_max_summary_chars: int = 900
+    external_reference_max_context_chars: int = 2_000
+    external_reference_context_top_k: int = 4
     preview_host: str = "127.0.0.1"
     preview_default_ttl_hours: int = 24
     preview_max_per_project: int = 100
@@ -136,11 +156,18 @@ class Settings(BaseSettings):
     git_author_name: str = "Agentic SDLC"
     git_author_email: str = "agentic-sdlc@local"
     runtime_git_auth_mode: str = "auto"  # auto | github_app_https | ssh | none
+    github_app_id: str | None = None
+    github_private_key: str | None = None
+    github_webhook_secret: str | None = None
     github_app_slug: str | None = None
     github_allowed_org: str | None = None
     tenancy_enforcement: bool = False
     run_migrations_on_startup: bool = False
     alembic_config_path: str | None = None
+    requirement_memory_refresh_enabled: bool = True
+    requirement_memory_refresh_interval_seconds: int = 900
+    requirement_memory_refresh_project_limit: int = 50
+    requirement_memory_refresh_requirement_limit: int = 100
     allowed_origins: List[str] = [
         "https://www.prompt2pr.com",
         "https://prompt2pr.com",

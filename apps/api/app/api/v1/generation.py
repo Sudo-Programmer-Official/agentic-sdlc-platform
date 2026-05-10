@@ -18,6 +18,7 @@ from app.api.v1.lifecycle_score import lifecycle_score
 from app.services.llm_generator import LLMTaskGenerator
 from app.services.activity_log import log_activity
 from app.services.ai_policy import AIPolicyError
+from app.services.task_lineage import add_task_lineage_traces, derive_task_lineage
 
 router = APIRouter(prefix="/store", tags=["generation"])
 public_router = APIRouter(tags=["generation"])
@@ -132,7 +133,8 @@ async def generate_tasks(
         old_tasks = list(old_tasks_result.scalars().all())
 
     created_tasks: List[Task] = []
-    for gen_task in generated:
+    for idx, gen_task in enumerate(generated):
+        lineage = derive_task_lineage(document=doc, generated_task=gen_task, index=idx, provenance=prov)
         task = Task(
             tenant_id=doc.tenant_id,
             project_id=project_id,
@@ -143,6 +145,15 @@ async def generate_tasks(
             category=gen_task.category,
             status="PENDING",
             source="ai",
+            source_type=lineage["source_type"],
+            source_node_id=lineage["source_node_id"],
+            requirement_id=(lineage["derived_from_requirement_ids"][0] if lineage["derived_from_requirement_ids"] else None),
+            derived_from_requirement_ids=lineage["derived_from_requirement_ids"],
+            capability_id=lineage["capability_id"],
+            capability_label=lineage["capability_label"],
+            architecture_slice=lineage["architecture_slice"],
+            impact_zone=lineage["impact_zone"],
+            provenance=lineage["provenance"],
         )
         session.add(task)
         await session.flush()
@@ -166,6 +177,14 @@ async def generate_tasks(
                 tokens_prompt=prov.get("tokens_prompt"),
                 tokens_completion=prov.get("tokens_completion"),
             )
+        )
+        add_task_lineage_traces(
+            session,
+            task=task,
+            document=doc,
+            requirement_ids=lineage["derived_from_requirement_ids"],
+            capability_id=lineage["capability_id"],
+            confidence=gen_task.confidence,
         )
 
         created_tasks.append(task)
@@ -200,6 +219,8 @@ async def generate_tasks(
             "deprecated_tasks": len(old_tasks),
             "document_version": doc.version,
             "forced": force,
+            "lineage_mode": "best_effort_v1",
+            "requirements_count": len(created_tasks[0].derived_from_requirement_ids or []) if created_tasks else 0,
         },
         previous_state={"old_tasks": [str(t.id) for t in old_tasks]} if old_tasks else None,
         new_state={"new_tasks": [str(t.id) for t in created_tasks]},

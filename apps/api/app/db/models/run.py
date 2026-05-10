@@ -22,6 +22,7 @@ class Run(TimestampMixin, Base):
     workspace_root: Mapped[str | None] = mapped_column(Text, nullable=True)
     repo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     branch_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    requirement_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     workspace_status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
     workspace_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

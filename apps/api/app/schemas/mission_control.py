@@ -16,6 +16,23 @@ class MissionControlArtifactRef(BaseModel):
     created_at: datetime
 
 
+class MissionControlImportedReference(BaseModel):
+    id: uuid.UUID
+    type: str
+    uri: str
+    created_at: datetime
+    domain: str | None = None
+    label: str | None = None
+    imported_at: datetime | None = None
+    linked_requirement_id: str | None = None
+    linked_run_id: uuid.UUID | None = None
+    linked_work_item_id: uuid.UUID | None = None
+    linked_task_id: uuid.UUID | None = None
+    trust_score: float | None = None
+    freshness_score: float | None = None
+    used_in_execution_count: int = 0
+
+
 class MissionControlWorkIntakeItem(BaseModel):
     id: uuid.UUID
     kind: str
@@ -269,3 +286,4 @@ class MissionControlOverviewResponse(BaseModel):
     strategy_learning: list[MissionControlStrategyInsight] = Field(default_factory=list)
     system_insights: MissionControlSystemInsights
     violation_insights: MissionControlViolationInsights | None = None
+    imported_references: list[MissionControlImportedReference] = Field(default_factory=list)

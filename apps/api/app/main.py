@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import uuid
+import asyncio
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -29,6 +30,7 @@ from app.api.v1.ai_ops import router as ai_ops_router
 from app.core.config import DEFAULT_DATABASE_URL, get_settings
 from app.services.build_info import get_build_history, get_current_build_info
 from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
+from app.services.requirement_refresh_daemon import run_requirement_memory_daemon, shutdown_daemon
 from app.startup import run_startup_migrations
 
 
@@ -136,6 +138,24 @@ def create_app() -> FastAPI:
             log.exception("Application startup failed during phase=migrations")
             raise
         log.info("Startup phase=migrations complete")
+        app.state.requirement_refresh_stop_event = None
+        app.state.requirement_refresh_task = None
+        if settings.requirement_memory_refresh_enabled:
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(run_requirement_memory_daemon(stop_event))
+            app.state.requirement_refresh_stop_event = stop_event
+            app.state.requirement_refresh_task = task
+            log.info(
+                "Requirement memory daemon enabled interval_seconds=%s",
+                settings.requirement_memory_refresh_interval_seconds,
+            )
+
+    @app.on_event("shutdown")
+    async def on_shutdown() -> None:
+        await shutdown_daemon(
+            getattr(app.state, "requirement_refresh_task", None),
+            getattr(app.state, "requirement_refresh_stop_event", None),
+        )
 
     # Register the DB-backed public surface before the legacy v1 router so
     # overlapping /projects/... and /runs/... paths resolve to the current system.

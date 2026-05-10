@@ -60,6 +60,15 @@ class TaskCreate(BaseModel):
     status: str = "PENDING"
     assignee: Optional[str] = None
     source: str = "manual"
+    source_type: str = "manual"
+    source_node_id: Optional[str] = None
+    requirement_id: Optional[str] = None
+    derived_from_requirement_ids: list[str] = Field(default_factory=list)
+    capability_id: Optional[str] = None
+    capability_label: Optional[str] = None
+    architecture_slice: Optional[str] = None
+    impact_zone: list[str] = Field(default_factory=list)
+    provenance: dict = Field(default_factory=dict)
     document_id: Optional[uuid.UUID] = None
     created_by: Optional[str] = None
     branch_strategy: TaskBranchStrategy = "auto"
@@ -108,6 +117,16 @@ class TaskOut(BaseModel):
     status: str
     assignee: Optional[str]
     source: str
+    source_type: str = "manual"
+    source_node_id: Optional[str] = None
+    requirement_id: Optional[str] = None
+    derived_from_requirement_ids: Optional[list[str]] = None
+    capability_id: Optional[str] = None
+    capability_label: Optional[str] = None
+    architecture_slice: Optional[str] = None
+    impact_zone: Optional[list[str]] = None
+    provenance: Optional[dict] = None
+    rerun_of_task_id: Optional[uuid.UUID] = None
     created_by: Optional[str]
     branch_strategy: TaskBranchStrategy = "auto"
     base_branch: Optional[str]
@@ -119,6 +138,261 @@ class TaskOut(BaseModel):
         from_attributes = True
 
 
+class ImprovementRequestOut(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    project_id: uuid.UUID
+    source_run_id: uuid.UUID
+    source_requirement_id: Optional[str] = None
+    strategy_group_id: Optional[uuid.UUID] = None
+    goal_text: Optional[str] = None
+    issue_text: Optional[str] = None
+    files: list[str] = Field(default_factory=list)
+    executor: Optional[str] = None
+    feedback_source: Optional[str] = None
+    start_now: bool = True
+    status: str
+    created_run_ids: list[uuid.UUID] = Field(default_factory=list)
+    resulting_run_id: Optional[uuid.UUID] = None
+    resulting_pr_url: Optional[str] = None
+    resolution_status: Optional[str] = None
+    resolution_summary: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class RequirementTaskCountsOut(BaseModel):
+    total: int = 0
+    open: int = 0
+    in_progress: int = 0
+    completed: int = 0
+    failed: int = 0
+    rerun_pending: int = 0
+
+
+class RequirementRunCountsOut(BaseModel):
+    total: int = 0
+    running: int = 0
+    completed: int = 0
+    failed: int = 0
+
+
+class RequirementImprovementCountsOut(BaseModel):
+    total: int = 0
+    open: int = 0
+    resolved: int = 0
+
+
+class RequirementSummaryCardOut(BaseModel):
+    requirement_id: str
+    title: str
+    status: str
+    priority: str
+    task_counts: RequirementTaskCountsOut
+    run_counts: RequirementRunCountsOut
+    improvement_counts: RequirementImprovementCountsOut
+    last_activity_at: datetime | None = None
+    health_score: int
+    risk_level: str
+    stability_score: int = 100
+    retry_count: int = 0
+    unresolved_count: int = 0
+    recurring_failure_patterns: list[str] = Field(default_factory=list)
+    most_impacted_modules: list[str] = Field(default_factory=list)
+    ai_spend_cents: float = 0.0
+    ai_total_tokens: int = 0
+
+
+class RequirementSummaryResponse(BaseModel):
+    items: list[RequirementSummaryCardOut] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+    next_offset: int | None = None
+
+
+class RequirementTimelineEventOut(BaseModel):
+    type: str
+    title: str
+    description: str | None = None
+    source_type: str
+    source_id: str
+    status: str | None = None
+    created_at: datetime
+
+
+class RequirementTimelineResponse(BaseModel):
+    items: list[RequirementTimelineEventOut] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 100
+    offset: int = 0
+    next_offset: int | None = None
+
+
+class RequirementExecutionGraphOut(BaseModel):
+    requirement_id: str
+    tasks: list[TaskOut] = Field(default_factory=list)
+    runs: list[RunOut] = Field(default_factory=list)
+    improvements: list[ImprovementRequestOut] = Field(default_factory=list)
+    artifacts: list[dict] = Field(default_factory=list)
+    pull_requests: list[dict] = Field(default_factory=list)
+    deploys: list[dict] = Field(default_factory=list)
+    related_files: list[str] = Field(default_factory=list)
+    related_modules: list[str] = Field(default_factory=list)
+
+
+class RequirementRelationshipCreate(BaseModel):
+    from_requirement_id: str
+    to_requirement_id: str
+    relation_type: str
+    rationale: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class RequirementRelationshipOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    from_requirement_id: str
+    to_requirement_id: str
+    relation_type: str
+    rationale: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class FoundationReadinessCheckOut(BaseModel):
+    key: str
+    label: str
+    status: str
+    detail: str
+
+
+class FoundationReadinessOut(BaseModel):
+    status: str
+    mode: str
+    repo_connected: bool
+    architecture_profile_present: bool
+    checks: list[FoundationReadinessCheckOut] = Field(default_factory=list)
+    missing_prerequisites: list[str] = Field(default_factory=list)
+    recommended_next_step: str
+
+
+class ProjectBlueprintCreate(BaseModel):
+    blueprint_key: str = "fullstack_monorepo"
+    stack_preset_key: str = "vue_fastapi"
+    deployment_profile: str = "local_preview"
+    readiness_enforced: bool = True
+    created_by: Optional[str] = None
+
+
+class StackPresetOut(BaseModel):
+    key: str
+    label: str
+    runtime: str
+    config_json: dict = Field(default_factory=dict)
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectBlueprintOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    blueprint_key: str
+    stack_preset_key: str
+    deployment_profile: str
+    architecture: str
+    status: str
+    readiness_enforced: bool
+    generated_modules: list[str] = Field(default_factory=list)
+    generated_contracts: list[str] = Field(default_factory=list)
+    metadata_json: dict = Field(default_factory=dict)
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectTopologySnapshotOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    blueprint_id: Optional[uuid.UUID] = None
+    version: int
+    topology_json: dict = Field(default_factory=dict)
+    summary: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectGenesisRunOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    blueprint_id: Optional[uuid.UUID] = None
+    status: str
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_task_ids: list[str] = Field(default_factory=list)
+    validation: dict = Field(default_factory=dict)
+    summary: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectGenesisLaunchOut(BaseModel):
+    blueprint: ProjectBlueprintOut
+    topology_snapshot: ProjectTopologySnapshotOut
+    genesis_run: ProjectGenesisRunOut
+
+
+class GovernanceKpiSampleSizesOut(BaseModel):
+    genesis_runs: int = 0
+    topology_snapshots: int = 0
+    feature_runs: int = 0
+    ai_jobs: int = 0
+
+
+class GovernanceKpisOut(BaseModel):
+    project_id: str
+    blueprint_present: bool = False
+    genesis_success_rate: float = 0.0
+    deterministic_replay_match: float = 0.0
+    feature_runs_without_genesis: int = 0
+    context_pack_usage: float = 0.0
+    context_efficiency_ratio: float = 0.0
+    context_loaded_count: int = 0
+    context_selected_count: int = 0
+    sample_sizes: GovernanceKpiSampleSizesOut
+
+
+class RunImpactScoreOut(BaseModel):
+    run_id: uuid.UUID
+    predicted_files: list[str] = Field(default_factory=list)
+    actual_files_changed: list[str] = Field(default_factory=list)
+    overlap_files: list[str] = Field(default_factory=list)
+    precision: float = 0.0
+    recall: float = 0.0
+    recovery_count: int = 0
+    regression_signals: list[str] = Field(default_factory=list)
+
+
 class RunOut(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
@@ -127,6 +401,7 @@ class RunOut(BaseModel):
     workspace_root: Optional[str] = None
     repo_path: Optional[str] = None
     branch_name: Optional[str] = None
+    requirement_id: Optional[str] = None
     workspace_status: str = "PENDING"
     workspace_error: Optional[str] = None
     started_at: Optional[datetime] = None
@@ -141,8 +416,34 @@ class RunOut(BaseModel):
 
 
 class RunCreate(BaseModel):
-    executor: str = "dummy"
+    executor: str = "codex"
     task_id: Optional[uuid.UUID] = None
+    run_kind: str | None = None
+
+
+class VisionRunScreenshotIn(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = "image/png"
+    data_base64: str = Field(min_length=1)
+
+
+class VisionRunCreate(BaseModel):
+    project_id: uuid.UUID
+    goal_text: str = Field(min_length=1, max_length=4000)
+    screenshots: list[VisionRunScreenshotIn] = Field(default_factory=list)
+    page_url: Optional[str] = None
+    preferred_executor: str = "codex"
+    auto_start: bool = True
+    auto_deploy: bool = False
+    metadata: dict = Field(default_factory=dict)
+
+
+class VisionRunOut(BaseModel):
+    task_id: uuid.UUID
+    run_id: uuid.UUID
+    status: str
+    status_url: str
+    source_type: str
 
 
 class ProjectRepositoryConnect(BaseModel):
@@ -299,3 +600,25 @@ class WorkItemComplete(BaseModel):
 class WorkItemFail(BaseModel):
     error: str
     retry: bool = False
+
+
+class ExternalReferenceIngestRequest(BaseModel):
+    url: str
+    label: Optional[str] = None
+    run_id: Optional[uuid.UUID] = None
+    task_id: Optional[uuid.UUID] = None
+    work_item_id: Optional[uuid.UUID] = None
+    requirement_id: Optional[str] = None
+
+
+class ExternalReferenceOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    run_id: Optional[uuid.UUID] = None
+    task_id: Optional[uuid.UUID] = None
+    work_item_id: Optional[uuid.UUID] = None
+    requirement_id: Optional[str] = None
+    type: str
+    uri: str
+    metadata: dict = Field(default_factory=dict, validation_alias=AliasChoices("metadata", "extra_metadata"))
+    created_at: datetime

@@ -38,6 +38,19 @@
           <el-button plain :disabled="!resumeEnabled" :loading="resumeLoading" @click="resumeLatestRun">
             Resume Run
           </el-button>
+          <el-button
+            v-if="budgetPaused"
+            type="warning"
+            plain
+            :disabled="!latestRun?.id || budgetExtendLoading"
+            :loading="budgetExtendLoading"
+            @click="openBudgetDialog"
+          >
+            Increase Budget & Continue
+          </el-button>
+          <el-button plain :disabled="!manualPushRequired" :loading="retryPushLoading" @click="retryLatestRunPush">
+            Retry Push
+          </el-button>
           <el-button plain :disabled="!forkEnabled" @click="openStrategyDialog">
             Strategy Lab
           </el-button>
@@ -73,6 +86,13 @@
           <div class="mission-chip-panel__value">{{ agentSnapshot.active }} active agents</div>
           <div class="mission-chip-panel__meta">
             {{ runtimeCounts.queued }} queued · {{ runtimeCounts.blocked }} blocked · {{ runtimeCounts.warnings }} warnings · {{ runtimeCounts.done }} done
+          </div>
+        </div>
+        <div v-if="linkedRequirementId" class="mission-chip-panel">
+          <div class="mission-chip-panel__label">Linked Requirement</div>
+          <div class="mission-chip-panel__value font-mono">{{ linkedRequirementId }}</div>
+          <div class="mission-chip-panel__meta">
+            Health {{ linkedRequirementHealth ?? "—" }} · Retries {{ linkedRequirementRetries }} · Unresolved {{ linkedRequirementUnresolved }}
           </div>
         </div>
       </div>
@@ -119,9 +139,57 @@
       class="shadow-sm"
     />
 
+    <el-alert
+      v-if="manualPushRequired"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="Remote push needs manual follow-up"
+      :description="manualPushHint"
+      class="shadow-sm"
+    />
+    <el-alert
+      v-if="budgetPaused"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="Run paused for budget approval"
+      :description="budgetWarningHint"
+      class="shadow-sm"
+    />
+    <div v-if="manualPushRequired" class="mission-inline-actions">
+      <el-select v-model="retryPushStrategy" size="small" class="mission-inline-select">
+        <el-option label="Runtime Default" value="runtime_default" />
+        <el-option label="GitHub App" value="github_app" />
+        <el-option label="SSH" value="ssh" />
+        <el-option label="Public HTTPS" value="public_https" />
+      </el-select>
+      <el-button size="small" plain @click="copyManualPushCommands">Copy Commands</el-button>
+    </div>
+    <pre v-if="manualPushRequired" class="mission-inline-code">{{ manualPushCommands }}</pre>
+
     <div v-if="error" class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
       {{ error }}
     </div>
+    <section v-if="importedReferences.length" class="premium-card mission-panel p-5">
+      <div class="text-sm uppercase tracking-wide text-slate-400">Imported References</div>
+      <div class="mt-2 text-xs text-slate-500">Governed external knowledge linked into runtime context.</div>
+      <div class="mt-3 space-y-2">
+        <div v-for="ref in importedReferences" :key="ref.id" class="mission-subcard p-3 text-sm">
+          <div class="font-medium text-slate-900">{{ ref.label || ref.type }}</div>
+          <a :href="ref.uri" target="_blank" rel="noreferrer" class="break-all text-sky-700 underline">{{ ref.uri }}</a>
+          <div class="mt-1 text-xs text-slate-500">
+            {{ ref.domain || "unknown domain" }} · imported {{ formatTimestamp(ref.imported_at || ref.created_at) }}
+          </div>
+          <div class="mt-1 text-xs text-slate-500">
+            trust {{ ref.trust_score ?? "—" }} · freshness {{ ref.freshness_score ?? "—" }} · used {{ ref.used_in_execution_count || 0 }}x
+          </div>
+          <div class="mt-1 text-xs text-slate-500">
+            req {{ ref.linked_requirement_id || "—" }} · run {{ shortRunId(ref.linked_run_id) }} · work item {{ shortRunId(ref.linked_work_item_id) }}
+          </div>
+        </div>
+      </div>
+    </section>
 
     <section v-if="project" class="surface-grid md:grid-cols-2 xl:grid-cols-4">
       <MetricCard label="Project Stage" :value="currentStage" :detail="`Project: ${project.name}`">
@@ -773,6 +841,60 @@
           </div>
           <el-tag effect="light" type="info">{{ intakeItems.length }} item{{ intakeItems.length === 1 ? "" : "s" }}</el-tag>
         </div>
+        <div class="mt-4 mission-subcard p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold text-slate-900">Vision Intake</div>
+              <div class="text-xs text-slate-500">Paste or drop screenshot + short goal to create a tracked codex run.</div>
+            </div>
+            <el-tag size="small" effect="light" type="success">codex</el-tag>
+          </div>
+          <el-input
+            v-model="visionGoalText"
+            class="mt-3"
+            type="textarea"
+            :rows="3"
+            placeholder="Make hero image full-width background on homepage"
+            @paste="onVisionPaste"
+          />
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <el-button size="small" plain @click="openVisionFilePicker">Add Screenshot</el-button>
+            <el-switch v-model="visionAutoStart" inline-prompt active-text="Auto Start" inactive-text="Manual" />
+            <el-switch v-model="visionAutoDeploy" inline-prompt active-text="Auto Deploy" inactive-text="No Deploy" />
+          </div>
+          <input
+            ref="visionFileInput"
+            class="hidden"
+            type="file"
+            accept="image/*"
+            multiple
+            @change="onVisionFileInput"
+          />
+          <div
+            class="mt-3 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-xs text-slate-500"
+            @dragover.prevent
+            @drop="onVisionDrop"
+          >
+            Drop screenshots here or paste directly into the goal box.
+          </div>
+          <div v-if="visionScreenshots.length" class="mt-3 space-y-2">
+            <div
+              v-for="(item, index) in visionScreenshots"
+              :key="`${item.filename}-${index}`"
+              class="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600"
+            >
+              <div class="truncate">
+                {{ item.filename }} · {{ Math.max(1, Math.round(item.size_bytes / 1024)) }} KB
+              </div>
+              <el-button size="small" text type="danger" @click="removeVisionScreenshot(index)">Remove</el-button>
+            </div>
+          </div>
+          <div class="mt-3 flex justify-end">
+            <el-button type="primary" size="small" :disabled="!visionReady" :loading="visionSubmitting" @click="submitVisionRun">
+              Create Vision Run
+            </el-button>
+          </div>
+        </div>
         <div v-if="intakeItems.length" class="mt-4 grid gap-3">
           <div
             v-for="item in intakeItems"
@@ -1289,7 +1411,7 @@
 
     <ExecutionTimeline
       :logs="timelineLogs"
-      :tasks="displayWorkItems"
+      :tasks="displayWorkItemsDeduped"
       :current-stage="currentStage"
       :run-status="latestRun?.status || 'IDLE'"
       :run-id="latestRun?.id"
@@ -1307,12 +1429,21 @@
           </el-tag>
         </div>
         <el-table
-          v-if="displayWorkItems.length"
-          :data="displayWorkItems"
+          v-if="displayWorkItemsDeduped.length"
+          :data="displayWorkItemsDeduped"
           class="mt-4"
           style="width: 100%"
         >
-          <el-table-column prop="title" label="Step" min-width="220" />
+          <el-table-column label="Step" min-width="260">
+            <template #default="{ row }">
+              <div class="flex flex-wrap items-center gap-2">
+                <span>{{ row.title }}</span>
+                <el-tag v-if="row.attempt_count > 1" size="small" type="info" effect="light">
+                  {{ row.attempt_count }} attempts
+                </el-tag>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="agent" label="Agent" min-width="140" />
           <el-table-column prop="executor" label="Executor" min-width="120" />
           <el-table-column label="Status" width="130">
@@ -1525,6 +1656,51 @@
           <el-button :disabled="forkLoading" @click="forkDialogOpen = false">Cancel</el-button>
           <el-button type="primary" :loading="forkLoading" :disabled="!forkEnabled" @click="submitForkRun">
             Fork Run
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="budgetDialogOpen" title="Increase Budget & Continue" width="520px">
+      <div class="space-y-4">
+        <div class="text-sm text-slate-600">
+          This run is paused due to budget exhaustion. Approve additional budget to continue execution.
+        </div>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">Additional Tokens</span>
+          <input
+            v-model.number="budgetAdditionalTokens"
+            type="number"
+            min="1"
+            step="1000"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          />
+        </label>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">Additional Cost (cents)</span>
+          <input
+            v-model.number="budgetAdditionalCostCents"
+            type="number"
+            min="0.01"
+            step="0.01"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          />
+        </label>
+        <label class="space-y-1 text-sm text-slate-700">
+          <span class="block font-medium text-slate-800">Reason</span>
+          <input
+            v-model="budgetExtensionReason"
+            type="text"
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Operator approval reason"
+          />
+        </label>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <el-button :disabled="budgetExtendLoading" @click="budgetDialogOpen = false">Cancel</el-button>
+          <el-button type="warning" :loading="budgetExtendLoading" @click="approveBudgetExtension">
+            Approve & Continue
           </el-button>
         </div>
       </template>
@@ -2120,12 +2296,20 @@
             {{ createPrResult.pull_request_url }}
           </a>
         </div>
+        <div v-if="createPrBlockingReason" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          {{ createPrBlockingReason }}
+        </div>
         <div v-if="createPrError" class="text-sm text-rose-600">{{ createPrError }}</div>
       </div>
       <template #footer>
         <div class="flex justify-end gap-2">
           <el-button :disabled="createPrLoading" @click="createPrDialogOpen = false">Cancel</el-button>
-          <el-button type="primary" :loading="createPrLoading" :disabled="!createPrReady" @click="submitCreatePr">
+          <el-button
+            type="primary"
+            :loading="createPrLoading"
+            :disabled="!createPrReady || Boolean(createPrResult?.pull_request_url)"
+            @click="submitCreatePr"
+          >
             Create PR
           </el-button>
         </div>
@@ -2157,6 +2341,7 @@ import {
   compareRuns,
   createApproval,
   createRun,
+  createVisionRun,
   createRunStrategies,
   createRunPullRequest,
   deleteRunPreview,
@@ -2181,6 +2366,8 @@ import {
   listWorkItems,
   patchProjectContract,
   reportRunIssue,
+  extendRunBudget,
+  retryRunPush,
   resumeRun,
   updateRunStatus,
 } from "../api/lifecycle";
@@ -2242,7 +2429,7 @@ const previewLaunchError = ref("");
 const forkDialogOpen = ref(false);
 const forkLoading = ref(false);
 const forkError = ref("");
-const forkExecutor = ref("dummy");
+const forkExecutor = ref("codex");
 const forkBranchName = ref("");
 const forkNotes = ref("");
 const forkStartNow = ref(true);
@@ -2275,12 +2462,25 @@ const runMemoryLoading = ref(false);
 const runMemoryError = ref("");
 const runMemoryResult = ref<any | null>(null);
 const intakeRunLoadingId = ref("");
+const visionGoalText = ref("");
+const visionAutoStart = ref(true);
+const visionAutoDeploy = ref(false);
+const visionSubmitting = ref(false);
+const visionScreenshots = ref<Array<{ filename: string; content_type: string; data_base64: string; size_bytes: number }>>([]);
+const visionFileInput = ref<HTMLInputElement | null>(null);
 const replayDialogOpen = ref(false);
 const replayLoading = ref(false);
 const replayError = ref("");
 const replayResult = ref<any | null>(null);
 const replayRunId = ref("");
 const resumeLoading = ref(false);
+const budgetExtendLoading = ref(false);
+const budgetDialogOpen = ref(false);
+const budgetAdditionalTokens = ref(20000);
+const budgetAdditionalCostCents = ref(25);
+const budgetExtensionReason = ref("Operator approved from Mission Control");
+const retryPushLoading = ref(false);
+const retryPushStrategy = ref("runtime_default");
 const runNarrativeLoading = ref(false);
 const runNarrativeError = ref("");
 const runNarrative = ref<any | null>(null);
@@ -2291,6 +2491,17 @@ const projectContractActionError = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
 const latestRun = computed(() => runs.value[0] || null);
+const linkedRequirementId = computed(
+  () =>
+    latestRun.value?.summary?.requirement_id ||
+    (Array.isArray(latestRun.value?.summary?.requirement_ids) ? latestRun.value?.summary?.requirement_ids[0] : null) ||
+    null
+);
+const linkedRequirementHealth = computed(() => latestRun.value?.summary?.requirement_context_pack?.snapshot?.intelligence?.health_score ?? null);
+const linkedRequirementRetries = computed(() => latestRun.value?.summary?.requirement_context_pack?.snapshot?.intelligence?.retry_count ?? 0);
+const linkedRequirementUnresolved = computed(
+  () => latestRun.value?.summary?.requirement_context_pack?.snapshot?.intelligence?.unresolved_count ?? 0
+);
 const hasRun = computed(() => Boolean(latestRun.value?.id));
 const forkEnabled = computed(() => Boolean(latestRun.value?.id));
 const resumeEnabled = computed(() => Boolean(latestRun.value?.id && latestRun.value?.summary?.resume_state?.can_resume));
@@ -2298,6 +2509,39 @@ const compareEnabled = computed(() => runs.value.length >= 2);
 const currentStage = computed(() => project.value?.status || "UNKNOWN");
 const lifecycleWarnings = computed<string[]>(() => lifecycleScore.value?.warnings || []);
 const cancelEnabled = computed(() => ["QUEUED", "RUNNING"].includes(latestRun.value?.status || ""));
+const budgetPaused = computed(
+  () =>
+    String(latestRun.value?.status || "").toUpperCase() === "PAUSED"
+    && String(latestRun.value?.summary?.budget_pause?.reason || "").toLowerCase() === "run_budget_exhausted"
+);
+const manualPushRequired = computed(
+  () => Boolean(latestRun.value?.id && latestRun.value?.summary?.delivery_manual_push_required)
+);
+const budgetWarningHint = computed(() => {
+  const budget = latestRun.value?.summary?.execution_contract?.budget || {};
+  const remainingTokens = typeof budget.remaining_tokens === "number" ? budget.remaining_tokens : "—";
+  const remainingCost = typeof budget.remaining_cost_cents === "number" ? budget.remaining_cost_cents : "—";
+  return `Run paused because budget was exhausted. Remaining tokens: ${remainingTokens}. Remaining cost cents: ${remainingCost}.`;
+});
+const budgetTelemetry = computed(() => {
+  const budget = latestRun.value?.summary?.execution_contract?.budget || {};
+  return {
+    maxTokens: Number(budget.max_tokens || 0),
+    usedTokens: Number(budget.used_tokens || 0),
+    remainingTokens: Number(budget.remaining_tokens || 0),
+    maxCostCents: Number(budget.max_cost_cents || 0),
+    usedCostCents: Number(budget.used_cost_cents || 0),
+    remainingCostCents: Number(budget.remaining_cost_cents || 0),
+  };
+});
+const manualPushHint = computed(
+  () => String(latestRun.value?.summary?.remote_branch_push_error || "Push failed due to repository credentials or permissions.")
+);
+const manualPushCommands = computed(() => {
+  const repoPath = String(latestRun.value?.repo_path || "<repo_path>");
+  const branch = String(latestRun.value?.branch_name || `run/${String(latestRun.value?.id || "").slice(0, 8)}`);
+  return `git -C ${repoPath} status\ngit -C ${repoPath} push origin ${branch}`;
+});
 const latestErrorHint = computed(() => {
   const erroredItem = workItems.value.find((item) => item.last_error);
   if (erroredItem?.last_error) return String(erroredItem.last_error);
@@ -2320,6 +2564,7 @@ const similarRunMatches = computed(() =>
   (runMemoryResult.value?.matches || []).filter((match: any) => match.run_id !== latestRun.value?.id)
 );
 const intakeItems = computed(() => missionOverview.value?.work_intake || []);
+const visionReady = computed(() => Boolean(projectId.value && visionGoalText.value.trim() && visionScreenshots.value.length));
 const recentRunCards = computed(() => missionOverview.value?.recent_runs || []);
 const latestChangeImpact = computed(() => missionOverview.value?.latest_change_impact || null);
 const previewsAndPrs = computed(() => missionOverview.value?.previews_and_prs || null);
@@ -2348,10 +2593,25 @@ const previewRunId = computed(
 const strategyLearning = computed(() => missionOverview.value?.strategy_learning || []);
 const systemInsights = computed(() => missionOverview.value?.system_insights || null);
 const violationInsights = computed(() => missionOverview.value?.violation_insights || null);
+const importedReferences = computed(() => missionOverview.value?.imported_references || []);
 const latestArtifactApproval = computed(() => createPrApprovals.value[0] || null);
 const latestArtifactApprovalStatus = computed(() => latestArtifactApproval.value?.status || null);
+const createPrBlockingReason = computed(() => {
+  if (!selectedPrArtifact.value) return "Select a patch artifact before creating a pull request.";
+  if (latestArtifactApprovalStatus.value !== "APPROVED") {
+    return "Approve this patch before creating a pull request.";
+  }
+  const provider = String(previewsAndPrs.value?.provider || "").toLowerCase();
+  if (provider === "github") {
+    const env = executionConsole.value?.environment;
+    if (!env?.github_app_id_present || !env?.github_private_key_present) {
+      return "GitHub App integration is not configured. Set GITHUB_APP_ID and GITHUB_PRIVATE_KEY in API runtime env.";
+    }
+  }
+  return "";
+});
 const createPrReady = computed(
-  () => Boolean(selectedPrArtifact.value) && latestArtifactApprovalStatus.value === "APPROVED"
+  () => Boolean(selectedPrArtifact.value) && latestArtifactApprovalStatus.value === "APPROVED" && !createPrBlockingReason.value
 );
 const comparisonHeadlineLines = computed(() => {
   const result = compareResult.value;
@@ -2430,9 +2690,39 @@ const displayWorkItems = computed(() =>
       started_at: wi.started_at,
       finished_at: wi.finished_at,
       last_error: wi.last_error,
+      work_item_type: wi.type,
     };
   })
 );
+
+function normalizeWorkItemTitleKey(title: string) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const displayWorkItemsDeduped = computed(() => {
+  const deduped: Array<any> = [];
+  const byKey = new Map<string, number>();
+  displayWorkItems.value.forEach((item) => {
+    const key = `${item.work_item_type || ""}::${normalizeWorkItemTitleKey(item.title)}`;
+    const existingIndex = byKey.get(key);
+    if (existingIndex === undefined) {
+      deduped.push({ ...item, attempt_count: 1 });
+      byKey.set(key, deduped.length - 1);
+      return;
+    }
+    const existing = deduped[existingIndex];
+    deduped[existingIndex] = {
+      ...existing,
+      ...item,
+      attempt_count: (existing.attempt_count || 1) + 1,
+      title: existing.title,
+    };
+  });
+  return deduped;
+});
 
 const displayWorkItemMap = computed(
   () => new Map(displayWorkItems.value.map((item) => [item.task_id, item]))
@@ -2454,10 +2744,10 @@ const timelineLogs = computed(() =>
 );
 
 const agentRows = computed(() =>
-  displayWorkItems.value.map((item) => ({
+  displayWorkItemsDeduped.value.map((item) => ({
     name: item.title,
     status: panelStatusFor(item.rawStatus, item.blocking),
-    taskCount: 1,
+    taskCount: item.attempt_count || 1,
   }))
 );
 
@@ -2482,7 +2772,7 @@ const runtimeCounts = computed(() => {
     warnings: 0,
     canceled: 0,
   };
-  displayWorkItems.value.forEach((wi) => {
+  displayWorkItemsDeduped.value.forEach((wi) => {
     if (wi.status === "QUEUED") counts.queued += 1;
     else if (wi.status === "CLAIMED" || wi.status === "RUNNING") counts.running += 1;
     else if (wi.status === "DONE") counts.done += 1;
@@ -2567,7 +2857,7 @@ const latestLogMessageByTask = computed(() => {
   return map;
 });
 const workbenchTasks = computed(() =>
-  displayWorkItems.value.map((item) => {
+  displayWorkItemsDeduped.value.map((item) => {
     const relatedArtifacts = latestArtifacts.value
       .filter((artifact) => artifact.work_item_id === item.task_id)
       .map((artifact) => (artifact.type === "git_diff" ? "patch.diff" : shortenUri(artifact.uri)))
@@ -2692,6 +2982,11 @@ function resetState() {
   runMemoryError.value = "";
   runMemoryResult.value = null;
   intakeRunLoadingId.value = "";
+  visionGoalText.value = "";
+  visionAutoStart.value = true;
+  visionAutoDeploy.value = false;
+  visionSubmitting.value = false;
+  visionScreenshots.value = [];
   replayDialogOpen.value = false;
   replayLoading.value = false;
   replayError.value = "";
@@ -3049,12 +3344,104 @@ function pollIntervalMs() {
   return hidden ? 10000 : 6000;
 }
 
+function openVisionFilePicker() {
+  visionFileInput.value?.click();
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const marker = "base64,";
+      const idx = result.indexOf(marker);
+      if (idx < 0) {
+        reject(new Error("Failed to parse pasted image."));
+        return;
+      }
+      resolve(result.slice(idx + marker.length));
+    };
+    reader.onerror = () => reject(new Error("Failed to read image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addVisionFile(file: File) {
+  if (!file.type.startsWith("image/")) return;
+  const data_base64 = await fileToBase64(file);
+  visionScreenshots.value.push({
+    filename: file.name || `screenshot-${visionScreenshots.value.length + 1}.png`,
+    content_type: file.type || "image/png",
+    data_base64,
+    size_bytes: file.size || 0,
+  });
+}
+
+async function onVisionFileInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  for (const file of files) {
+    await addVisionFile(file);
+  }
+  if (input) input.value = "";
+}
+
+async function onVisionDrop(event: DragEvent) {
+  event.preventDefault();
+  const files = Array.from(event.dataTransfer?.files || []);
+  for (const file of files) {
+    await addVisionFile(file);
+  }
+}
+
+async function onVisionPaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files || []);
+  if (!files.length) return;
+  for (const file of files) {
+    await addVisionFile(file);
+  }
+}
+
+function removeVisionScreenshot(index: number) {
+  visionScreenshots.value.splice(index, 1);
+}
+
+async function submitVisionRun() {
+  if (!projectId.value || !visionReady.value) return;
+  visionSubmitting.value = true;
+  overviewError.value = "";
+  try {
+    const response = await createVisionRun({
+      project_id: projectId.value,
+      goal_text: visionGoalText.value.trim(),
+      screenshots: visionScreenshots.value.map((item) => ({
+        filename: item.filename,
+        content_type: item.content_type,
+        data_base64: item.data_base64,
+      })),
+      page_url: typeof window !== "undefined" ? window.location.href : null,
+      preferred_executor: "codex",
+      auto_start: visionAutoStart.value,
+      auto_deploy: visionAutoDeploy.value,
+      metadata: { source_surface: "mission_control" },
+    });
+    visionGoalText.value = "";
+    visionScreenshots.value = [];
+    ElMessage.success(`Vision run created: task ${response.task_id}`);
+    await loadAll();
+  } catch (err: any) {
+    overviewError.value = err?.message || "Failed to create vision run.";
+  } finally {
+    visionSubmitting.value = false;
+  }
+}
+
 async function startRunFromIntake(item: any) {
   if (!projectId.value || cancelEnabled.value) return;
   intakeRunLoadingId.value = item.id;
   overviewError.value = "";
   try {
-    const executor = previewsAndPrs.value?.repository_connected ? "codex" : "dummy";
+    const executor = "codex";
     await createRun(projectId.value, executor);
     await loadAll();
   } catch (err: any) {
@@ -3090,11 +3477,76 @@ async function resumeLatestRun() {
   }
 }
 
+function openBudgetDialog() {
+  if (!latestRun.value?.id || budgetExtendLoading.value) return;
+  const b = budgetTelemetry.value;
+  const tokenGap = Math.max(0, b.usedTokens - b.maxTokens);
+  const costGap = Math.max(0, b.usedCostCents - b.maxCostCents);
+  const tokenBuffer = Math.max(5000, Math.round(Math.max(b.maxTokens, b.usedTokens, 10000) * 0.2));
+  const costBuffer = Math.max(10, Math.round(Math.max(b.maxCostCents, b.usedCostCents, 25) * 0.2 * 100) / 100);
+  budgetAdditionalTokens.value = Math.max(1000, tokenGap + tokenBuffer);
+  budgetAdditionalCostCents.value = Math.max(1, Math.round((costGap + costBuffer) * 100) / 100);
+  budgetDialogOpen.value = true;
+}
+
+async function approveBudgetExtension() {
+  if (!latestRun.value?.id || budgetExtendLoading.value) return;
+  if (!Number.isFinite(budgetAdditionalTokens.value) || budgetAdditionalTokens.value <= 0) {
+    ElMessage.warning("Additional tokens must be greater than 0.");
+    return;
+  }
+  if (!Number.isFinite(budgetAdditionalCostCents.value) || budgetAdditionalCostCents.value <= 0) {
+    ElMessage.warning("Additional cost must be greater than 0.");
+    return;
+  }
+  budgetExtendLoading.value = true;
+  error.value = "";
+  try {
+    await extendRunBudget(latestRun.value.id, {
+      additional_tokens: Math.round(budgetAdditionalTokens.value),
+      additional_cost_cents: Number(budgetAdditionalCostCents.value),
+      auto_resume: true,
+      reason: budgetExtensionReason.value?.trim() || "Operator approved from Mission Control",
+    });
+    budgetDialogOpen.value = false;
+    await loadAll();
+    ElMessage.success("Budget extended. Run resumed.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to extend budget.";
+  } finally {
+    budgetExtendLoading.value = false;
+  }
+}
+
+async function retryLatestRunPush() {
+  if (!latestRun.value?.id || !manualPushRequired.value) return;
+  retryPushLoading.value = true;
+  error.value = "";
+  try {
+    await retryRunPush(latestRun.value.id, { auth_strategy: retryPushStrategy.value || "runtime_default" });
+    await loadAll();
+    ElMessage.success("Branch push succeeded.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to push branch.";
+  } finally {
+    retryPushLoading.value = false;
+  }
+}
+
+async function copyManualPushCommands() {
+  try {
+    await navigator.clipboard.writeText(manualPushCommands.value);
+    ElMessage.success("Manual push commands copied.");
+  } catch {
+    ElMessage.warning("Clipboard unavailable. Copy commands from the panel.");
+  }
+}
+
 function openForkDialog() {
   if (!latestRun.value?.id) return;
   forkDialogOpen.value = true;
   forkError.value = "";
-  forkExecutor.value = latestRun.value.executor || "dummy";
+  forkExecutor.value = latestRun.value.executor || "codex";
   forkBranchName.value = latestRun.value.branch_name ? `${latestRun.value.branch_name}-fork` : "";
   forkNotes.value = "";
   forkStartNow.value = true;
@@ -3266,9 +3718,10 @@ async function submitImproveRun() {
   improveError.value = "";
   improveSuccessMessage.value = "";
   try {
+    const issueText = improveIssueText.value.trim();
     const result = await reportRunIssue(latestRun.value.id, {
-      goal: defaultImproveGoal(),
-      issue: improveIssueText.value.trim(),
+      goal: issueText || defaultImproveGoal(),
+      issue: issueText,
       files: parsedImproveFiles(),
       executor: improveExecutor.value || undefined,
       start_now: improveStartNow.value,
@@ -3515,7 +3968,11 @@ async function submitCreatePr() {
       body: createPrBody.value.trim() || undefined,
       branch_name: createPrBranch.value.trim() || undefined,
     });
-    await loadAll();
+    createPrLoading.value = false;
+    void loadAll().catch(() => {
+      // Keep PR success visible even if follow-up refresh fails.
+    });
+    return;
   } catch (err: any) {
     createPrError.value = err?.message || "Failed to create pull request.";
   } finally {
@@ -3822,3 +4279,28 @@ function artifactIntentText(explainResult: any) {
   return semantics.intent || summary || "Artifact recorded with lineage context.";
 }
 </script>
+
+<style scoped>
+.mission-inline-code {
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.mission-inline-actions {
+  margin-top: -0.25rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.mission-inline-select {
+  width: 180px;
+}
+</style>

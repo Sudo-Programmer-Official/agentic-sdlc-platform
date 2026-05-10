@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Project, Run, Task
+from app.db.models import Project, ProjectBlueprint, ProjectGenesisRun, Run, Task
 from app.db.session import SessionLocal
 from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
 from app.schemas.project_contract import ProjectContractSummaryOut
@@ -21,6 +21,9 @@ from app.services.architecture_profile_service import summarize_architecture_pro
 from app.services.event_log import record_event
 from app.services.project_contract_service import summarize_project_contract
 from app.services.repo_connector import get_project_repository
+from app.services.foundation_readiness import build_foundation_readiness
+from app.services.impact_analysis_loop import predict_pre_execution_impact
+from app.services.requirement_memory import build_requirement_context_pack, compress_requirement_memory
 from app.services.run_resume import capture_run_checkpoint, sync_run_resume_state
 from app.services.task_branching import clean_branch_value, resolve_task_branch_plan
 from app.services.workspace_supervisor import ensure_run_workspace
@@ -83,6 +86,8 @@ def _build_task_run_summary(task: Task) -> dict[str, object]:
         "task_id": str(task.id),
         "task_title": title,
         "task_description": description,
+        "requirement_id": task.requirement_id or (task.derived_from_requirement_ids[0] if isinstance(task.derived_from_requirement_ids, list) and task.derived_from_requirement_ids else None),
+        "requirement_ids": task.derived_from_requirement_ids if isinstance(task.derived_from_requirement_ids, list) else None,
         "task_source": task.source,
         "task_branch_strategy": task.branch_strategy,
         "task_base_branch": clean_branch_value(task.base_branch),
@@ -181,25 +186,44 @@ async def _fail_run_for_workspace_error(
     actor_type: str,
     actor_id: str | None,
 ) -> None:
+    settings = get_settings()
     previous = run.status
-    run.status = "FAILED"
+    target_status = "COMPLETED" if settings.runtime_never_fail_runs else "FAILED"
+    run.status = target_status
     run.finished_at = run.finished_at or datetime.now(timezone.utc)
+    if settings.runtime_never_fail_runs:
+        summary = dict(run.summary or {})
+        summary["degraded_completion"] = True
+        summary["degraded_reason"] = "workspace_prepare_failed"
+        summary["workspace_error"] = run.workspace_error
+        run.summary = summary
     session.add(run)
     await record_event(
         session,
         project_id=run.project_id,
         run_id=run.id,
-        event_type="RUN_FAILED",
+        event_type="RUN_DEGRADED" if settings.runtime_never_fail_runs else "RUN_FAILED",
         actor_type=actor_type,
         actor_id=actor_id,
         tenant_id=run.tenant_id,
         payload={
             "previous": previous,
-            "new": "FAILED",
+            "new": target_status,
             "workspace_status": run.workspace_status,
             "workspace_error": run.workspace_error,
         },
     )
+    if settings.runtime_never_fail_runs:
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="RUN_COMPLETED",
+            actor_type=actor_type,
+            actor_id=actor_id,
+            tenant_id=run.tenant_id,
+            payload={"final_status": "COMPLETED", "degraded": True, "reason": "workspace_prepare_failed"},
+        )
     log.warning(
         "Run failed during launch due to workspace preparation error run_id=%s project_id=%s executor=%s workspace_status=%s workspace_error=%s",
         run.id,
@@ -215,10 +239,11 @@ async def launch_run_for_project(
     *,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
-    executor_name: str = "dummy",
+    executor_name: str = "codex",
     task_id: uuid.UUID | None = None,
     actor_type: str = "USER",
     actor_id: str | None = None,
+    run_kind: str | None = None,
     schedule: bool = True,
 ) -> Run:
     project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
@@ -239,6 +264,26 @@ async def launch_run_for_project(
         if selected_task is None:
             raise ValueError("Task not found")
         run_summary = _build_task_run_summary(selected_task)
+
+    blueprint = await session.scalar(
+        select(ProjectBlueprint)
+        .where(ProjectBlueprint.project_id == project_id, ProjectBlueprint.tenant_id == tenant_id)
+        .order_by(ProjectBlueprint.created_at.desc())
+    )
+    is_genesis_setup = (run_kind or "").strip().lower() in {"genesis", "genesis_setup", "setup"}
+    if selected_task is not None:
+        is_genesis_setup = is_genesis_setup or selected_task.source == "genesis" or selected_task.source_type == "genesis_setup"
+    if blueprint is not None and blueprint.readiness_enforced and not is_genesis_setup:
+        latest_genesis = await session.scalar(
+            select(ProjectGenesisRun)
+            .where(ProjectGenesisRun.project_id == project_id, ProjectGenesisRun.tenant_id == tenant_id)
+            .order_by(ProjectGenesisRun.created_at.desc())
+        )
+        if latest_genesis is not None:
+            validation = latest_genesis.validation if isinstance(latest_genesis.validation, dict) else {}
+            readiness_status = str(validation.get("status") or "").upper()
+            if readiness_status != "READY":
+                raise ValueError("Foundation readiness is not READY; complete setup tasks before launching feature runs.")
 
     active_statuses = ("QUEUED", "RUNNING")
     existing_active = await session.scalar(
@@ -286,11 +331,19 @@ async def launch_run_for_project(
         project_contract=project_contract_payload,
         plan_snapshot=None,
     ).to_dict()
+    run_summary["impact_prediction"] = predict_pre_execution_impact(
+        run_summary=run_summary,
+        architecture_profile=architecture_payload,
+    )
 
     project_repo = await get_project_repository(session, project_id=project_id, tenant_id=tenant_id)
     default_repo_branch = project_repo.default_branch if project_repo else None
     if selected_task is not None:
         branch_plan = resolve_task_branch_plan(selected_task, default_repo_branch)
+    requirement_id = None
+    if isinstance(run_summary, dict) and isinstance(run_summary.get("requirement_id"), str):
+        candidate = str(run_summary.get("requirement_id")).strip()
+        requirement_id = candidate or None
     run = Run(
         project_id=project_id,
         tenant_id=tenant_id,
@@ -298,6 +351,7 @@ async def launch_run_for_project(
         executor=executor_name.lower(),
         summary=run_summary,
         branch_name=branch_plan.actual_branch_name if branch_plan else None,
+        requirement_id=requirement_id,
     )
     session.add(run)
     await session.flush()
@@ -316,6 +370,25 @@ async def launch_run_for_project(
         repo_auth_strategy=project_repo.auth_strategy if project_repo else None,
     )
     if isinstance(run.summary, dict):
+        if selected_task is not None:
+            req_id = selected_task.requirement_id or (
+                selected_task.derived_from_requirement_ids[0]
+                if isinstance(selected_task.derived_from_requirement_ids, list) and selected_task.derived_from_requirement_ids
+                else None
+            )
+            if req_id:
+                try:
+                    memory = await compress_requirement_memory(
+                        session,
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        requirement_id=req_id,
+                    )
+                    run.summary["requirement_context_pack"] = build_requirement_context_pack(memory)
+                except Exception:
+                    run.summary["requirement_context_pack"] = {
+                        "requirement_id": req_id,
+                    }
         run.summary = {
             **run.summary,
             "task_branch_strategy": branch_plan.strategy if branch_plan else "auto",

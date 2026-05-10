@@ -119,7 +119,7 @@ def test_execution_budget_ledger_blocks_when_recovery_reserve_is_exhausted():
     ledger = ExecutionBudgetLedger(
         max_tokens=20_000,
         max_cost_cents=30.0,
-        used_cost_cents=31.0,
+        used_cost_cents=42.2,
         recovery_reserve_cost_cents=12.0,
         used_recovery_cost_cents=11.7,
     )
@@ -129,6 +129,22 @@ def test_execution_budget_ledger_blocks_when_recovery_reserve_is_exhausted():
     assert ledger.budget_mode == "BLOCKED"
     assert ledger.escalation_reason == "recovery_budget_exhausted"
     assert ledger.completion_token_cap == 0
+
+
+def test_execution_budget_ledger_falls_back_to_main_budget_when_recovery_reserve_is_exhausted():
+    ledger = ExecutionBudgetLedger(
+        max_tokens=20_000,
+        max_cost_cents=40.0,
+        used_cost_cents=34.0,
+        recovery_reserve_cost_cents=12.0,
+        used_recovery_cost_cents=11.7,
+    )
+
+    ledger.refresh(recovery_mode=True)
+
+    assert ledger.active_budget_partition == "main_fallback"
+    assert ledger.remaining_cost_cents == 6.0
+    assert ledger.budget_mode in {"NORMAL", "CONSTRAINED"}
 
 
 def test_build_execution_contract_scales_run_cost_budget_with_ai_backed_steps():

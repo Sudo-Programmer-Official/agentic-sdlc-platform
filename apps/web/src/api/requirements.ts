@@ -67,3 +67,29 @@ export async function fetchPlanHistory(projectId: string) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/plan/history`);
   return parseApiResponse(resp);
 }
+
+export async function fetchRequirementSummary(projectId: string, limit = 50, offset = 0) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/requirements/summary?${params.toString()}`);
+  return parseApiResponse(resp);
+}
+
+export function requirementSummaryExportUrl(projectId: string, format: "csv" | "json" = "csv") {
+  const params = new URLSearchParams({ format });
+  return `${API_BASE}/projects/${projectId}/requirements/summary/export?${params.toString()}`;
+}
+
+export async function fetchRequirementTimeline(projectId: string, requirementId: string, limit = 100, offset = 0) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  const encodedRequirement = encodeURIComponent(requirementId);
+  const resp = await fetch(
+    `${API_BASE}/projects/${projectId}/requirements/${encodedRequirement}/timeline?${params.toString()}`
+  );
+  return parseApiResponse(resp);
+}

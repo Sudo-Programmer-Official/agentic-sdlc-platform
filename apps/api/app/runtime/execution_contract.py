@@ -332,13 +332,27 @@ class ExecutionBudgetLedger:
         )
         effective_max_cost_cents = self.max_cost_cents
         self.active_budget_partition = "main"
+        fallback_to_main_budget = False
         if recovery_mode:
-            effective_max_cost_cents = self.max_cost_cents + self.recovery_reserve_cost_cents
-            self.active_budget_partition = "recovery"
+            recovery_remaining = round(max(0.0, self.recovery_reserve_cost_cents - self.used_recovery_cost_cents), 4)
+            main_remaining = round(max(0.0, self.max_cost_cents - self.used_cost_cents), 4)
+            if recovery_remaining <= background_budget_cents and main_remaining > background_budget_cents:
+                # Recovery reserve is exhausted, but we still have main-run budget.
+                # Fall back to main budget instead of hard-blocking recovery immediately.
+                fallback_to_main_budget = True
+                self.active_budget_partition = "main_fallback"
+                effective_max_cost_cents = self.max_cost_cents
+            else:
+                effective_max_cost_cents = self.max_cost_cents + self.recovery_reserve_cost_cents
+                self.active_budget_partition = "recovery"
         self.remaining_cost_cents = round(max(0.0, effective_max_cost_cents - self.used_cost_cents), 4)
         self.updated_at = _now_iso()
 
-        recovery_reserve_exhausted = recovery_mode and self.remaining_recovery_cost_cents <= background_budget_cents
+        recovery_reserve_exhausted = (
+            recovery_mode
+            and not fallback_to_main_budget
+            and self.remaining_recovery_cost_cents <= background_budget_cents
+        )
         if (
             self.remaining_tokens < max(256, economy_completion_tokens)
             or self.remaining_cost_cents <= background_budget_cents

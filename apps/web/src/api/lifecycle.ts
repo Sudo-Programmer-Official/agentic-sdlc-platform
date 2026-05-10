@@ -374,6 +374,78 @@ export async function fetchMissionControlOverview(projectId: string) {
   return parseApiResponse(resp);
 }
 
+export async function fetchProjectMemoryTimeline(
+  projectId: string,
+  params: {
+    limit?: number;
+    domain?: string;
+    severity?: string;
+    requirement_id?: string;
+    run_id?: string;
+  } = {}
+) {
+  const search = new URLSearchParams();
+  if (params.limit) search.set("limit", String(params.limit));
+  if (params.domain) search.set("domain", params.domain);
+  if (params.severity) search.set("severity", params.severity);
+  if (params.requirement_id) search.set("requirement_id", params.requirement_id);
+  if (params.run_id) search.set("run_id", params.run_id);
+  const qs = search.toString();
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/memory/timeline${qs ? `?${qs}` : ""}`);
+  return parseApiResponse(resp);
+}
+
+export async function backfillProjectMemoryTimeline(projectId: string, limit = 200) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/memory/timeline/backfill?limit=${encodeURIComponent(String(limit))}`, {
+    method: "POST",
+  });
+  return parseApiResponse(resp);
+}
+
+export async function materializeProjectMemorySummaries(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/memory/summaries/materialize`, {
+    method: "POST",
+  });
+  return parseApiResponse(resp);
+}
+
+export async function fetchProjectMemorySummaries(
+  projectId: string,
+  params: {
+    summary_type?: string;
+    limit?: number;
+  } = {}
+) {
+  const search = new URLSearchParams();
+  if (params.summary_type) search.set("summary_type", params.summary_type);
+  if (params.limit) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/memory/summaries${qs ? `?${qs}` : ""}`);
+  return parseApiResponse(resp);
+}
+
+export async function explainProjectMemory(
+  projectId: string,
+  params: {
+    requirement_id?: string;
+    run_id?: string;
+    limit?: number;
+  } = {}
+) {
+  const search = new URLSearchParams();
+  if (params.requirement_id) search.set("requirement_id", params.requirement_id);
+  if (params.run_id) search.set("run_id", params.run_id);
+  if (params.limit) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/memory/explain${qs ? `?${qs}` : ""}`);
+  return parseApiResponse(resp);
+}
+
+export async function fetchProjectUnderstanding(projectId: string) {
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/memory/project-understanding`);
+  return parseApiResponse(resp);
+}
+
 export async function fetchRepoMap(projectId: string, limit = 180) {
   const resp = await fetch(`${API_BASE}/projects/${projectId}/repo-map?limit=${encodeURIComponent(String(limit))}`);
   try {
@@ -659,6 +731,15 @@ export async function retryRunPush(runId: string, payload: { auth_strategy?: str
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function discardRun(runId: string) {
+  const resp = await fetch(`${API_BASE}/runs/${runId}/discard`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
   });
   return parseApiResponse(resp);
 }

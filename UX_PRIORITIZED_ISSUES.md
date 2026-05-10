@@ -31,6 +31,34 @@
 - Impact: scanning cost for repeat users.
 - Safe fix: grouped actions by phase (setup/planning/execution).
 
+## Design System Rollout (Documented Plan)
+1. Foundation tokens and brand primitives (2-4 days)
+- Scope: define color, typography, spacing, radius, shadow, and motion tokens.
+- Deliverables: `:root` CSS variables, token naming convention, base docs.
+- Outcome: all UI work references one canonical brand layer.
+
+2. Core reusable components (4-7 days)
+- Scope: buttons, cards, inputs, badges, alerts, nav blocks, section headers.
+- Deliverables: shared component classes/patterns + states (hover/focus/disabled/loading/error).
+- Outcome: consistent interaction and visual language across runs.
+
+3. Surface migration (3-6 days)
+- Scope: migrate homepage sections and mission-critical screens to token/component usage.
+- Guardrails: avoid raw hex values and ad-hoc spacing in feature patches.
+- Outcome: reduced variance between prompts and execution artifacts.
+
+4. Governance for Mission Control prompts (1-2 days)
+- Prompt contract:
+  - Use existing tokens/components first.
+  - No raw hex outside token file.
+  - No one-off spacing scales.
+  - Preserve accessibility contrast and keyboard focus states.
+- Outcome: run outputs stay brand-consistent even with varied prompt wording.
+
+5. Fast-start v0 option (3-5 days)
+- Scope: tokens + card/button/section-header primitives + prompt contract.
+- Outcome: immediate consistency improvement without waiting for full migration.
+
 ## Screenshot Evidence (Mission Control run table, 2026-05-09 capture)
 1. Progressive disclosure leak is visible
 - Evidence: search, run selection, build action, and dense status table are all equally prominent before a clear “recover this failed run” flow.

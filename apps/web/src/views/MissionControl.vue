@@ -1,5 +1,33 @@
 <template>
-  <div v-if="projectId" class="page-stack mission-control-page">
+  <div v-if="projectId" :class="['page-stack mission-control-page', `density-${densityMode}`]">
+    <section v-if="project && primaryActionCard" class="grid gap-4">
+      <div class="premium-card mission-panel mission-primary-top p-5">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div class="text-xs uppercase tracking-wide text-slate-400">Primary Action</div>
+            <div class="mt-1 text-base font-semibold text-slate-900">{{ primaryActionCard.title }}</div>
+            <div class="mt-1 text-sm text-slate-600">{{ primaryActionCard.description }}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <el-tag :type="primaryActionCard.tone" effect="light">{{ primaryActionCard.badge }}</el-tag>
+            <el-button plain @click="scrollToWorkIntake">
+              Open Work Intake
+            </el-button>
+            <el-button
+              v-if="previewsAndPrs?.preview_url"
+              plain
+              @click="openExternal(previewsAndPrs.preview_url)"
+            >
+              Open Preview
+            </el-button>
+            <el-button :type="primaryActionCard.buttonType" @click="handlePrimaryAction">
+              {{ primaryActionCard.buttonLabel }}
+            </el-button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="premium-hero mission-hero">
       <div class="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
         <div class="max-w-3xl">
@@ -27,7 +55,27 @@
             </span>
           </div>
         </div>
-        <div class="mission-hero__controls">
+        <div class="mission-hero__controls mission-subcard p-3">
+          <div class="mission-hero__controls-label">Run Actions</div>
+          <div class="mission-density-toggle">
+            <button
+              type="button"
+              class="topbar-chip"
+              :style="densityMode === 'compact' ? activeFilterStyle : undefined"
+              @click="densityMode = 'compact'"
+            >
+              Compact
+            </button>
+            <button
+              type="button"
+              class="topbar-chip"
+              :style="densityMode === 'comfortable' ? activeFilterStyle : undefined"
+              @click="densityMode = 'comfortable'"
+            >
+              Comfortable
+            </button>
+          </div>
+          <div class="mission-hero__controls-grid">
           <el-button :loading="loading" @click="loadAll">Refresh</el-button>
           <el-button plain :disabled="!forkEnabled" @click="openForkDialog">
             Fork Run
@@ -63,7 +111,17 @@
           <el-button type="danger" plain :disabled="!cancelEnabled" @click="cancelLatestRun">
             Cancel Run
           </el-button>
+          <el-button
+            type="danger"
+            plain
+            :disabled="!latestRun?.id || discardLoading"
+            :loading="discardLoading"
+            @click="discardLatestRunWorkspace"
+          >
+            Discard Run
+          </el-button>
           <el-button @click="goToOverview">Project Overview</el-button>
+        </div>
         </div>
       </div>
       <div class="mission-hero__rail">
@@ -266,7 +324,7 @@
         </div>
         <div v-if="runNarrativeLoading" class="mt-4 text-sm text-slate-500">Building plan snapshot…</div>
         <div v-else-if="runNarrativeError" class="mt-4 text-sm text-rose-600">{{ runNarrativeError }}</div>
-          <div v-else-if="runNarrative" class="mt-4 space-y-4">
+          <div v-else-if="runNarrative" class="mt-4 space-y-4 mission-content-scroll">
             <div class="mission-subcard p-4">
               <div class="text-xs uppercase tracking-wide text-slate-400">Goal</div>
             <div class="mt-2 text-sm font-medium text-slate-900">
@@ -472,16 +530,27 @@
             <div class="text-sm uppercase tracking-wide text-slate-400">Reflections</div>
             <div class="text-xs text-slate-500">What happened, whether it matched plan, and what changed next.</div>
           </div>
-          <el-tag effect="light" type="info">{{ recentNarrativeReflections.length }} latest</el-tag>
+          <div class="flex items-center gap-2">
+            <el-tag effect="light" type="info">{{ reflectionsDisplay.length }} shown</el-tag>
+            <el-button
+              v-if="recentNarrativeReflections.length > reflectionsCollapsedCount"
+              plain
+              size="small"
+              @click="reflectionsExpanded = !reflectionsExpanded"
+            >
+              {{ reflectionsExpanded ? "Collapse" : "View all" }}
+            </el-button>
+          </div>
         </div>
         <div v-if="runNarrativeLoading" class="mt-4 text-sm text-slate-500">Summarizing latest run decisions…</div>
         <div v-else-if="runNarrativeError" class="mt-4 text-sm text-rose-600">{{ runNarrativeError }}</div>
-        <div v-else-if="recentNarrativeReflections.length" class="mt-4 space-y-3">
-          <div
-            v-for="reflection in recentNarrativeReflections"
-            :key="reflection.id"
-            class="mission-subcard p-4"
-          >
+        <div v-else-if="reflectionsDisplay.length" class="mt-4 mission-content-scroll">
+          <div class="space-y-3">
+            <div
+              v-for="reflection in reflectionsDisplay"
+              :key="reflection.id"
+              class="mission-subcard p-4"
+            >
             <div class="flex flex-wrap items-center justify-between gap-2">
               <div class="text-sm font-semibold text-slate-900">{{ reflection.title }}</div>
               <div class="flex flex-wrap items-center gap-2">
@@ -508,6 +577,7 @@
               <span v-if="reflection.files_touched?.length">Files: {{ reflection.files_touched.join(", ") }}</span>
             </div>
           </div>
+          </div>
         </div>
         <div v-else class="mt-4 text-sm text-slate-500">No reflection records are available yet.</div>
       </div>
@@ -528,7 +598,7 @@
         </div>
         <div v-if="runNarrativeLoading" class="mt-4 text-sm text-slate-500">Compacting current run state…</div>
         <div v-else-if="runNarrativeError" class="mt-4 text-sm text-rose-600">{{ runNarrativeError }}</div>
-        <div v-else-if="runNarrative" class="mt-4 space-y-4">
+        <div v-else-if="runNarrative" class="mt-4 space-y-4 mission-content-scroll">
           <div class="grid gap-3 sm:grid-cols-2">
             <div class="mission-subcard p-3 text-sm">
               <div class="text-xs uppercase tracking-wide text-slate-400">Current Step</div>
@@ -830,7 +900,7 @@
       />
     </section>
 
-    <div v-if="project" class="grid gap-4 xl:grid-cols-[1.4fr,1fr]">
+    <div id="work-intake" v-if="project" class="grid gap-4 xl:grid-cols-[1.4fr,1fr]">
       <div class="premium-card mission-panel p-6">
         <div class="flex items-center justify-between gap-3">
           <div>
@@ -916,6 +986,8 @@
                   <div><strong>Predicted files:</strong> {{ item.predicted_files.join(", ") || "—" }}</div>
                   <div><strong>Linked tasks:</strong> {{ item.related_task_count }}</div>
                   <div><strong>Confidence:</strong> {{ formatConfidence(item.confidence_score) }}</div>
+                  <div><strong>Source:</strong> {{ intakeSourceLabel(item) }}</div>
+                  <div><strong>Run:</strong> {{ shortRunId(intakeRunId(item)) }}</div>
                 </div>
                 <div v-if="item.suggested_plan.length" class="mt-3">
                   <div class="text-xs uppercase tracking-wide text-slate-400">Suggested Plan</div>
@@ -1014,22 +1086,26 @@
           </div>
           <el-tag effect="light" type="info">{{ recentRunCards.length }} recent</el-tag>
         </div>
-        <div v-if="recentRunCards.length" class="mt-4 grid gap-3">
-          <div
-            v-for="card in recentRunCards"
-            :key="card.run_id"
-            class="mission-subcard p-4"
-          >
+        <div v-if="recentRunCardsEnhanced.length" class="mt-4 mission-scroll-zone">
+          <div class="grid gap-3">
+            <div
+              v-for="card in recentRunCardsEnhanced"
+              :key="card.run_id"
+              class="mission-subcard p-4"
+            >
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div class="min-w-0 flex-1">
                 <div class="flex flex-wrap items-center gap-2">
                   <div class="font-mono text-sm text-slate-900">{{ card.run_id }}</div>
-                  <el-tag :type="runStatusTagType(card.status)" effect="light">{{ card.status }}</el-tag>
+                  <el-tag :type="runStatusTagType(card.outcome_status)" effect="light">{{ card.outcome_label }}</el-tag>
                   <el-tag v-if="card.approval_status" :type="approvalTagType(card.approval_status)" effect="light">
                     {{ card.approval_status }}
                   </el-tag>
                 </div>
                 <div class="mt-2 text-sm text-slate-600">{{ card.goal_text || "No goal summary recorded." }}</div>
+                <div v-if="card.next_action_hint" class="mt-2 text-xs text-slate-500">
+                  <strong>Next:</strong> {{ card.next_action_hint }}
+                </div>
                 <div class="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
                   <div><strong>Executor:</strong> {{ card.executor }}</div>
                   <div><strong>Branch:</strong> {{ card.branch_name || "—" }}</div>
@@ -1069,6 +1145,7 @@
               </div>
             </div>
           </div>
+          </div>
         </div>
         <div v-else class="mt-4 text-sm text-slate-500">No recent run summaries yet.</div>
       </div>
@@ -1104,6 +1181,42 @@
               Open
             </a>
           </div>
+          <div v-if="previewsAndPrs.preview_url" class="mission-preview-embed">
+            <div class="mission-preview-embed__top">
+              <div class="text-xs uppercase tracking-wide text-slate-400">Live Preview</div>
+              <div class="flex items-center gap-2">
+                <el-button
+                  size="small"
+                  plain
+                  :type="previewViewport === 'desktop' ? 'primary' : undefined"
+                  @click="previewViewport = 'desktop'"
+                >
+                  Desktop
+                </el-button>
+                <el-button
+                  size="small"
+                  plain
+                  :type="previewViewport === 'mobile' ? 'primary' : undefined"
+                  @click="previewViewport = 'mobile'"
+                >
+                  Mobile
+                </el-button>
+                <el-button size="small" plain @click="openExternal(previewsAndPrs.preview_url)">
+                  Open in New Tab
+                </el-button>
+              </div>
+            </div>
+            <div class="mission-preview-embed__viewport" :class="`is-${previewViewport}`">
+              <iframe
+                class="mission-preview-embed__frame"
+                :src="previewsAndPrs.preview_url"
+                title="Mission Control preview"
+                loading="lazy"
+                referrerpolicy="no-referrer"
+                sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+              />
+            </div>
+          </div>
           <div v-if="previewsAndPrs.frontend_url"><strong>Frontend:</strong> <a :href="previewsAndPrs.frontend_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.frontend_url }}</a></div>
           <div v-if="previewsAndPrs.backend_url"><strong>Backend:</strong> <a :href="previewsAndPrs.backend_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.backend_url }}</a></div>
           <div v-if="previewsAndPrs.frontend_log_path"><strong>Frontend log:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.frontend_log_path }}</span></div>
@@ -1114,6 +1227,9 @@
           </div>
           <div v-if="previewLaunchError" class="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             {{ previewLaunchError }}
+          </div>
+          <div v-if="previewLaunchInfo" class="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700">
+            {{ previewLaunchInfo }}
           </div>
           <div><strong>Patch size:</strong> {{ previewsAndPrs.file_count }} files · +{{ previewsAndPrs.additions }} / -{{ previewsAndPrs.deletions }}</div>
           <div>
@@ -1145,6 +1261,16 @@
               @click="startPreviewLaunch"
             >
               {{ previewsAndPrs.preview_url ? "Refresh Preview" : "Launch Preview" }}
+            </el-button>
+            <el-button
+              plain
+              size="small"
+              type="warning"
+              :loading="previewLaunchLoading"
+              :disabled="!previewRunId || !previewsAndPrs.profile_configured || previewsAndPrs.requires_verification"
+              @click="restartPreviewLaunch"
+            >
+              Restart Preview
             </el-button>
             <el-button
               plain
@@ -1184,6 +1310,42 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <div v-if="project" class="premium-card mission-panel p-6">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm uppercase tracking-wide text-slate-400">Project Evolution Timeline</div>
+          <div class="text-xs text-slate-500">Cross-domain memory stream for runs, recovery, requirements, and deployment signals.</div>
+        </div>
+        <el-button size="small" plain :loading="memoryTimelineLoading" @click="loadMemoryTimeline">Refresh</el-button>
+      </div>
+      <div v-if="memoryTimelineError" class="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+        {{ memoryTimelineError }}
+      </div>
+      <div v-else-if="memoryTimelineLoading" class="mt-4 text-sm text-slate-500">Loading timeline...</div>
+      <div v-else-if="memoryTimeline.length" class="mt-4 mission-scroll-zone">
+        <div class="space-y-2">
+          <div v-for="event in memoryTimeline" :key="event.id" class="mission-subcard px-3 py-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="text-sm font-semibold text-slate-900">{{ event.title }}</span>
+                  <el-tag size="small" effect="light" :type="memoryEventTagType(event.severity)">{{ event.severity }}</el-tag>
+                  <el-tag size="small" effect="light" type="info">{{ event.domain }}</el-tag>
+                </div>
+                <div class="mt-1 text-xs text-slate-500">{{ event.summary || "No summary provided." }}</div>
+                <div class="mt-1 text-[11px] text-slate-400">
+                  {{ formatTimestamp(event.event_at) }} · {{ event.event_type }}
+                  <span v-if="event.run_id"> · run {{ shortRunId(event.run_id) }}</span>
+                  <span v-if="event.requirement_id"> · req {{ event.requirement_id }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="mt-4 text-sm text-slate-500">No memory timeline events yet.</div>
     </div>
 
     <div v-if="project" class="grid gap-4 xl:grid-cols-3">
@@ -1446,6 +1608,14 @@
           </el-table-column>
           <el-table-column prop="agent" label="Agent" min-width="140" />
           <el-table-column prop="executor" label="Executor" min-width="120" />
+          <el-table-column label="Lineage" min-width="210">
+            <template #default="{ row }">
+              <div class="text-xs text-slate-700">{{ row.source_surface || "mission_control" }}</div>
+              <div class="font-mono text-xs text-slate-500">
+                task {{ shortRunId(row.task_id) }} · run {{ shortRunId(row.run_id) }}
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="Status" width="130">
             <template #default="{ row }">
               <el-tag :type="workItemStatusTagType(row.rawStatus, row.blocking)" effect="light">
@@ -1532,19 +1702,32 @@
             <div class="text-sm uppercase tracking-wide text-slate-400">Similar Past Runs</div>
             <div class="text-xs text-slate-500">Run memory suggestions based on the latest goal and failure signal.</div>
           </div>
-          <el-button plain size="small" :loading="runMemoryLoading" @click="loadSimilarRuns">Refresh</el-button>
+          <div class="flex items-center gap-2">
+            <el-button plain size="small" :loading="runMemoryLoading" @click="loadSimilarRuns">Refresh</el-button>
+            <el-button
+              v-if="similarRunMatches.length > similarCollapsedCount"
+              plain
+              size="small"
+              @click="similarExpanded = !similarExpanded"
+            >
+              {{ similarExpanded ? "Collapse" : "View all" }}
+            </el-button>
+          </div>
         </div>
         <div v-if="runMemoryLoading" class="mt-4 text-sm text-slate-500">Searching prior runs...</div>
-        <div v-else-if="similarRunMatches.length" class="mt-4 space-y-3">
-          <div
-            v-for="match in similarRunMatches"
-            :key="match.run_id"
-            class="mission-subcard p-4"
-          >
+        <div v-else-if="similarRunsDisplay.length" class="mt-4 mission-content-scroll">
+          <div class="space-y-3">
+            <div
+              v-for="match in similarRunsDisplay"
+              :key="match.run_id"
+              class="mission-subcard p-4"
+            >
             <div class="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div class="font-mono text-sm text-slate-900">{{ match.run_id }}</div>
-                <div class="text-xs text-slate-500">{{ match.goal || "No goal summary" }}</div>
+                <div class="text-xs text-slate-500 mission-line-clamp-3" :title="match.goal || 'No goal summary'">
+                  {{ match.goal || "No goal summary" }}
+                </div>
               </div>
               <div class="flex items-center gap-2">
                 <el-tag effect="light" type="info">Score {{ match.score.toFixed(1) }}</el-tag>
@@ -1565,6 +1748,7 @@
             <div v-if="match.files_changed.length" class="mt-2 text-xs text-slate-500">
               <strong>Changed:</strong> {{ match.files_changed.join(", ") }}
             </div>
+          </div>
           </div>
         </div>
         <div v-else class="mt-4 text-sm text-slate-500">No similar runs found yet.</div>
@@ -2344,11 +2528,13 @@ import {
   createVisionRun,
   createRunStrategies,
   createRunPullRequest,
+  discardRun,
   deleteRunPreview,
   explainArtifact,
   fetchArtifactDiff,
   fetchRunExecutionConsole,
   fetchMissionControlOverview,
+  fetchProjectMemoryTimeline,
   fetchRunNarrative,
   fetchRunStrategies,
   fetchHealth,
@@ -2375,6 +2561,7 @@ import { updateProjectContext } from "../state/projectContext";
 
 const route = useRoute();
 const router = useRouter();
+const DENSITY_STORAGE_KEY = "mission-control-density-mode";
 
 const WORK_ITEM_LABELS: Record<string, string> = {
   PLAN_DAG: "Planner Agent",
@@ -2390,6 +2577,9 @@ const project = ref<any | null>(null);
 const health = ref<any | null>(null);
 const lifecycleScore = ref<any | null>(null);
 const missionOverview = ref<any | null>(null);
+const memoryTimeline = ref<any[]>([]);
+const memoryTimelineLoading = ref(false);
+const memoryTimelineError = ref("");
 const runs = ref<any[]>([]);
 const workItems = ref<any[]>([]);
 const runEvents = ref<any[]>([]);
@@ -2426,6 +2616,8 @@ const createPrApprovalComment = ref("");
 const createPrApprovals = ref<any[]>([]);
 const previewLaunchLoading = ref(false);
 const previewLaunchError = ref("");
+const previewLaunchInfo = ref("");
+const previewViewport = ref<"desktop" | "mobile">("desktop");
 const forkDialogOpen = ref(false);
 const forkLoading = ref(false);
 const forkError = ref("");
@@ -2444,6 +2636,11 @@ const strategyLoading = ref(false);
 const strategyRefreshing = ref(false);
 const strategyErrorMessage = ref("");
 const strategyResult = ref<any | null>(null);
+const densityMode = ref<"compact" | "comfortable">("comfortable");
+const reflectionsExpanded = ref(false);
+const similarExpanded = ref(false);
+const reflectionsCollapsedCount = 3;
+const similarCollapsedCount = 3;
 const strategyGoal = ref("");
 const strategyErrorText = ref("");
 const strategyFilesInput = ref("");
@@ -2480,6 +2677,7 @@ const budgetAdditionalTokens = ref(20000);
 const budgetAdditionalCostCents = ref(25);
 const budgetExtensionReason = ref("Operator approved from Mission Control");
 const retryPushLoading = ref(false);
+const discardLoading = ref(false);
 const retryPushStrategy = ref("runtime_default");
 const runNarrativeLoading = ref(false);
 const runNarrativeError = ref("");
@@ -2490,7 +2688,22 @@ const projectContractStrictLoading = ref(false);
 const projectContractActionError = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
-const latestRun = computed(() => runs.value[0] || null);
+const canonicalRunId = computed(() => {
+  const statusPriority = ["RUNNING", "CLAIMED", "QUEUED", "PAUSED"];
+  const active = runs.value
+    .filter((run) => statusPriority.includes(String(run?.status || "").toUpperCase()))
+    .sort((a, b) => timestampScore(b) - timestampScore(a));
+  if (active[0]?.id) return active[0].id;
+  const hintRunId = previewsAndPrs.value?.run_id || latestChangeImpact.value?.run_id || "";
+  if (hintRunId) {
+    const hinted = runs.value.find((run) => run?.id === hintRunId);
+    if (hinted?.id) return hinted.id;
+  }
+  const fallback = [...runs.value].sort((a, b) => timestampScore(b) - timestampScore(a))[0];
+  return fallback?.id || "";
+});
+
+const latestRun = computed(() => runs.value.find((run) => run?.id === canonicalRunId.value) || null);
 const linkedRequirementId = computed(
   () =>
     latestRun.value?.summary?.requirement_id ||
@@ -2566,6 +2779,27 @@ const similarRunMatches = computed(() =>
 const intakeItems = computed(() => missionOverview.value?.work_intake || []);
 const visionReady = computed(() => Boolean(projectId.value && visionGoalText.value.trim() && visionScreenshots.value.length));
 const recentRunCards = computed(() => missionOverview.value?.recent_runs || []);
+const recentRunCardsEnhanced = computed(() =>
+  recentRunCards.value.map((card: any) => {
+    const recoveryCount = Number(card?.recovery_count || 0);
+    const status = String(card?.status || "");
+    const completedWithRecovery = status === "COMPLETED" && recoveryCount > 0;
+    const outcomeStatus = completedWithRecovery ? "COMPLETED_WITH_RECOVERY" : status;
+    const outcomeLabel = completedWithRecovery ? "COMPLETED (RECOVERY)" : status;
+    let nextActionHint = "";
+    if (status === "RUNNING") nextActionHint = "Monitor execution timeline and preview readiness.";
+    else if ((status === "FAILED" || status === "CANCELED") && recoveryCount > 0) nextActionHint = "Replay from this run if outcome is incomplete.";
+    else if (status === "FAILED" || status === "CANCELED") nextActionHint = "Open logs, then retry failed step or replay the run.";
+    else if (status === "COMPLETED" && card?.patch_artifact && !card?.pull_request_url) nextActionHint = "Approve patch and create PR.";
+    else if (status === "COMPLETED" && card?.pull_request_url) nextActionHint = "Open PR and merge when ready.";
+    return {
+      ...card,
+      outcome_status: outcomeStatus,
+      outcome_label: outcomeLabel,
+      next_action_hint: nextActionHint,
+    };
+  })
+);
 const latestChangeImpact = computed(() => missionOverview.value?.latest_change_impact || null);
 const previewsAndPrs = computed(() => missionOverview.value?.previews_and_prs || null);
 const architectureProfile = computed(() => missionOverview.value?.architecture_profile || null);
@@ -2677,9 +2911,11 @@ const displayWorkItems = computed(() =>
     const payload = wi.payload || {};
     return {
       task_id: wi.id,
+      run_id: wi.run_id || latestRun.value?.id || null,
       title: payload.title || WORK_ITEM_LABELS[wi.type] || humanizeToken(wi.key || wi.type || "work_item"),
       agent: payload.agent || WORK_ITEM_LABELS[wi.type] || humanizeToken(wi.type || wi.executor || "agent"),
       executor: wi.executor,
+      source_surface: payload.source_surface || payload.source || "mission_control",
       status: normalizeTimelineStatus(wi.status),
       rawStatus: wi.status,
       blocking: payload.blocking !== false,
@@ -2746,7 +2982,7 @@ const timelineLogs = computed(() =>
 const agentRows = computed(() =>
   displayWorkItemsDeduped.value.map((item) => ({
     name: item.title,
-    status: panelStatusFor(item.rawStatus, item.blocking),
+    status: panelStatusFor(item.rawStatus, item.blocking, latestRun.value?.status),
     taskCount: item.attempt_count || 1,
   }))
 );
@@ -2815,6 +3051,16 @@ const taskDecompositionCounts = computed(() => {
 const recentNarrativeReflections = computed(() =>
   Array.isArray(runNarrative.value?.reflections) ? runNarrative.value.reflections.slice(-4).reverse() : []
 );
+const reflectionsDisplay = computed(() =>
+  reflectionsExpanded.value
+    ? recentNarrativeReflections.value
+    : recentNarrativeReflections.value.slice(0, reflectionsCollapsedCount)
+);
+const similarRunsDisplay = computed(() =>
+  similarExpanded.value
+    ? similarRunMatches.value
+    : similarRunMatches.value.slice(0, similarCollapsedCount)
+);
 const reviewSurfaceFiles = computed(() => {
   if (Array.isArray(latestChangeImpact.value?.files_changed) && latestChangeImpact.value.files_changed.length) {
     return latestChangeImpact.value.files_changed;
@@ -2841,6 +3087,83 @@ const reviewSurfaceApprovalNote = computed(
 const reviewSurfacePullRequestUrl = computed(
   () => createPrResult.value?.pull_request_url || previewsAndPrs.value?.pull_request_url || null
 );
+const primaryActionCard = computed(() => {
+  const runStatus = String(latestRun.value?.status || "");
+  const previewUrl = String(previewsAndPrs.value?.preview_url || "");
+  const prUrl = String(previewsAndPrs.value?.pull_request_url || "");
+  const hasPatch = Boolean(previewsAndPrs.value?.patch_artifact || latestPatchArtifact.value);
+  const approved = String(previewsAndPrs.value?.approval_status || latestArtifactApprovalStatus.value || "") === "APPROVED";
+
+  if (runStatus === "RUNNING") {
+    return {
+      kind: "monitor",
+      title: "Run is in progress",
+      description: "Track live steps and open preview once ready.",
+      badge: "RUNNING",
+      tone: "warning",
+      buttonLabel: "Open Timeline",
+      buttonType: "warning",
+    };
+  }
+  if (prUrl) {
+    return {
+      kind: "open-pr",
+      title: "Pull request is ready",
+      description: "Review the PR and merge when checks and preview look good.",
+      badge: "DELIVERY",
+      tone: "success",
+      buttonLabel: "Open PR",
+      buttonType: "success",
+      href: prUrl,
+    };
+  }
+  if (approved && hasPatch) {
+    return {
+      kind: "create-pr",
+      title: "Patch approved, ready for PR",
+      description: "Create a pull request from the approved patch artifact.",
+      badge: "READY",
+      tone: "success",
+      buttonLabel: "Create PR",
+      buttonType: "primary",
+    };
+  }
+  if (previewUrl) {
+    return {
+      kind: "open-preview",
+      title: "Preview is ready",
+      description: "Validate UX and behavior in preview before PR creation.",
+      badge: "PREVIEW",
+      tone: "info",
+      buttonLabel: "Open Preview",
+      buttonType: "primary",
+      href: previewUrl,
+    };
+  }
+  if (runStatus === "FAILED" || runStatus === "CANCELED") {
+    return {
+      kind: "replay",
+      title: "Run needs recovery",
+      description: "Replay the run or retry the failed step from latest artifacts.",
+      badge: "NEEDS ACTION",
+      tone: "danger",
+      buttonLabel: "Replay Run",
+      buttonType: "danger",
+    };
+  }
+  if (runStatus === "COMPLETED" && hasPatch) {
+    return {
+      kind: "approve-patch",
+      title: "Patch ready for review",
+      description: "Review diff and approve the artifact to enable PR creation.",
+      badge: "REVIEW",
+      tone: "info",
+      buttonLabel: "Open Diff",
+      buttonType: "primary",
+    };
+  }
+  return null;
+});
 
 function findRunById(runId: string) {
   return runs.value.find((run) => run.id === runId) || null;
@@ -2895,7 +3218,23 @@ watch(
   { immediate: true }
 );
 
+watch(densityMode, (mode) => {
+  try {
+    window.localStorage.setItem(DENSITY_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage failures; preference stays in-memory.
+  }
+});
+
 onMounted(() => {
+  try {
+    const savedDensity = window.localStorage.getItem(DENSITY_STORAGE_KEY);
+    if (savedDensity === "compact" || savedDensity === "comfortable") {
+      densityMode.value = savedDensity;
+    }
+  } catch {
+    // Ignore storage failures and keep default.
+  }
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", syncPolling);
   }
@@ -3056,6 +3395,7 @@ async function loadAll() {
     await loadRunRuntime();
     await loadSimilarRuns();
     await loadMissionOverview();
+    await loadMemoryTimeline();
     syncContext();
     syncPolling();
   } catch (err: any) {
@@ -3077,6 +3417,27 @@ async function loadMissionOverview() {
   } catch (err: any) {
     missionOverview.value = null;
     overviewError.value = err?.message || "Failed to load Mission Control overview.";
+  }
+}
+
+async function loadMemoryTimeline() {
+  if (!projectId.value) {
+    memoryTimeline.value = [];
+    return;
+  }
+  memoryTimelineLoading.value = true;
+  memoryTimelineError.value = "";
+  try {
+    const payload = await fetchProjectMemoryTimeline(projectId.value, {
+      limit: 40,
+      run_id: latestRun.value?.id || undefined,
+    });
+    memoryTimeline.value = Array.isArray(payload?.items) ? payload.items : [];
+  } catch (err: any) {
+    memoryTimeline.value = [];
+    memoryTimelineError.value = err?.message || "Failed to load memory timeline.";
+  } finally {
+    memoryTimelineLoading.value = false;
   }
 }
 
@@ -3191,8 +3552,11 @@ async function startPreviewLaunch() {
   if (!previewRunId.value) return;
   previewLaunchLoading.value = true;
   previewLaunchError.value = "";
+  previewLaunchInfo.value = "";
   try {
-    await launchRunPreview(previewRunId.value, { reuse_if_healthy: true });
+    const currentStatus = String(previewsAndPrs.value?.preview_status || "").toUpperCase();
+    const shouldReuse = currentStatus === "READY";
+    await launchRunPreview(previewRunId.value, { reuse_if_healthy: shouldReuse });
     await loadMissionOverview();
   } catch (err: any) {
     previewLaunchError.value = err?.message || "Failed to launch preview.";
@@ -3205,6 +3569,7 @@ async function stopPreviewLaunch() {
   if (!previewRunId.value) return;
   previewLaunchLoading.value = true;
   previewLaunchError.value = "";
+  previewLaunchInfo.value = "";
   try {
     await deleteRunPreview(previewRunId.value);
     await loadMissionOverview();
@@ -3213,6 +3578,45 @@ async function stopPreviewLaunch() {
   } finally {
     previewLaunchLoading.value = false;
   }
+}
+
+async function restartPreviewLaunch() {
+  if (!previewRunId.value) return;
+  previewLaunchLoading.value = true;
+  previewLaunchError.value = "";
+  previewLaunchInfo.value = "Restarting preview (stop + fresh launch)…";
+  try {
+    try {
+      await deleteRunPreview(previewRunId.value);
+    } catch {
+      // stale/missing process state should not block a fresh launch
+    }
+    await launchRunPreview(previewRunId.value, { reuse_if_healthy: false });
+    await refreshPreviewStateUntilSettled();
+    const status = String(previewsAndPrs.value?.preview_status || "").toUpperCase();
+    previewLaunchInfo.value = status === "READY"
+      ? "Preview restarted and healthy."
+      : `Preview restart finished with status ${status || "UNKNOWN"}.`;
+  } catch (err: any) {
+    previewLaunchError.value = err?.message || "Failed to restart preview.";
+    previewLaunchInfo.value = "";
+  } finally {
+    previewLaunchLoading.value = false;
+  }
+}
+
+async function refreshPreviewStateUntilSettled() {
+  const maxPolls = 8;
+  for (let i = 0; i < maxPolls; i += 1) {
+    await loadMissionOverview();
+    const status = String(previewsAndPrs.value?.preview_status || "").toUpperCase();
+    if (status === "READY" || status === "FAILED" || status === "STOPPED" || status === "EXPIRED") return;
+    await sleep(800);
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function loadRunRuntime() {
@@ -3296,6 +3700,7 @@ async function refreshRuntime() {
     }
     await loadSimilarRuns();
     await loadMissionOverview();
+    await loadMemoryTimeline();
     syncContext();
     syncPolling();
   } catch (err: any) {
@@ -3459,6 +3864,25 @@ async function cancelLatestRun() {
     await loadAll();
   } catch (err: any) {
     error.value = err?.message || "Failed to cancel run.";
+  }
+}
+
+async function discardLatestRunWorkspace() {
+  if (!latestRun.value?.id || discardLoading.value) return;
+  const shouldDiscard = window.confirm(
+    "Discard this run workspace? This will stop preview, cancel active execution, and remove temp workspace files."
+  );
+  if (!shouldDiscard) return;
+  discardLoading.value = true;
+  error.value = "";
+  try {
+    const result = await discardRun(latestRun.value.id);
+    await loadAll();
+    ElMessage.success(result?.detail || "Run workspace discarded.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to discard run workspace.";
+  } finally {
+    discardLoading.value = false;
   }
 }
 
@@ -3980,6 +4404,30 @@ async function submitCreatePr() {
   }
 }
 
+async function handlePrimaryAction() {
+  const action = primaryActionCard.value;
+  if (!action) return;
+  if (action.kind === "open-pr" || action.kind === "open-preview") {
+    if (action.href) window.open(action.href, "_blank", "noopener,noreferrer");
+    return;
+  }
+  if (action.kind === "create-pr") {
+    if (latestPatchArtifact.value) await openCreatePrDialog(latestPatchArtifact.value);
+    return;
+  }
+  if (action.kind === "approve-patch") {
+    if (latestPatchArtifact.value) openDiffDialog(latestPatchArtifact.value);
+    return;
+  }
+  if (action.kind === "replay") {
+    if (latestRun.value?.id) openReplayDialog(latestRun.value.id);
+    return;
+  }
+  if (action.kind === "monitor") {
+    if (latestRun.value?.id) openTimelinePage(latestRun.value.id);
+  }
+}
+
 function formatTimestamp(value?: string | null) {
   if (!value) return "—";
   const parsed = new Date(value);
@@ -3990,6 +4438,7 @@ function formatTimestamp(value?: string | null) {
 function runStatusTagType(status?: string | null) {
   if (status === "RUNNING") return "warning";
   if (status === "COMPLETED") return "success";
+  if (status === "COMPLETED_WITH_RECOVERY") return "success";
   if (status === "FAILED" || status === "CANCELED") return "danger";
   if (status === "QUEUED") return "info";
   return "default";
@@ -4022,6 +4471,13 @@ function impactRiskTagType(riskTier?: string | null) {
   if (riskTier === "HIGH") return "danger";
   if (riskTier === "MEDIUM") return "warning";
   return "success";
+}
+
+function memoryEventTagType(severity?: string | null) {
+  const value = String(severity || "").toLowerCase();
+  if (value === "critical") return "danger";
+  if (value === "warning") return "warning";
+  return "info";
 }
 
 function violationSummaryTagType(insights?: any | null) {
@@ -4083,11 +4539,12 @@ function narrativeStatusTagType(status?: string | null, blocking = true) {
   return "default";
 }
 
-function panelStatusFor(status?: string | null, blocking = true) {
+function panelStatusFor(status?: string | null, blocking = true, runStatus?: string | null) {
   if (status === "RUNNING" || status === "CLAIMED") return "Running";
   if (status === "DONE") return "Completed";
   if (status === "WARNING") return "Warning";
   if (status === "SKIPPED") return "Skipped";
+  if (status === "CANCELED" && runStatus === "COMPLETED") return "Skipped";
   if (status === "FAILED" && !blocking) return "Warning";
   if (status === "FAILED" || status === "CANCELED") return "Blocked";
   return "Waiting";
@@ -4267,6 +4724,28 @@ function openExternal(url?: string | null) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+function scrollToWorkIntake() {
+  const anchor = document.getElementById("work-intake");
+  anchor?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function intakeSourceLabel(item: any) {
+  return String(item?.source_surface || item?.source || item?.kind || "mission_control");
+}
+
+function intakeRunId(item: any) {
+  return String(item?.run_id || item?.linked_run_id || "");
+}
+
+function timestampScore(run: any) {
+  const values = [run?.updated_at, run?.finished_at, run?.started_at, run?.created_at];
+  for (const value of values) {
+    const ts = Date.parse(String(value || ""));
+    if (!Number.isNaN(ts) && ts > 0) return ts;
+  }
+  return 0;
+}
+
 function artifactWorkItemLabel(workItemId?: string | null) {
   if (!workItemId) return "—";
   const item = displayWorkItems.value.find((entry) => entry.task_id === workItemId);
@@ -4281,6 +4760,166 @@ function artifactIntentText(explainResult: any) {
 </script>
 
 <style scoped>
+.mission-control-page {
+  position: relative;
+}
+
+.mission-control-page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1200px 600px at 8% -10%, rgba(56, 189, 248, 0.14), transparent 55%),
+    radial-gradient(1100px 560px at 92% 0%, rgba(99, 102, 241, 0.12), transparent 52%);
+}
+
+.mission-panel {
+  border-radius: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.82), rgba(248, 250, 252, 0.72));
+  backdrop-filter: blur(10px);
+  box-shadow:
+    0 20px 40px rgba(15, 23, 42, 0.1),
+    0 2px 10px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.mission-subcard {
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.68), rgba(241, 245, 249, 0.62));
+  box-shadow:
+    0 10px 24px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.mission-scroll-zone {
+  max-height: 38rem;
+  overflow-y: auto;
+  padding-right: 0.3rem;
+  scrollbar-width: thin;
+}
+
+.mission-scroll-zone::-webkit-scrollbar {
+  width: 10px;
+}
+
+.mission-scroll-zone::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(100, 116, 139, 0.4), rgba(148, 163, 184, 0.5));
+  border: 2px solid rgba(255, 255, 255, 0.2);
+}
+
+.mission-line-clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.mission-primary-top {
+  position: sticky;
+  top: 0.75rem;
+  z-index: 8;
+}
+
+.mission-content-scroll {
+  max-height: 42rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+}
+
+.mission-content-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.mission-content-scroll::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(100, 116, 139, 0.35), rgba(148, 163, 184, 0.5));
+}
+
+.mission-hero__controls {
+  min-width: 20rem;
+  max-width: 36rem;
+}
+
+.mission-hero__controls-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.mission-density-toggle {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.mission-hero__controls-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
+.mission-hero__rail {
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+
+.density-compact .mission-hero .premium-hero__title {
+  font-size: clamp(2rem, 3.6vw, 3rem);
+  line-height: 1.1;
+}
+
+.density-compact .mission-hero .premium-hero__copy {
+  font-size: 0.97rem;
+  line-height: 1.55;
+}
+
+.density-compact .mission-panel {
+  border-radius: 18px;
+}
+
+.density-compact .mission-subcard {
+  border-radius: 14px;
+}
+
+.density-compact .mission-content-scroll {
+  max-height: 30rem;
+}
+
+@media (max-width: 1024px) {
+  .mission-hero__controls {
+    max-width: 100%;
+  }
+
+  .mission-hero__controls-grid {
+    grid-template-columns: 1fr;
+    max-height: 12rem;
+  }
+
+  .mission-primary-top {
+    position: static;
+  }
+}
+
+@media (max-width: 768px) {
+  .mission-panel {
+    border-radius: 18px;
+  }
+
+  .mission-subcard {
+    border-radius: 14px;
+  }
+}
+
 .mission-inline-code {
   margin: 0;
   padding: 0.75rem 0.9rem;
@@ -4302,5 +4941,48 @@ function artifactIntentText(explainResult: any) {
 
 .mission-inline-select {
   width: 180px;
+}
+
+.mission-preview-embed {
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  padding: 0.7rem;
+  background: rgba(255, 255, 255, 0.65);
+}
+
+.mission-preview-embed__top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.mission-preview-embed__viewport {
+  border: 1px solid var(--border-soft);
+  background: #0f172a;
+  border-radius: 12px;
+  padding: 0.45rem;
+}
+
+.mission-preview-embed__viewport.is-mobile {
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.mission-preview-embed__frame {
+  width: 100%;
+  height: 360px;
+  border: 0;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.mission-preview-embed__viewport.is-mobile .mission-preview-embed__frame {
+  width: min(100%, 390px);
+  margin: 0 auto;
+  display: block;
+  height: 760px;
 }
 </style>

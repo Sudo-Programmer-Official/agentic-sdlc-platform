@@ -115,6 +115,10 @@ const approvalTone = computed(() => {
     radial-gradient(circle at top right, rgba(34, 197, 94, 0.12), transparent 26%),
     linear-gradient(180deg, rgba(18, 22, 31, 0.92), rgba(14, 17, 25, 0.96));
   box-shadow: var(--shadow-elevated);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 [data-theme="light"] .review-panel {
@@ -169,6 +173,20 @@ const approvalTone = computed(() => {
 
 .review-panel__body {
   margin-top: 1rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+}
+
+.review-panel__body::-webkit-scrollbar {
+  width: 10px;
+}
+
+.review-panel__body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(100, 116, 139, 0.35), rgba(148, 163, 184, 0.45));
 }
 
 .review-snapshot {

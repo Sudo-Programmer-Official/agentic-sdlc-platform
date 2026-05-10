@@ -735,6 +735,8 @@ async def build_mission_control_overview(
         )
     )
     runs = list(run_by_id.values())
+    # Preview and delivery controls should follow the latest deliverable run
+    # (branch push / patch-bearing / PR-capable context), not the latest noop.
     preview_panel = _build_preview_panel(
         project_repo,
         preview_profile,

@@ -168,6 +168,9 @@ class Settings(BaseSettings):
     requirement_memory_refresh_interval_seconds: int = 900
     requirement_memory_refresh_project_limit: int = 50
     requirement_memory_refresh_requirement_limit: int = 100
+    memory_synthesizer_enabled: bool = True
+    memory_synthesizer_interval_seconds: int = 1800
+    memory_synthesizer_project_limit: int = 50
     allowed_origins: List[str] = [
         "https://www.prompt2pr.com",
         "https://prompt2pr.com",

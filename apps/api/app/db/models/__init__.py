@@ -19,6 +19,7 @@ from app.db.models.project_preview_profile import ProjectPreviewProfile
 from app.db.models.run_summary import RunSummary
 from app.db.models.recovery_attempt import RecoveryAttempt
 from app.db.models.recovery_memory import RecoveryMemoryProfile
+from app.db.models.project_evolution import ProjectEvolutionEvent, MemorySummaryArtifact
 from app.db.models.improvement_request import ImprovementRequest
 from app.db.models.requirement_memory import RequirementMemory
 from app.db.models.requirement_relationship import RequirementRelationship
@@ -74,6 +75,8 @@ __all__ = [
     "RunSummary",
     "RecoveryAttempt",
     "RecoveryMemoryProfile",
+    "ProjectEvolutionEvent",
+    "MemorySummaryArtifact",
     "ImprovementRequest",
     "RequirementMemory",
     "RequirementRelationship",

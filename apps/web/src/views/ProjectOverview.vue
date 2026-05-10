@@ -1,6 +1,7 @@
 <template>
-  <div class="space-y-6">
-    <div class="flex flex-wrap items-center justify-between gap-3">
+  <div class="space-y-6 project-overview-page">
+    <div class="project-overview-hero rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h1 class="text-3xl font-semibold text-slate-900">Project Overview</h1>
         <p class="text-slate-600">Review project state and enter Mission Control when ready.</p>
@@ -8,6 +9,21 @@
       <el-button type="primary" :disabled="!projectId || projectStatus !== 'RUN'" @click="goToRun">
         Enter Mission Control
       </el-button>
+      </div>
+    </div>
+
+    <div class="project-overview-primary rounded-2xl border border-slate-200 p-5 shadow-sm">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div class="text-xs uppercase tracking-wide text-slate-400">Primary Action</div>
+          <div class="mt-1 text-lg font-semibold text-slate-900">{{ journeyHeadline }}</div>
+          <div class="text-sm text-slate-600">{{ journeyHint }}</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <el-tag effect="light" type="info">{{ stage }}</el-tag>
+          <el-button type="primary" @click="runPrimaryJourneyAction">{{ journeyPrimaryActionLabel }}</el-button>
+        </div>
+      </div>
     </div>
 
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -288,7 +304,7 @@
       </div>
     </div>
 
-    <div class="rounded-xl border border-sky-200 bg-sky-50 p-5 shadow-sm">
+    <div class="rounded-xl border border-sky-200 bg-sky-50 p-5 shadow-sm project-overview-panel">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div class="text-xs uppercase tracking-wide text-sky-700">Journey Guide</div>
@@ -328,9 +344,9 @@
       </div>
     </div>
 
-    <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm project-overview-panel">
       <div class="text-sm uppercase tracking-wide text-slate-400">Actions</div>
-      <div class="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+      <div class="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3 project-actions-grid">
         <el-button @click="goHome">Switch Project</el-button>
         <el-tooltip
           content="Enter Mission Control is available in RUN stage."
@@ -497,6 +513,69 @@
     </div>
 
     <span v-if="error" class="text-sm text-rose-600">{{ error }}</span>
+
+    <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm uppercase tracking-wide text-slate-400">Requirement-Centric Operational Dashboard</div>
+          <div class="text-xs text-slate-500">Bounded project understanding, regression clusters, recovery hotspots, and deployment risk signals.</div>
+        </div>
+        <el-button size="small" plain :loading="memoryDashboardLoading" @click="loadMemoryDashboard">Refresh</el-button>
+      </div>
+      <div v-if="memoryDashboardError" class="text-xs text-rose-600">{{ memoryDashboardError }}</div>
+      <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Summary Artifacts</div>
+          <div class="mt-1 text-lg font-semibold text-slate-900">{{ memoryUnderstanding?.summary_artifact_count ?? 0 }}</div>
+          <div class="text-xs text-slate-500">Compressed memory units retained for bounded retrieval.</div>
+        </div>
+        <div class="rounded-lg border border-slate-200 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Unstable Requirements</div>
+          <div class="mt-1 text-lg font-semibold text-slate-900">{{ unstableRequirements.length }}</div>
+          <div class="text-xs text-slate-500">Requirements with low stability or repeated retries.</div>
+        </div>
+        <div class="rounded-lg border border-slate-200 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Recovery Hotspots</div>
+          <div class="mt-1 text-lg font-semibold text-slate-900">{{ recoveryHotspots.length }}</div>
+          <div class="text-xs text-slate-500">Repeated recovery patterns in recent operational memory.</div>
+        </div>
+        <div class="rounded-lg border border-slate-200 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Deployment Risk</div>
+          <div class="mt-1 text-lg font-semibold text-slate-900">{{ deploymentRiskSignals }}</div>
+          <div class="text-xs text-slate-500">Derived from linked critical/recovery/deployment events.</div>
+        </div>
+      </div>
+      <div class="grid gap-4 md:grid-cols-2">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Top Unstable Requirements</div>
+          <ul v-if="unstableRequirements.length" class="mt-2 space-y-1 text-xs text-slate-600">
+            <li v-for="card in unstableRequirements" :key="card.requirement_id">
+              {{ card.requirement_id }} · stability {{ card.stability_score }} · retries {{ card.retry_count }}
+            </li>
+          </ul>
+          <div v-else class="mt-2 text-xs text-slate-500">No unstable requirement cluster detected.</div>
+        </div>
+        <div class="rounded-lg border border-slate-200 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Recovery Hotspots</div>
+          <ul v-if="recoveryHotspots.length" class="mt-2 space-y-1 text-xs text-slate-600">
+            <li v-for="item in recoveryHotspots" :key="item.name">{{ item.name }} · {{ item.count }}</li>
+          </ul>
+          <div v-else class="mt-2 text-xs text-slate-500">No recovery hotspot pattern in current bounded window.</div>
+        </div>
+      </div>
+      <div class="rounded-lg border border-slate-200 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Project Understanding Summary</div>
+        <div class="mt-2 text-xs text-slate-600">
+          {{ memoryUnderstanding?.top_risks?.join(" · ") || "No high-risk synthesis signal currently." }}
+        </div>
+        <div class="mt-2 text-xs text-slate-500">
+          Stale architecture zones: {{ staleArchitectureZones }}
+        </div>
+        <div class="mt-2 text-xs text-slate-500">
+          Latest synthesis artifacts: {{ memorySummaries.slice(0, 3).map((row) => `${row.summary_type}@v${row.version}`).join(", ") || "none" }}
+        </div>
+      </div>
+    </div>
 
     <el-dialog v-model="showImpactDialog" title="Preview Impact" width="520px">
       <div class="space-y-3">
@@ -802,6 +881,14 @@
             <div class="text-xs text-slate-500">{{ scope.row.architecture_slice || "—" }}</div>
           </template>
         </el-table-column>
+        <el-table-column label="Lineage" min-width="220">
+          <template #default="scope">
+            <div class="text-xs text-slate-700">{{ taskLineageSourceLabel(scope.row) }}</div>
+            <div class="font-mono text-xs text-slate-500">
+              task {{ shortId(scope.row.id) }} · run {{ taskLinkedRunLabel(scope.row) }}
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="status" label="Status" width="120" />
         <el-table-column label="Branch" width="200">
           <template #default="scope">
@@ -971,6 +1058,9 @@ import {
   fetchProjectBlueprint,
   fetchLatestGenesisRun,
   createProjectBlueprint,
+  explainProjectMemory,
+  fetchProjectMemorySummaries,
+  fetchProjectUnderstanding,
 } from "../api/lifecycle";
 
 const route = useRoute();
@@ -1128,6 +1218,11 @@ const workItems = ref<any[]>([]);
 const workItemsLoading = ref(false);
 const workItemError = ref("");
 const runEvents = ref<any[]>([]);
+const memoryDashboardLoading = ref(false);
+const memoryDashboardError = ref("");
+const memoryUnderstanding = ref<any | null>(null);
+const memorySummaries = ref<any[]>([]);
+const memoryExplain = ref<any | null>(null);
 const hasCompletedRun = computed(() => runs.value.some((run) => run.status === "COMPLETED"));
 const hasRunningRun = computed(() => runs.value.some((run) => ["RUNNING", "QUEUED"].includes(run.status)));
 const taskDefaultBaseBranch = computed(() => projectRepo.value?.default_branch || "main");
@@ -1172,6 +1267,39 @@ const topCostlyRequirements = computed(() =>
     .filter((card) => Number(card?.ai_spend_cents || 0) > 0)
     .slice(0, 5)
 );
+const unstableRequirements = computed(() =>
+  [...requirementSummaryCards.value]
+    .filter((card) => Number(card?.stability_score || 100) < 70 || Number(card?.retry_count || 0) >= 2)
+    .sort((a, b) => Number(a?.stability_score || 100) - Number(b?.stability_score || 100))
+    .slice(0, 6)
+);
+const recoveryHotspots = computed(() => {
+  const rows = Array.isArray(memoryExplain.value?.linked_events) ? memoryExplain.value.linked_events : [];
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (String(row?.domain || "") !== "recovery") continue;
+    const key = String(row?.event_type || "RECOVERY");
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+});
+const deploymentRiskSignals = computed(() => {
+  const rows = Array.isArray(memoryExplain.value?.linked_events) ? memoryExplain.value.linked_events : [];
+  const deploymentEvents = rows.filter((row: any) => String(row?.domain || "") === "deployment").length;
+  const criticalEvents = rows.filter((row: any) => String(row?.severity || "") === "critical").length;
+  if (criticalEvents >= 3) return "High risk";
+  if (criticalEvents > 0 || deploymentEvents > 0) return "Elevated";
+  return "Stable";
+});
+const staleArchitectureZones = computed(() => {
+  const payload = memoryUnderstanding.value?.latest_summaries?.weekly || {};
+  const domains = payload?.domains || {};
+  if (Number(domains?.architecture || 0) === 0) return "No recent architecture updates";
+  return "Recent architecture activity present";
+});
 const riskClass = computed(() => {
   const risk = lifecycleScore.value?.risk_level || "UNKNOWN";
   if (risk === "HIGH") return "text-rose-600";
@@ -1284,6 +1412,26 @@ function taskLineageLabel(task: any) {
   if (task?.capability_id) parts.push(`Capability ${task.capability_id}`);
   if (task?.impact_zone?.length) parts.push(`Impact ${task.impact_zone.join(", ")}`);
   return parts.join(" · ") || "Manual or unlinked task";
+}
+
+function taskLineageSourceLabel(task: any) {
+  return String(task?.source_surface || task?.source_type || task?.source || "project_overview");
+}
+
+function taskLinkedRunLabel(task: any) {
+  return shortId(
+    task?.latest_run_id ||
+    task?.run_id ||
+    task?.linked_run_id ||
+    task?.last_run_id ||
+    task?.summary?.run_id ||
+    ""
+  );
+}
+
+function shortId(value?: string | null) {
+  if (!value) return "—";
+  return String(value).slice(0, 8);
 }
 
 function markExecutorSelection() {
@@ -1462,6 +1610,26 @@ async function loadRequirementSummaryCards() {
     requirementSummaryCards.value = Array.isArray(payload?.items) ? payload.items : [];
   } catch {
     requirementSummaryCards.value = [];
+  }
+}
+
+async function loadMemoryDashboard() {
+  if (!projectId.value) return;
+  memoryDashboardLoading.value = true;
+  memoryDashboardError.value = "";
+  try {
+    const [understanding, summaries, explain] = await Promise.all([
+      fetchProjectUnderstanding(projectId.value),
+      fetchProjectMemorySummaries(projectId.value, { limit: 20 }),
+      explainProjectMemory(projectId.value, { limit: 40 }),
+    ]);
+    memoryUnderstanding.value = understanding || null;
+    memorySummaries.value = Array.isArray(summaries?.items) ? summaries.items : [];
+    memoryExplain.value = explain || null;
+  } catch (err: any) {
+    memoryDashboardError.value = err?.message || "Failed to load operational memory dashboard.";
+  } finally {
+    memoryDashboardLoading.value = false;
   }
 }
 
@@ -2251,6 +2419,7 @@ onMounted(async () => {
   await loadTasks();
   await loadImprovementRequests();
   await loadRequirementSummaryCards();
+  await loadMemoryDashboard();
     await loadFoundationReadiness();
     await loadGenesisState();
   await loadProjectMeta();
@@ -2269,3 +2438,48 @@ watch(
   }
 );
 </script>
+
+<style scoped>
+.project-overview-hero,
+.project-overview-panel,
+.project-overview-primary {
+  border-radius: 22px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 252, 0.78));
+  box-shadow:
+    0 16px 34px rgba(15, 23, 42, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.project-overview-primary {
+  position: sticky;
+  top: 0.75rem;
+  z-index: 6;
+}
+
+.project-actions-grid {
+  max-height: 18rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+}
+
+.project-actions-grid::-webkit-scrollbar {
+  width: 10px;
+}
+
+.project-actions-grid::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(100, 116, 139, 0.35), rgba(148, 163, 184, 0.5));
+}
+
+@media (max-width: 1024px) {
+  .project-overview-primary {
+    position: static;
+  }
+
+  .project-actions-grid {
+    max-height: 15rem;
+  }
+}
+</style>

@@ -1,5 +1,5 @@
 <template>
-  <div class="premium-card p-6">
+  <div class="premium-card mission-panel p-6">
     <div class="flex items-center justify-between">
       <div>
         <div class="text-sm uppercase tracking-wide text-slate-400">Agent Activity</div>
@@ -8,7 +8,8 @@
       <span class="topbar-chip">{{ agents.length }} agent{{ agents.length === 1 ? "" : "s" }}</span>
     </div>
 
-    <div v-if="agents.length" class="mt-4 grid gap-3">
+    <div v-if="agents.length" class="mt-4 mission-scroll-zone">
+      <div class="grid gap-3">
       <div
         v-for="agent in agents"
         :key="agent.name"
@@ -37,6 +38,7 @@
           </el-tag>
         </div>
       </div>
+      </div>
     </div>
 
     <div v-else class="premium-empty mt-4">
@@ -62,6 +64,7 @@ function statusTagType(status: string) {
   if (status === "Running") return "warning";
   if (status === "Completed") return "success";
   if (status === "Blocked") return "danger";
+  if (status === "Skipped") return "info";
   if (status === "Idle" || status === "Waiting") return "info";
   return "default";
 }
@@ -70,6 +73,7 @@ function agentTone(status: string) {
   if (status === "Running") return { background: "rgba(245, 158, 11, 0.12)", color: "var(--warning)" };
   if (status === "Completed") return { background: "rgba(34, 197, 94, 0.12)", color: "var(--success)" };
   if (status === "Blocked") return { background: "rgba(239, 68, 68, 0.12)", color: "var(--danger)" };
+  if (status === "Skipped") return { background: "var(--surface-soft)", color: "var(--text-muted)" };
   return { background: "var(--surface-soft)", color: "var(--text-muted)" };
 }
 </script>
@@ -80,5 +84,11 @@ function agentTone(status: string) {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
+}
+
+.mission-scroll-zone {
+  max-height: 28rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
 }
 </style>

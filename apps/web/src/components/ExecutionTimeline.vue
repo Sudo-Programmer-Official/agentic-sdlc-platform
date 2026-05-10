@@ -1,5 +1,5 @@
 <template>
-  <div class="premium-card p-6">
+  <div class="premium-card mission-panel p-6">
     <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <div>
         <div class="text-sm uppercase tracking-wide text-slate-400">Execution Timeline</div>
@@ -22,12 +22,13 @@
       {{ statusSummary.reason }}
     </div>
 
-    <div v-if="steps.length" class="mt-6 space-y-4">
-      <div
-        v-for="(step, index) in steps"
-        :key="step.timestamp + step.title"
-        class="mission-timeline-step relative overflow-hidden p-4 pl-8"
-      >
+    <div v-if="steps.length" class="mt-6 mission-scroll-zone">
+      <div class="space-y-4">
+        <div
+          v-for="(step, index) in steps"
+          :key="step.timestamp + step.title"
+          class="mission-timeline-step relative overflow-hidden p-4 pl-8"
+        >
         <div class="absolute left-4 top-0 h-full w-px bg-[var(--border-soft)]" />
         <div
           class="absolute left-[9px] top-5 h-3 w-3 rounded-full"
@@ -53,6 +54,7 @@
           class="absolute left-[12px] top-[3.2rem] h-[calc(100%-2.4rem)] w-px"
           style="background: linear-gradient(180deg, var(--border-strong), transparent);"
         />
+        </div>
       </div>
     </div>
 
@@ -318,3 +320,11 @@ function summaryStyle(type: string) {
   return { background: "rgba(91, 156, 255, 0.12)", color: "var(--accent)" };
 }
 </script>
+
+<style scoped>
+.mission-scroll-zone {
+  max-height: 32rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+</style>

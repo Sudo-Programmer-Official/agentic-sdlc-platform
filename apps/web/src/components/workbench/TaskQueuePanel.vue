@@ -111,6 +111,10 @@ function taskCardClass(task: QueueTask) {
     radial-gradient(circle at top left, rgba(91, 156, 255, 0.14), transparent 28%),
     linear-gradient(180deg, rgba(18, 22, 31, 0.92), rgba(14, 17, 25, 0.96));
   box-shadow: var(--shadow-elevated);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 [data-theme="light"] .workbench-panel {
@@ -208,6 +212,20 @@ function taskCardClass(task: QueueTask) {
   margin-top: 1rem;
   display: grid;
   gap: 0.85rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+}
+
+.task-queue::-webkit-scrollbar {
+  width: 10px;
+}
+
+.task-queue::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(100, 116, 139, 0.4), rgba(148, 163, 184, 0.45));
 }
 
 .task-card {

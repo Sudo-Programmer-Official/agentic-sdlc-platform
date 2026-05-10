@@ -397,8 +397,14 @@ a {
 @media (min-width: 1100px) {
   .mission-workbench-grid {
     grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(360px, 0.95fr);
-    align-items: start;
+    align-items: stretch;
+    grid-template-rows: minmax(0, 58rem);
   }
+}
+
+.mission-workbench-grid > * {
+  min-height: 0;
+  height: 100%;
 }
 
 .mission-hero {

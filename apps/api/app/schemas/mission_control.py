@@ -287,3 +287,71 @@ class MissionControlOverviewResponse(BaseModel):
     system_insights: MissionControlSystemInsights
     violation_insights: MissionControlViolationInsights | None = None
     imported_references: list[MissionControlImportedReference] = Field(default_factory=list)
+
+
+class MissionControlTimelineEvent(BaseModel):
+    id: str
+    event_at: datetime
+    domain: str
+    event_type: str
+    title: str
+    summary: str | None = None
+    severity: str = "info"
+    status: str = "observed"
+    retention_class: str = "keep"
+    requirement_id: str | None = None
+    run_id: uuid.UUID | None = None
+    task_id: uuid.UUID | None = None
+    work_item_id: uuid.UUID | None = None
+    contract_id: str | None = None
+    related_artifact_ids: list[str] = Field(default_factory=list)
+    deployment_ref: str | None = None
+    metadata: dict | None = None
+
+
+class MissionControlTimelineResponse(BaseModel):
+    items: list[MissionControlTimelineEvent] = Field(default_factory=list)
+
+
+class MissionControlTimelineBackfillResponse(BaseModel):
+    project_id: uuid.UUID
+    scanned_limit: int
+    before_count: int
+    after_count: int
+    inserted_count: int
+
+
+class MissionControlMemorySummaryArtifact(BaseModel):
+    id: uuid.UUID
+    summary_type: str
+    source_entity_type: str
+    source_entity_id: str
+    version: int
+    window_start_at: datetime | None = None
+    window_end_at: datetime | None = None
+    payload: dict = Field(default_factory=dict)
+    quality_score: float | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MissionControlMemorySummaryListResponse(BaseModel):
+    items: list[MissionControlMemorySummaryArtifact] = Field(default_factory=list)
+
+
+class MissionControlMemoryExplainResponse(BaseModel):
+    target: dict = Field(default_factory=dict)
+    top_causes: list[str] = Field(default_factory=list)
+    linked_events: list[MissionControlTimelineEvent] = Field(default_factory=list)
+    linked_runs: list[str] = Field(default_factory=list)
+    linked_requirements: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+
+
+class MissionControlProjectUnderstandingResponse(BaseModel):
+    project_id: str
+    summary_artifact_count: int = 0
+    major_requirements: list[str] = Field(default_factory=list)
+    top_risks: list[str] = Field(default_factory=list)
+    unstable_validations: list[str] = Field(default_factory=list)
+    latest_summaries: dict = Field(default_factory=dict)

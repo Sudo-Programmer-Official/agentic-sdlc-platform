@@ -125,6 +125,7 @@
           {{ error }}
         </div>
 
+        <div class="automation-map__lanes-wrap">
         <div class="automation-map__lanes">
           <section
             v-for="lane in visibleLanes"
@@ -167,6 +168,15 @@
                 <div v-if="node.tags.length" class="automation-node__tags">
                   <span v-for="tag in node.tags" :key="`${node.key}-${tag}`" class="topbar-chip">{{ tag }}</span>
                 </div>
+                <div v-if="nodeLineageChips(node).length" class="automation-node__lineage">
+                  <span
+                    v-for="chip in nodeLineageChips(node)"
+                    :key="`${node.key}-lineage-${chip}`"
+                    class="topbar-chip automation-node__lineage-chip"
+                  >
+                    {{ chip }}
+                  </span>
+                </div>
                 <div v-if="node.summary" class="automation-node__summary">{{ node.summary }}</div>
               </button>
             </div>
@@ -175,6 +185,7 @@
               No nodes match this filter in {{ lane.label.toLowerCase() }}.
             </div>
           </section>
+        </div>
         </div>
       </div>
 
@@ -197,7 +208,7 @@
             </button>
           </div>
 
-          <div v-if="selectedNode" class="mt-5 space-y-4">
+          <div v-if="selectedNode" class="mt-5 space-y-4 automation-map__inspector-scroll">
             <div class="rounded-2xl border p-4" :style="nodeStyle(selectedNode)">
               <div class="flex items-center justify-between gap-3">
                 <div class="flex items-center gap-2">
@@ -1109,6 +1120,28 @@ function shortId(value?: string | null) {
   return String(value).slice(0, 8);
 }
 
+function nodeLineageChips(node: AutomationNode): string[] {
+  const raw = node.raw || {};
+  const chips: string[] = [];
+  const source =
+    raw.source_surface ||
+    raw.source_type ||
+    raw.source ||
+    (node.kind === "task" ? "project_overview" : node.kind === "intake" ? "mission_control" : "");
+  const taskId = raw.task_id || raw.id || raw.linked_task_id || raw.work_item_id || "";
+  const runId =
+    raw.run_id ||
+    raw.latest_run_id ||
+    raw.linked_run_id ||
+    (node.kind === "run" ? raw.id : "") ||
+    "";
+
+  if (source) chips.push(`source:${String(source)}`);
+  if (taskId && node.kind !== "run" && node.kind !== "artifact") chips.push(`task:${shortId(String(taskId))}`);
+  if (runId) chips.push(`run:${shortId(String(runId))}`);
+  return chips.slice(0, 3);
+}
+
 function compactTags(values: Array<string | null | undefined>) {
   return values
     .filter((value): value is string => Boolean(value && String(value).trim()))
@@ -1132,6 +1165,7 @@ function compactTags(values: Array<string | null | undefined>) {
     var(--surface-1);
   box-shadow: var(--shadow-elevated);
   padding: 1.25rem;
+  overflow: hidden;
 }
 
 .automation-map__flow {
@@ -1164,10 +1198,17 @@ function compactTags(values: Array<string | null | undefined>) {
 .automation-map__flow-dot.is-artifact { background: #22c55e; }
 .automation-map__flow-dot.is-deliver { background: #ec4899; }
 
+.automation-map__lanes-wrap {
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+}
+
 .automation-map__lanes {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(260px, 1fr);
+  min-width: max-content;
 }
 
 .automation-map__lane {
@@ -1189,6 +1230,10 @@ function compactTags(values: Array<string | null | undefined>) {
   margin-top: 1rem;
   display: grid;
   gap: 0.85rem;
+  max-height: 56rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+  scrollbar-width: thin;
 }
 
 .automation-node {
@@ -1232,6 +1277,10 @@ function compactTags(values: Array<string | null | undefined>) {
   font-weight: 600;
   color: var(--text-strong);
   word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .automation-node__subtitle {
@@ -1259,6 +1308,19 @@ function compactTags(values: Array<string | null | undefined>) {
   gap: 0.4rem;
 }
 
+.automation-node__lineage {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.automation-node__lineage-chip {
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  opacity: 0.9;
+}
+
 .automation-map__legend {
   display: inline-flex;
   align-items: center;
@@ -1279,6 +1341,13 @@ function compactTags(values: Array<string | null | undefined>) {
 
 .automation-map__inspector {
   min-width: 0;
+}
+
+.automation-map__inspector-scroll {
+  max-height: calc(100vh - 12rem);
+  overflow-y: auto;
+  padding-right: 0.2rem;
+  scrollbar-width: thin;
 }
 
 .automation-map__diff {
@@ -1314,12 +1383,29 @@ function compactTags(values: Array<string | null | undefined>) {
   .automation-map__lanes {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .automation-map__lanes {
+    grid-auto-flow: row;
+    grid-auto-columns: unset;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
   .automation-map__flow,
   .automation-map__lanes {
     grid-template-columns: 1fr;
+  }
+
+  .automation-map__lanes {
+    grid-auto-flow: row;
+    grid-auto-columns: unset;
+    min-width: 0;
+  }
+
+  .automation-map__lane-body {
+    max-height: 28rem;
   }
 }
 </style>

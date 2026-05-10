@@ -422,6 +422,11 @@ function humanDuration(durationMs: number) {
   box-shadow: var(--shadow-elevated);
   color: rgba(237, 242, 247, 0.96);
   container-type: inline-size;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 [data-theme="light"] .execution-console {
@@ -493,6 +498,19 @@ function humanDuration(durationMs: number) {
   display: grid;
   gap: 0.8rem;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  max-height: 12rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+  scrollbar-width: thin;
+}
+
+.execution-console__environment::-webkit-scrollbar {
+  width: 8px;
+}
+
+.execution-console__environment::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(100, 116, 139, 0.4), rgba(148, 163, 184, 0.45));
 }
 
 .execution-console__env-card,
@@ -502,6 +520,8 @@ function humanDuration(durationMs: number) {
   border: 1px solid var(--border-soft);
   background: rgba(255, 255, 255, 0.04);
   padding: 0.95rem 1rem;
+  max-height: 21rem;
+  overflow: hidden;
 }
 
 [data-theme="light"] .execution-console__env-card,
@@ -539,6 +559,9 @@ function humanDuration(durationMs: number) {
   gap: 1rem;
   grid-template-columns: minmax(0, 1.3fr) minmax(20rem, 0.9fr);
   align-items: start;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .execution-console__terminal {
@@ -547,6 +570,8 @@ function humanDuration(durationMs: number) {
   border: 1px solid rgba(91, 156, 255, 0.18);
   background: rgba(8, 11, 18, 0.82);
   padding: 1rem;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 [data-theme="light"] .execution-console__terminal {
@@ -636,12 +661,27 @@ function humanDuration(durationMs: number) {
   display: grid;
   gap: 1rem;
   align-content: start;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .execution-console__sidebar-list {
   margin-top: 0.8rem;
   display: grid;
   gap: 0.75rem;
+  max-height: 11rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+  scrollbar-width: thin;
+}
+
+.execution-console__sidebar-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.execution-console__sidebar-list::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(100, 116, 139, 0.4), rgba(148, 163, 184, 0.45));
 }
 
 .execution-console__sidebar-item {

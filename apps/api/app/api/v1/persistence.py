@@ -129,7 +129,7 @@ from app.services.run_delivery import publish_run_branch_if_ready
 from app.services.run_resume import prepare_run_for_resume
 from app.services.strategy_selection import create_strategy_group, get_strategy_group
 from app.services.run_timeline import build_run_timeline
-from app.services.workspace_supervisor import ensure_run_workspace
+from app.services.workspace_supervisor import ensure_run_workspace, destroy_run_workspace
 from app.services.work_item_state import is_dependency_satisfied
 from app.services.requirements_bridge import ensure_legacy_project, load_requirements_plan_state
 from app.services.run_summary_builder import ensure_project_run_summaries
@@ -182,6 +182,15 @@ class RunUnblockResponse(BaseModel):
     queued_after: int
     runnable_after: int
     active_after: int
+    detail: str
+
+
+class RunDiscardResponse(BaseModel):
+    run_id: uuid.UUID
+    run_status: str
+    preview_status: str | None = None
+    workspace_deleted: bool
+    workspace_root: str | None = None
     detail: str
 
 
@@ -1540,6 +1549,93 @@ async def unblock_run(
         runnable_after=runnable_after,
         active_after=active_after or 0,
         detail="No runnable queued items found." if runnable_before == 0 else "Worker nudge triggered.",
+    )
+
+
+@router.post("/runs/{run_id}/discard", response_model=RunDiscardResponse)
+@public_router.post("/runs/{run_id}/discard", response_model=RunDiscardResponse)
+async def discard_run_workspace(
+    run_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunDiscardResponse:
+    run = await session.scalar(
+        select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id).with_for_update(skip_locked=True)
+    )
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    previous_status = run.status
+    if run.status in {"QUEUED", "RUNNING"}:
+        ok = await guarded_update_run_status(session, run.id, ["QUEUED", "RUNNING"], "CANCELED")
+        if ok:
+            run.status = "CANCELED"
+            run.finished_at = run.finished_at or datetime.now(timezone.utc)
+            await record_event(
+                session,
+                project_id=run.project_id,
+                run_id=run.id,
+                event_type="RUN_CANCELED",
+                actor_type="USER",
+                actor_id=ctx.user_id,
+                payload={"previous": previous_status, "new": "CANCELED", "reason": "discard_requested"},
+            )
+
+    preview = await stop_run_preview(session, tenant_id=ctx.tenant_id, run_id=run.id)
+    workspace_root = run.workspace_root
+    try:
+        workspace_deleted = destroy_run_workspace(run)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    run.workspace_root = None
+    run.repo_path = None
+    run.workspace_status = "PENDING"
+    run.workspace_error = None
+    summary = dict(run.summary or {})
+    summary["workspace_discarded"] = True
+    summary["workspace_discarded_at"] = datetime.now(timezone.utc).isoformat()
+    summary["workspace_discarded_by"] = ctx.user_id or "ui-user"
+    run.summary = summary
+    session.add(run)
+
+    await log_activity(
+        session,
+        project_id=run.project_id,
+        entity_type="run",
+        entity_id=run.id,
+        action_type="run.discard",
+        metadata={
+            "previous_status": previous_status,
+            "status": run.status,
+            "workspace_deleted": workspace_deleted,
+            "workspace_root": workspace_root,
+            "preview_status": preview.status,
+        },
+    )
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_DISCARDED",
+        actor_type="USER",
+        actor_id=ctx.user_id,
+        payload={
+            "workspace_deleted": workspace_deleted,
+            "workspace_root": workspace_root,
+            "preview_status": preview.status,
+        },
+    )
+    await session.commit()
+    await session.refresh(run)
+
+    return RunDiscardResponse(
+        run_id=run.id,
+        run_status=run.status,
+        preview_status=preview.status,
+        workspace_deleted=workspace_deleted,
+        workspace_root=workspace_root,
+        detail="Run workspace discarded and preview stopped.",
     )
 
 

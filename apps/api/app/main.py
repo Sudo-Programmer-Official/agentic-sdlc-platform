@@ -31,6 +31,7 @@ from app.core.config import DEFAULT_DATABASE_URL, get_settings
 from app.services.build_info import get_build_history, get_current_build_info
 from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.services.requirement_refresh_daemon import run_requirement_memory_daemon, shutdown_daemon
+from app.services.memory_synthesizer import run_memory_synthesizer_daemon, shutdown_memory_synthesizer
 from app.startup import run_startup_migrations
 
 
@@ -140,6 +141,8 @@ def create_app() -> FastAPI:
         log.info("Startup phase=migrations complete")
         app.state.requirement_refresh_stop_event = None
         app.state.requirement_refresh_task = None
+        app.state.memory_synthesizer_stop_event = None
+        app.state.memory_synthesizer_task = None
         if settings.requirement_memory_refresh_enabled:
             stop_event = asyncio.Event()
             task = asyncio.create_task(run_requirement_memory_daemon(stop_event))
@@ -149,12 +152,25 @@ def create_app() -> FastAPI:
                 "Requirement memory daemon enabled interval_seconds=%s",
                 settings.requirement_memory_refresh_interval_seconds,
             )
+        if settings.memory_synthesizer_enabled:
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(run_memory_synthesizer_daemon(stop_event))
+            app.state.memory_synthesizer_stop_event = stop_event
+            app.state.memory_synthesizer_task = task
+            log.info(
+                "Memory synthesizer daemon enabled interval_seconds=%s",
+                settings.memory_synthesizer_interval_seconds,
+            )
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:
         await shutdown_daemon(
             getattr(app.state, "requirement_refresh_task", None),
             getattr(app.state, "requirement_refresh_stop_event", None),
+        )
+        await shutdown_memory_synthesizer(
+            getattr(app.state, "memory_synthesizer_task", None),
+            getattr(app.state, "memory_synthesizer_stop_event", None),
         )
 
     # Register the DB-backed public surface before the legacy v1 router so

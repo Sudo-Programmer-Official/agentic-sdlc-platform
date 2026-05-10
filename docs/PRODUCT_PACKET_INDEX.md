@@ -33,6 +33,8 @@ Send:
 - [INVESTOR_BRIEF.md](./INVESTOR_BRIEF.md)
 - [FUNDRAISING_MEMO.md](./FUNDRAISING_MEMO.md)
 - [GO_TO_MARKET_AND_ICP.md](./GO_TO_MARKET_AND_ICP.md)
+- [AUTONOMOUS_SOFTWARE_DELIVERY_CONTROL_PLANE.md](./AUTONOMOUS_SOFTWARE_DELIVERY_CONTROL_PLANE.md)
+- [CONTINUOUS_ENGINEERING_MEMORY.md](./CONTINUOUS_ENGINEERING_MEMORY.md)
 
 Use these when the conversation is about market need, wedge, business model, commercialization, and why the company could scale.
 
@@ -82,6 +84,15 @@ These help convert interest into a concrete pilot, package, and commercial motio
 
 - [WEBSITE_COPY.md](./WEBSITE_COPY.md)  
   Draft landing-page copy with hero messaging, product positioning, feature blocks, customer segments, and call-to-action text.
+
+- [AUTONOMOUS_SOFTWARE_DELIVERY_CONTROL_PLANE.md](./AUTONOMOUS_SOFTWARE_DELIVERY_CONTROL_PLANE.md)  
+  Canonical strategic positioning memo defining the category, differentiation, maturity stage, 60-day priorities, and investor narrative.
+
+- [CONTINUOUS_ENGINEERING_MEMORY.md](./CONTINUOUS_ENGINEERING_MEMORY.md)  
+  Memory-architecture memo defining replayable evolution, intelligence summaries, timeline design, and the 60-day memory implementation priorities.
+
+- [MEMORY_IMPLEMENTATION_SPEC.md](./MEMORY_IMPLEMENTATION_SPEC.md)  
+  Engineering implementation spec mapping memory strategy to concrete schema, API, UI, and 2-sprint delivery milestones.
 
 ## Core Commercial Message
 

@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = DEFAULT_DATABASE_URL
     db_echo: bool = False
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_timeout_seconds: int = 30
+    db_pool_recycle_seconds: int = 900
+    db_connect_timeout_seconds: int = 15
     llm_provider: str = "openai"
     llm_model: str = "gpt-4.1"
     openai_api_key: str | None = None
@@ -113,6 +118,10 @@ class Settings(BaseSettings):
     codex_timeout_seconds: int = 120
     codex_max_context_bytes: int = 400_000
     codex_max_write_bytes_total: int = 200_000
+    codex_frontend_cap_bump_enabled: bool = True
+    codex_frontend_retry_max_patch_lines: int = 3_500
+    codex_frontend_retry_completion_boost_tokens: int = 3_200
+    codex_frontend_retry_completion_cap_tokens: int = 6_000
     codex_redaction_enabled: bool = True
     codex_max_run_tokens: int = 400_000
     codex_max_run_cost_cents: float = 120.0

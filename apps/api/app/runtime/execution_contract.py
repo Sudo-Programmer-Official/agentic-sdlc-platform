@@ -602,7 +602,7 @@ def build_execution_contract(
     )
     test_command = _resolve_named_command(
         command_index,
-        preferred_keys=["frontend_test", "api_tests", "repo_tests", "backend_test", "test"],
+        preferred_keys=["frontend_test", "static_frontend_test", "api_tests", "repo_tests", "backend_test", "test"],
         kind="test",
         scope_paths=scope_paths,
     ) or getattr(cfg, "test_command", "pytest -q")

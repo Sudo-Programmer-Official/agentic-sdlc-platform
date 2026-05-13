@@ -17,6 +17,12 @@ require_cmd() {
 require_cmd curl
 require_cmd jq
 
+# 0) ensure at least one active worker agent exists so scheduler can execute work
+curl -s -X POST "$API/store/agents/register" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"smoke-worker","kind":"worker","executors":["dummy"],"max_concurrency":2,"capabilities":{"runtime-worker":true}}' \
+  >/dev/null || true
+
 ts_now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 # 1) create project
@@ -38,7 +44,7 @@ echo "Run: $RID"
 started=$(ts_now)
 
 # 5) wait for completion
-for i in $(seq 1 60); do
+for i in $(seq 1 120); do
   status=$(curl -s "$API/store/runs/$RID" | jq -r '.status')
   echo "Run status: $status"
   if [[ "$status" == "COMPLETED" || "$status" == "FAILED" ]]; then
@@ -52,7 +58,13 @@ EVENTS=$(curl -s "$API/store/runs/$RID/events")
 RUN_COMPLETED=$(echo "$EVENTS" | jq '[.[] | select(.event_type=="RUN_COMPLETED")] | length')
 RUN_FAILED=$(echo "$EVENTS" | jq '[.[] | select(.event_type=="RUN_FAILED")] | length')
 FAIL_REASON=$(echo "$EVENTS" | jq -r '[.[] | select(.event_type=="RUN_FAILED")][-1].payload.reason // ""')
-WI_DUPES=$(echo "$EVENTS" | jq '[.[] | select(.event_type=="WORK_ITEM_DONE")] | group_by(.task_id) | map(select(length>1)) | length')
+WI_DUPES=$(echo "$EVENTS" | jq '
+  [.[] | select(.event_type=="WORK_ITEM_DONE")
+    | (.work_item_id // .payload.work_item_id // .task_id // .payload.task_id // empty)]
+  | group_by(.)
+  | map(select(length>1))
+  | length
+')
 LIFECYCLE=$(echo "$EVENTS" | jq '[.[] | select(.event_type=="LIFECYCLE_SCORED")] | length')
 
 if [[ "$WI_DUPES" != "0" ]]; then

@@ -83,7 +83,14 @@
           <el-button plain :disabled="!forkEnabled" @click="openReplayDialog()">
             Replay Run
           </el-button>
-          <el-button plain :disabled="!resumeEnabled" :loading="resumeLoading" @click="resumeLatestRun">
+          <el-tooltip v-if="resumeBlockedHint" :content="resumeBlockedHint" placement="top">
+            <span class="inline-flex">
+              <el-button plain :disabled="!resumeEnabled" :loading="resumeLoading" @click="resumeLatestRun">
+                Resume Run
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-button v-else plain :disabled="!resumeEnabled" :loading="resumeLoading" @click="resumeLatestRun">
             Resume Run
           </el-button>
           <el-button
@@ -122,6 +129,9 @@
           </el-button>
           <el-button @click="goToOverview">Project Overview</el-button>
         </div>
+        <div v-if="resumeBlockedHint" class="mt-2 text-xs text-amber-700">
+          Resume unavailable: {{ resumeBlockedHint }}
+        </div>
         </div>
       </div>
       <div class="mission-hero__rail">
@@ -153,6 +163,15 @@
             Health {{ linkedRequirementHealth ?? "—" }} · Retries {{ linkedRequirementRetries }} · Unresolved {{ linkedRequirementUnresolved }}
           </div>
         </div>
+      </div>
+    </section>
+
+    <section class="premium-card mission-panel p-4" style="border: 2px solid rgba(14, 165, 233, 0.5); background: rgba(14, 165, 233, 0.08);">
+      <div class="text-xs font-semibold uppercase tracking-[0.2em] text-sky-700">Live Execution Status</div>
+      <div class="mt-2 grid gap-2 text-sm font-semibold text-slate-900 md:grid-cols-3">
+        <div>Queue: {{ missionStatusBanner.queue }}</div>
+        <div>In Progress: {{ missionStatusBanner.inProgress }} ({{ missionStatusBanner.inProgressTaskName }})</div>
+        <div>Completed: {{ missionStatusBanner.completed }} / {{ missionStatusBanner.total }}</div>
       </div>
     </section>
 
@@ -303,6 +322,11 @@
         <template #icon>
           <AppIcon name="mission" size="lg" />
         </template>
+        <template #footer>
+          <div class="text-xs text-slate-500">
+            ETA: {{ runEtaLabel }}
+          </div>
+        </template>
       </MetricCard>
     </section>
 
@@ -395,7 +419,7 @@
                   size="small"
                   type="warning"
                   plain
-                  @click="openApprovalsView"
+                  @click="requestRunConfirmation"
                 >
                   Task Tree Requires Approval
                 </el-button>
@@ -482,7 +506,7 @@
                   size="small"
                   type="warning"
                   plain
-                  @click="openApprovalsView"
+                  @click="requestRunConfirmation"
                 >
                   Require Confirmation
                 </el-button>
@@ -863,7 +887,7 @@
     </section>
 
     <section v-if="project" class="mission-workbench-grid">
-      <TaskQueuePanel :tasks="workbenchTasks" />
+      <TaskQueuePanel :tasks="workbenchTasks" :eta-profiles="missionOverview?.eta_profiles || []" />
 
       <ExecutionConsolePanel
         :console-data="executionConsole"
@@ -2524,6 +2548,7 @@ import {
   bootstrapProjectContract,
   compareRuns,
   createApproval,
+  listApprovals,
   createRun,
   createVisionRun,
   createRunStrategies,
@@ -2545,7 +2570,6 @@ import {
   hasRunMemorySearchContext,
   forkRun,
   launchRunPreview,
-  listApprovals,
   listArtifacts,
   listRunEvents,
   listRuns,
@@ -2689,7 +2713,7 @@ const projectContractActionError = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
 const canonicalRunId = computed(() => {
-  const statusPriority = ["RUNNING", "CLAIMED", "QUEUED", "PAUSED"];
+  const statusPriority = ["RUNNING", "CLAIMED", "QUEUED"];
   const active = runs.value
     .filter((run) => statusPriority.includes(String(run?.status || "").toUpperCase()))
     .sort((a, b) => timestampScore(b) - timestampScore(a));
@@ -2718,6 +2742,17 @@ const linkedRequirementUnresolved = computed(
 const hasRun = computed(() => Boolean(latestRun.value?.id));
 const forkEnabled = computed(() => Boolean(latestRun.value?.id));
 const resumeEnabled = computed(() => Boolean(latestRun.value?.id && latestRun.value?.summary?.resume_state?.can_resume));
+const resumeBlockedReason = computed(() => String(latestRun.value?.summary?.resume_state?.resume_blocked_reason || ""));
+const resumeBlockedHint = computed(() => {
+  if (resumeEnabled.value || !latestRun.value?.id) return "";
+  const reason = resumeBlockedReason.value.toLowerCase();
+  if (!reason) return "Run is not resumable yet.";
+  if (reason === "run_not_terminal") return "Run is not in a resumable state yet.";
+  if (reason === "workspace_error") return "Workspace is in error state. Discard run or replay.";
+  if (reason === "active_work_items_present") return "Some work items are still active. Wait for them to settle.";
+  if (reason === "no_safe_checkpoint") return "No safe checkpoint available for resume.";
+  return reason.replace(/_/g, " ");
+});
 const compareEnabled = computed(() => runs.value.length >= 2);
 const currentStage = computed(() => project.value?.status || "UNKNOWN");
 const lifecycleWarnings = computed<string[]>(() => lifecycleScore.value?.warnings || []);
@@ -3179,6 +3214,39 @@ const latestLogMessageByTask = computed(() => {
   }
   return map;
 });
+const latestStrategyByTask = computed(() => {
+  const map = new Map<
+    string,
+    {
+      selected_strategy?: string | null;
+      effective_strategy?: string | null;
+      transition_reason?: string | null;
+      drift_risk_score?: number | null;
+      execution_zone?: string | null;
+    }
+  >();
+  for (const log of timelineLogs.value) {
+    const taskId = log.details?.task_id;
+    if (typeof taskId !== "string" || !taskId) continue;
+    const details = log.details || {};
+    const selected = typeof details.selected_strategy === "string" ? details.selected_strategy : null;
+    const effective = typeof details.effective_strategy === "string" ? details.effective_strategy : null;
+    const transition = typeof details.transition_reason === "string" ? details.transition_reason : null;
+    const zone = typeof details.execution_zone === "string" ? details.execution_zone : null;
+    const driftRaw = details.drift_risk_score;
+    const drift = typeof driftRaw === "number" ? driftRaw : Number.isFinite(Number(driftRaw)) ? Number(driftRaw) : null;
+    if (selected || effective || transition || zone || drift !== null) {
+      map.set(taskId, {
+        selected_strategy: selected,
+        effective_strategy: effective,
+        transition_reason: transition,
+        drift_risk_score: drift,
+        execution_zone: zone,
+      });
+    }
+  }
+  return map;
+});
 const workbenchTasks = computed(() =>
   displayWorkItemsDeduped.value.map((item) => {
     const relatedArtifacts = latestArtifacts.value
@@ -3192,17 +3260,80 @@ const workbenchTasks = computed(() =>
       blocking: item.blocking,
       agent: item.agent,
       executor: item.executor,
+      workItemType: item.work_item_type,
       progress: workbenchProgressForStatus(item.rawStatus),
       logLine:
         item.last_error ||
         latestLogMessageByTask.value.get(item.task_id) ||
         workbenchStatusMessage(item.rawStatus, item.blocking),
       changedArtifacts: relatedArtifacts,
+      startedAt: item.started_at || null,
+      finishedAt: item.finished_at || null,
       startedAtLabel: item.started_at ? `Started ${formatTimestamp(item.started_at)}` : "Not started",
       finishedAtLabel: item.finished_at ? `Finished ${formatTimestamp(item.finished_at)}` : "Awaiting completion",
+      selectedStrategy: latestStrategyByTask.value.get(item.task_id)?.selected_strategy || null,
+      effectiveStrategy: latestStrategyByTask.value.get(item.task_id)?.effective_strategy || null,
+      transitionReason: latestStrategyByTask.value.get(item.task_id)?.transition_reason || null,
+      driftRiskScore: latestStrategyByTask.value.get(item.task_id)?.drift_risk_score ?? null,
+      executionZone: latestStrategyByTask.value.get(item.task_id)?.execution_zone || null,
     };
   })
 );
+const missionStatusBanner = computed(() => {
+  const inProgressTask = workbenchTasks.value.find((task) => ["RUNNING", "CLAIMED"].includes(String(task.rawStatus || "").toUpperCase()));
+  return {
+    queue: runtimeCounts.value.queued,
+    inProgress: runtimeCounts.value.running,
+    completed: runtimeCounts.value.done,
+    total: workbenchTasks.value.length,
+    inProgressTaskName: inProgressTask?.title || "None",
+  };
+});
+const etaProfilesByType = computed(() => {
+  const map = new Map<string, number>();
+  for (const item of missionOverview.value?.eta_profiles || []) {
+    const key = String(item?.work_item_type || "").toUpperCase();
+    const median = Number(item?.median_seconds || 0);
+    if (key && Number.isFinite(median) && median > 0) {
+      map.set(key, Math.max(15, Math.round(median)));
+    }
+  }
+  return map;
+});
+const runEtaSeconds = computed(() => {
+  const nowMs = Date.now();
+  let total = 0;
+  for (const task of workbenchTasks.value) {
+    const status = String(task.rawStatus || "").toUpperCase();
+    if (status === "DONE" || status === "FAILED") continue;
+    const baseline = baselineSecondsForType(task.workItemType);
+    if (status === "QUEUED") {
+      total += baseline;
+      continue;
+    }
+    if (status === "RUNNING" || status === "CLAIMED") {
+      const startedMs = task.startedAt ? Date.parse(task.startedAt) : NaN;
+      if (Number.isFinite(startedMs)) {
+        const elapsed = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+        total += Math.max(15, baseline - elapsed);
+      } else {
+        total += baseline;
+      }
+    }
+  }
+  return Math.max(0, Math.round(total));
+});
+const runEtaLabel = computed(() => {
+  const status = String(latestRun.value?.status || "").toUpperCase();
+  if (!hasRun.value) return "—";
+  if (status === "DONE" || status === "SUCCEEDED" || status === "COMPLETED") {
+    return formatElapsed(latestRun.value?.elapsed_seconds);
+  }
+  if (status === "FAILED" || status === "CANCELED") return "Run ended";
+  const seconds = runEtaSeconds.value;
+  if (seconds <= 0) return "Finishing soon";
+  return `~${formatElapsed(seconds)} remaining`;
+});
 
 watch(
   projectId,
@@ -3415,9 +3546,17 @@ async function loadMissionOverview() {
     overviewError.value = "";
     previewLaunchError.value = "";
   } catch (err: any) {
-    missionOverview.value = null;
+    // Keep the last successful payload rendered to avoid full-card flicker.
     overviewError.value = err?.message || "Failed to load Mission Control overview.";
   }
+}
+
+async function refreshOverviewSurface() {
+  if (!projectId.value.trim()) return;
+  runs.value = await listRuns(projectId.value);
+  await loadMissionOverview();
+  syncContext();
+  syncPolling();
 }
 
 async function loadMemoryTimeline() {
@@ -3684,13 +3823,13 @@ async function loadSimilarRuns() {
   }
 }
 
-async function refreshRuntime() {
-  if (!projectId.value.trim() || pollInFlight) return;
+async function refreshRuntime(force = false) {
+  if (!projectId.value.trim() || (pollInFlight && !force)) return;
   pollInFlight = true;
   try {
     runs.value = await listRuns(projectId.value);
     await loadRunRuntime();
-    if (!["QUEUED", "RUNNING"].includes(latestRun.value?.status || "")) {
+    if (!["QUEUED", "RUNNING", "CLAIMED"].includes(latestRun.value?.status || "")) {
       const [projectHealth, score] = await Promise.all([
         fetchHealth(projectId.value),
         fetchLifecycleScore(projectId.value),
@@ -3738,13 +3877,16 @@ function stopPolling() {
 }
 
 function pollIntervalMs() {
-  const status = latestRun.value?.status || "";
-  if (status !== "QUEUED" && status !== "RUNNING") {
+  const status = String(latestRun.value?.status || "").toUpperCase();
+  if (status !== "QUEUED" && status !== "RUNNING" && status !== "CLAIMED") {
     return null;
   }
   const hidden = typeof document !== "undefined" && document.hidden;
   if (status === "QUEUED") {
     return hidden ? 15000 : 12000;
+  }
+  if (status === "CLAIMED") {
+    return hidden ? 8000 : 2500;
   }
   return hidden ? 10000 : 6000;
 }
@@ -3833,7 +3975,7 @@ async function submitVisionRun() {
     visionGoalText.value = "";
     visionScreenshots.value = [];
     ElMessage.success(`Vision run created: task ${response.task_id}`);
-    await loadAll();
+    await refreshRuntime(true);
   } catch (err: any) {
     overviewError.value = err?.message || "Failed to create vision run.";
   } finally {
@@ -3848,7 +3990,7 @@ async function startRunFromIntake(item: any) {
   try {
     const executor = "codex";
     await createRun(projectId.value, executor);
-    await loadAll();
+    await refreshRuntime(true);
   } catch (err: any) {
     overviewError.value = err?.message || "Failed to start run from work intake.";
   } finally {
@@ -3861,7 +4003,7 @@ async function cancelLatestRun() {
   error.value = "";
   try {
     await updateRunStatus(latestRun.value.id, "CANCELED");
-    await loadAll();
+    await refreshRuntime(true);
   } catch (err: any) {
     error.value = err?.message || "Failed to cancel run.";
   }
@@ -3877,7 +4019,7 @@ async function discardLatestRunWorkspace() {
   error.value = "";
   try {
     const result = await discardRun(latestRun.value.id);
-    await loadAll();
+    await refreshRuntime(true);
     ElMessage.success(result?.detail || "Run workspace discarded.");
   } catch (err: any) {
     error.value = err?.message || "Failed to discard run workspace.";
@@ -3892,7 +4034,7 @@ async function resumeLatestRun() {
   error.value = "";
   try {
     await resumeRun(latestRun.value.id, { start_now: true });
-    await loadAll();
+    await refreshRuntime(true);
     ElMessage.success("Run resumed from the last safe checkpoint.");
   } catch (err: any) {
     error.value = err?.message || "Failed to resume run.";
@@ -3933,7 +4075,7 @@ async function approveBudgetExtension() {
       reason: budgetExtensionReason.value?.trim() || "Operator approved from Mission Control",
     });
     budgetDialogOpen.value = false;
-    await loadAll();
+    await refreshRuntime(true);
     ElMessage.success("Budget extended. Run resumed.");
   } catch (err: any) {
     error.value = err?.message || "Failed to extend budget.";
@@ -3948,7 +4090,7 @@ async function retryLatestRunPush() {
   error.value = "";
   try {
     await retryRunPush(latestRun.value.id, { auth_strategy: retryPushStrategy.value || "runtime_default" });
-    await loadAll();
+    await refreshRuntime(true);
     ElMessage.success("Branch push succeeded.");
   } catch (err: any) {
     error.value = err?.message || "Failed to push branch.";
@@ -4022,7 +4164,7 @@ async function submitForkRun() {
         : {},
     });
     forkDialogOpen.value = false;
-    await loadAll();
+    await refreshRuntime(true);
   } catch (err: any) {
     forkError.value = err?.message || "Failed to fork run.";
   } finally {
@@ -4156,7 +4298,7 @@ async function submitImproveRun() {
     improveSuccessMessage.value = createdRun?.run_id
       ? `Created improvement run ${createdRun.run_id} on ${createdRun.branch_name || "a forked branch"}.`
       : "Created a focused improvement run from the latest workspace.";
-    await loadAll();
+    await refreshRuntime(true);
     ElMessage.success("Improvement run created.");
   } catch (err: any) {
     improveError.value = err?.message || "Failed to create improvement run.";
@@ -4178,7 +4320,7 @@ async function submitStrategyPlan() {
       start_now: strategyStartNow.value,
       limit: strategyLimit.value,
     });
-    await loadAll();
+    await refreshRuntime(true);
   } catch (err: any) {
     strategyErrorMessage.value = err?.message || "Failed to create strategy candidates.";
   } finally {
@@ -4193,7 +4335,7 @@ async function refreshStrategyGroup() {
   strategyErrorMessage.value = "";
   try {
     strategyResult.value = await fetchRunStrategies(anchorRunId);
-    await loadAll();
+    await refreshRuntime(true);
   } catch (err: any) {
     strategyErrorMessage.value = err?.message || "Failed to refresh strategy recommendation.";
   } finally {
@@ -4314,7 +4456,7 @@ async function submitArtifactApproval(status: "APPROVED" | "REJECTED") {
       target_id: selectedPrArtifact.value.id,
     });
     createPrApprovalComment.value = "";
-    await loadAll();
+    await refreshOverviewSurface();
   } catch (err: any) {
     createPrApprovalError.value = err?.message || `Failed to ${status === "APPROVED" ? "approve" : "reject"} patch.`;
   } finally {
@@ -4358,6 +4500,55 @@ async function approveWorkbenchPatch() {
   await submitArtifactApproval("APPROVED");
 }
 
+async function requestRunConfirmation() {
+  if (!projectId.value || !latestRun.value?.id) {
+    openApprovalsView();
+    return;
+  }
+  error.value = "";
+  try {
+    const summaryTaskId = String(latestRun.value?.summary?.task_id || "").trim();
+    const artifactId = String(latestPatchArtifact.value?.id || "").trim();
+
+    let targetType = "";
+    let targetId = "";
+    if (summaryTaskId) {
+      targetType = "task";
+      targetId = summaryTaskId;
+    } else if (artifactId) {
+      targetType = "artifact";
+      targetId = artifactId;
+    }
+
+    if (!targetType || !targetId) {
+      ElMessage.warning("No task/artifact target found for confirmation. Opening Approvals.");
+      openApprovalsView();
+      return;
+    }
+
+    const existing = await listApprovals(projectId.value, { target_type: targetType, target_id: targetId });
+    const hasPending = Array.isArray(existing)
+      && existing.some((row: any) => String(row?.status || "").toUpperCase() === "PENDING");
+
+    if (!hasPending) {
+      await createApproval(projectId.value, {
+        target_type: targetType,
+        target_id: targetId,
+        status: "PENDING",
+        decided_by: "ui-user",
+        comment: "Operator confirmation required before patch execution.",
+      });
+      ElMessage.success("Confirmation request created.");
+    } else {
+      ElMessage.info("Confirmation request is already pending.");
+    }
+  } catch (err: any) {
+    error.value = err?.message || "Failed to create confirmation request.";
+  } finally {
+    openApprovalsView();
+  }
+}
+
 async function rejectWorkbenchPatch() {
   if (!latestPatchArtifact.value) return;
   await ensureSelectedPrArtifact(latestPatchArtifact.value);
@@ -4393,7 +4584,7 @@ async function submitCreatePr() {
       branch_name: createPrBranch.value.trim() || undefined,
     });
     createPrLoading.value = false;
-    void loadAll().catch(() => {
+    void refreshOverviewSurface().catch(() => {
       // Keep PR success visible even if follow-up refresh fails.
     });
     return;
@@ -4612,6 +4803,19 @@ function formatElapsed(seconds?: number | null) {
   const minutes = Math.floor(seconds / 60);
   const remainder = Math.round(seconds % 60);
   return `${minutes}m ${remainder}s`;
+}
+
+function baselineSecondsForType(type?: string | null) {
+  const normalized = String(type || "").toUpperCase();
+  const profiled = etaProfilesByType.value.get(normalized);
+  if (typeof profiled === "number" && profiled > 0) return profiled;
+  if (normalized.includes("PLAN")) return 45;
+  if (normalized === "CODE_FRONTEND") return 180;
+  if (normalized === "WRITE_TESTS") return 90;
+  if (normalized === "RUN_TESTS") return 120;
+  if (normalized.includes("REVIEW")) return 70;
+  if (normalized.includes("FIX_TEST_FAILURE")) return 150;
+  return 90;
 }
 
 function formatConfidence(score?: number | null) {

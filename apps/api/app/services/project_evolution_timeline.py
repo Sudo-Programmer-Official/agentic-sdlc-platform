@@ -100,6 +100,17 @@ def _extract_requirement_id_from_payload(payload: dict | None) -> str | None:
     return None
 
 
+def _clip(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    if len(trimmed) <= limit:
+        return trimmed
+    return trimmed[: max(1, limit - 1)].rstrip() + "…"
+
+
 async def build_project_evolution_timeline(
     session: AsyncSession,
     *,
@@ -392,18 +403,27 @@ async def _persist_timeline_items(
 ) -> None:
     # Idempotent ingest key for synthesized events.
     for item in items:
+        normalized_event_type = _clip(item.event_type, 64) or "UNKNOWN_EVENT"
+        normalized_domain = _clip(item.domain, 32) or "run"
+        normalized_title = _clip(item.title, 220) or _event_title(normalized_event_type)
+        normalized_severity = _clip(item.severity, 16) or "info"
+        normalized_status = _clip(item.status, 16) or "observed"
+        normalized_retention_class = _clip(item.retention_class, 16) or "keep"
+        normalized_requirement_id = _clip(item.requirement_id, 120)
+        normalized_contract_id = _clip(item.contract_id, 120)
+        normalized_deployment_ref = _clip(item.deployment_ref, 200)
         existing = await session.scalar(
             select(ProjectEvolutionEvent).where(
                 and_(
                     ProjectEvolutionEvent.tenant_id == tenant_id,
                     ProjectEvolutionEvent.project_id == project_id,
-                    ProjectEvolutionEvent.event_type == item.event_type,
-                    ProjectEvolutionEvent.domain == item.domain,
+                    ProjectEvolutionEvent.event_type == normalized_event_type,
+                    ProjectEvolutionEvent.domain == normalized_domain,
                     ProjectEvolutionEvent.event_at == item.event_at,
                     ProjectEvolutionEvent.run_id == item.run_id,
                     ProjectEvolutionEvent.task_id == item.task_id,
                     ProjectEvolutionEvent.work_item_id == item.work_item_id,
-                    ProjectEvolutionEvent.title == item.title,
+                    ProjectEvolutionEvent.title == normalized_title,
                 )
             )
         )
@@ -414,19 +434,19 @@ async def _persist_timeline_items(
                 tenant_id=tenant_id,
                 project_id=project_id,
                 event_at=item.event_at,
-                event_type=item.event_type,
-                domain=item.domain,
-                title=item.title,
+                event_type=normalized_event_type,
+                domain=normalized_domain,
+                title=normalized_title,
                 summary=item.summary,
-                severity=item.severity,
-                status=item.status,
-                retention_class=item.retention_class,
-                requirement_id=item.requirement_id,
+                severity=normalized_severity,
+                status=normalized_status,
+                retention_class=normalized_retention_class,
+                requirement_id=normalized_requirement_id,
                 run_id=item.run_id,
                 task_id=item.task_id,
                 work_item_id=item.work_item_id,
-                contract_id=item.contract_id,
-                deployment_ref=item.deployment_ref,
+                contract_id=normalized_contract_id,
+                deployment_ref=normalized_deployment_ref,
                 related_artifact_ids=list(item.related_artifact_ids or []),
                 related_file_paths=[],
                 event_metadata=item.metadata if isinstance(item.metadata, dict) else None,

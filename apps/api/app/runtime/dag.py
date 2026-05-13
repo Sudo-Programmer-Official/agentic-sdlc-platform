@@ -205,6 +205,14 @@ def _change_surface(task_payload: dict[str, Any]) -> str:
     return "mixed"
 
 
+def _default_scope_for_surface(surface: str) -> list[str]:
+    if surface == "frontend":
+        return ["index.html"]
+    if surface == "backend":
+        return ["app.py"]
+    return ["index.html", "app.py"]
+
+
 def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]) -> dict:
     if not task_payload:
         return {"blocking": False} if stage_name == "WRITE_TESTS" else {}
@@ -257,10 +265,16 @@ async def generate_template_dag(
         return 0
 
     task_payload = _task_payload_from_summary(run_summary)
-    if task_payload.get("task_id") and not task_payload.get("expected_files"):
-        raise TaskScopeError(f"Task {task_payload['task_id']} has no file scope")
-
     surface = _change_surface(task_payload)
+    if task_payload.get("task_id") and not task_payload.get("expected_files"):
+        fallback_scope = _default_scope_for_surface(surface)
+        task_payload["expected_files"] = fallback_scope
+        log.warning(
+            "Task-scoped run missing explicit file scope; applying fallback task_id=%s scope=%s",
+            task_payload.get("task_id"),
+            fallback_scope,
+        )
+
     nodes = [("PLAN_DAG", "plan")]
     if surface != "frontend":
         nodes.append(("CODE_BACKEND", "code"))

@@ -120,6 +120,37 @@ async def generate_tasks(
                 previous_state={"status": t.status},
             )
 
+    # Cleanup guard for approved requirements graph regeneration:
+    # force=true should produce a clean queue for this project to avoid mixed
+    # stale/manual tasks from prior iterations leaking into the new run plan.
+    cleaned_project_task_ids: list[str] = []
+    if force and doc.type == "requirements_graph":
+        project_active_result = await session.execute(
+            select(Task).where(
+                Task.project_id == project_id,
+                Task.status != "DEPRECATED",
+                Task.deleted_at.is_(None),
+            )
+        )
+        project_active_tasks = list(project_active_result.scalars().all())
+        for task in project_active_tasks:
+            task.status = "DEPRECATED"
+            cleaned_project_task_ids.append(str(task.id))
+        if cleaned_project_task_ids:
+            await log_activity(
+                session,
+                project_id=project_id,
+                entity_type="document",
+                entity_id=doc.id,
+                action_type="tasks.regen_cleaned",
+                event_type="force-regenerate-clean",
+                metadata={
+                    "document_version": doc.version,
+                    "cleaned_task_count": len(cleaned_project_task_ids),
+                },
+                previous_state={"task_ids": cleaned_project_task_ids},
+            )
+
     # Deprecate tasks from previous doc version and link supersedes
     old_tasks: List[Task] = []
     if prev_doc:
@@ -217,6 +248,7 @@ async def generate_tasks(
             "model": prov.get("ai_model_name"),
             "new_tasks": len(created_tasks),
             "deprecated_tasks": len(old_tasks),
+            "cleaned_project_tasks": len(cleaned_project_task_ids),
             "document_version": doc.version,
             "forced": force,
             "lineage_mode": "best_effort_v1",

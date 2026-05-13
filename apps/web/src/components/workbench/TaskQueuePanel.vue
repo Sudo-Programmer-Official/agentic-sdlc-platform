@@ -30,10 +30,34 @@
             <span>{{ task.rawStatus }}</span>
             <span v-if="task.blocking === false" class="task-card__status-note">Optional</span>
           </div>
-          <div class="task-card__progress">{{ task.progress }}%</div>
+          <div class="task-card__progress-wrap">
+            <span class="task-card__eta">{{ etaLabel(task) }}</span>
+            <span class="task-card__progress">{{ task.progress }}%</span>
+          </div>
         </div>
         <div class="task-card__title">{{ task.title }}</div>
         <div class="task-card__meta">{{ task.agent }} · {{ task.executor }}</div>
+        <div v-if="task.selectedStrategy || task.effectiveStrategy || task.executionZone || task.driftRiskScore !== null" class="task-card__strategy">
+          <span v-if="task.selectedStrategy" class="task-card__strategy-chip">Selected {{ task.selectedStrategy }}</span>
+          <span v-if="task.effectiveStrategy && task.effectiveStrategy !== task.selectedStrategy" class="task-card__strategy-chip is-transition">
+            Effective {{ task.effectiveStrategy }}
+          </span>
+          <span v-if="task.executionZone" class="task-card__strategy-chip">{{ task.executionZone }}</span>
+          <span
+            v-if="task.driftRiskScore !== null"
+            class="task-card__strategy-chip"
+            :class="driftChipClass(task.driftRiskScore)"
+          >
+            Drift {{ Math.round((task.driftRiskScore || 0) * 100) }}%
+          </span>
+          <span
+            v-if="task.transitionReason"
+            class="task-card__strategy-chip is-transition"
+            :title="transitionReasonLabel(task.transitionReason)"
+          >
+            {{ transitionReasonLabel(task.transitionReason) }}
+          </span>
+        </div>
         <div class="task-card__bar">
           <span class="task-card__bar-fill" :style="{ width: `${task.progress}%` }" />
         </div>
@@ -70,15 +94,28 @@ type QueueTask = {
   blocking?: boolean;
   agent: string;
   executor: string;
+  workItemType?: string | null;
   progress: number;
   logLine: string;
   changedArtifacts: string[];
+  startedAt?: string | null;
+  finishedAt?: string | null;
   startedAtLabel: string;
   finishedAtLabel: string;
+  selectedStrategy?: string | null;
+  effectiveStrategy?: string | null;
+  transitionReason?: string | null;
+  driftRiskScore?: number | null;
+  executionZone?: string | null;
 };
 
 const props = defineProps<{
   tasks: QueueTask[];
+  etaProfiles?: Array<{
+    work_item_type: string;
+    median_seconds: number;
+    sample_count?: number;
+  }>;
 }>();
 
 const queuedCount = computed(() => props.tasks.filter((task) => task.rawStatus === "QUEUED").length);
@@ -99,6 +136,63 @@ function taskDotClass(status: string, blocking = true) {
 function taskCardClass(task: QueueTask) {
   if (task.rawStatus === "FAILED" && task.blocking === false) return "is-warning";
   return `is-${task.rawStatus.toLowerCase()}`;
+}
+
+function etaLabel(task: QueueTask) {
+  const status = String(task.rawStatus || "").toUpperCase();
+  const startedAtMs = task.startedAt ? Date.parse(task.startedAt) : NaN;
+  const finishedAtMs = task.finishedAt ? Date.parse(task.finishedAt) : NaN;
+  const hasStarted = Number.isFinite(startedAtMs);
+  const hasFinished = Number.isFinite(finishedAtMs);
+  if (hasStarted && hasFinished && finishedAtMs >= startedAtMs) {
+    return `Took ${formatSeconds((finishedAtMs - startedAtMs) / 1000)}`;
+  }
+  if (status === "DONE") return "Completed";
+  if (status === "FAILED") return "Needs retry";
+  if (status === "QUEUED") return "Starts soon";
+  if (!(status === "RUNNING" || status === "CLAIMED")) return "ETA pending";
+
+  const baseline = baselineSeconds(task.workItemType);
+  if (!hasStarted) return `~${formatSeconds(baseline)} remaining`;
+  const elapsed = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  const remaining = Math.max(15, baseline - elapsed);
+  return `~${formatSeconds(remaining)} remaining`;
+}
+
+function baselineSeconds(type?: string | null) {
+  const normalized = String(type || "").toUpperCase();
+  const profile = (props.etaProfiles || []).find((item) => String(item.work_item_type || "").toUpperCase() === normalized);
+  if (profile && Number.isFinite(Number(profile.median_seconds)) && Number(profile.median_seconds) > 0) {
+    return Math.max(15, Math.round(Number(profile.median_seconds)));
+  }
+  if (normalized.includes("PLAN")) return 45;
+  if (normalized === "CODE_FRONTEND") return 180;
+  if (normalized === "WRITE_TESTS") return 90;
+  if (normalized === "RUN_TESTS") return 120;
+  if (normalized.includes("REVIEW")) return 70;
+  if (normalized.includes("FIX_TEST_FAILURE")) return 150;
+  return 90;
+}
+
+function formatSeconds(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.round(seconds / 60);
+  return `${mins}m`;
+}
+
+function driftChipClass(score: number | null | undefined) {
+  const value = typeof score === "number" ? score : 0;
+  if (value >= 0.75) return "is-drift-high";
+  if (value >= 0.45) return "is-drift-medium";
+  return "is-drift-low";
+}
+
+function transitionReasonLabel(reason: string) {
+  const normalized = String(reason || "").trim().toLowerCase();
+  if (normalized === "patch_drift_high_risk_static_frontend") return "Patch drift: switched to safer write mode";
+  if (normalized === "patch_apply_error") return "Patch apply failed: switched strategy";
+  if (normalized === "layout_sensitive_high_drift_risk") return "Layout-sensitive high drift risk";
+  return reason;
 }
 </script>
 
@@ -279,6 +373,22 @@ function taskCardClass(task: QueueTask) {
   font-family: "JetBrains Mono", ui-monospace, monospace;
 }
 
+.task-card__progress-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.task-card__eta {
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: rgba(91, 156, 255, 0.12);
+  padding: 0.12rem 0.48rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  color: var(--text-soft);
+}
+
 .task-card__title {
   margin-top: 0.65rem;
   font-size: 1rem;
@@ -289,6 +399,44 @@ function taskCardClass(task: QueueTask) {
   margin-top: 0.2rem;
   font-size: 0.78rem;
   color: var(--text-soft);
+}
+
+.task-card__strategy {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.task-card__strategy-chip {
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: rgba(148, 163, 184, 0.14);
+  padding: 0.18rem 0.52rem;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.task-card__strategy-chip.is-transition {
+  border-color: rgba(245, 158, 11, 0.3);
+  color: var(--warning);
+}
+
+.task-card__strategy-chip.is-drift-low {
+  border-color: rgba(34, 197, 94, 0.28);
+  color: var(--success);
+}
+
+.task-card__strategy-chip.is-drift-medium {
+  border-color: rgba(245, 158, 11, 0.3);
+  color: var(--warning);
+}
+
+.task-card__strategy-chip.is-drift-high {
+  border-color: rgba(239, 68, 68, 0.28);
+  color: var(--danger);
 }
 
 .task-card__bar {

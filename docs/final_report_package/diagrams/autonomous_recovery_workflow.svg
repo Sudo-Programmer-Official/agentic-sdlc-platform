@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1450" height="900" viewBox="0 0 1450 900">
+  <style>.box{fill:#f8fafc;stroke:#0f172a;stroke-width:2;rx:10;ry:10}.t{font:14px Arial;fill:#0f172a}.h{font:700 20px Arial;fill:#0f172a}.l{stroke:#334155;stroke-width:2;marker-end:url(#a);fill:none}</style>
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker></defs>
+  <text class="h" x="40" y="40">Diagram 4 - Autonomous Recovery Workflow</text>
+
+  <rect class="box" x="80" y="100" width="210" height="60"/><text class="t" x="106" y="136">Failure Detection</text>
+  <rect class="box" x="340" y="100" width="230" height="60"/><text class="t" x="362" y="136">Failure Classification</text>
+  <rect class="box" x="620" y="100" width="250" height="60"/><text class="t" x="643" y="136">Recovery Strategy Selection</text>
+  <rect class="box" x="920" y="100" width="190" height="60"/><text class="t" x="953" y="136">Retry Execution</text>
+  <rect class="box" x="1160" y="100" width="140" height="60"/><text class="t" x="1192" y="136">Validation</text>
+  <rect class="box" x="1160" y="220" width="140" height="60"/><text class="t" x="1190" y="256">Escalation</text>
+
+  <rect class="box" x="340" y="250" width="530" height="220"/>
+  <text class="t" x="360" y="284">Recovery Types:</text>
+  <text class="t" x="360" y="314">- parser failure</text>
+  <text class="t" x="360" y="344">- patch drift</text>
+  <text class="t" x="360" y="374">- validation failure</text>
+  <text class="t" x="360" y="404">- stalled worker</text>
+  <text class="t" x="360" y="434">- budget exhaustion</text>
+
+  <text class="t" x="80" y="540">Bounded retry control: max attempts per work item, failure type, run duration, and cost envelope.</text>
+
+  <line class="l" x1="290" y1="130" x2="340" y2="130"/>
+  <line class="l" x1="570" y1="130" x2="620" y2="130"/>
+  <line class="l" x1="870" y1="130" x2="920" y2="130"/>
+  <line class="l" x1="1110" y1="130" x2="1160" y2="130"/>
+  <line class="l" x1="1230" y1="160" x2="1230" y2="220"/>
+  <line class="l" x1="1160" y1="250" x2="870" y2="250"/>
+  <line class="l" x1="870" y1="250" x2="870" y2="160"/>
+</svg>

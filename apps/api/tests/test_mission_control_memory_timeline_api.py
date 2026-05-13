@@ -246,6 +246,44 @@ async def test_project_memory_timeline_backfill_endpoint_is_idempotent(db_sessio
 
 
 @pytest.mark.anyio
+async def test_project_memory_timeline_handles_long_requirement_document_titles(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Timeline long title", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    session.add(
+        Document(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            type="requirements",
+            version=1,
+            title="Build a responsive personal portfolio web app with Home, About, Projects, Contact, a robust mobile menu, accessibility-first semantics, and extended validation coverage to prove end-to-end runtime reliability under long requirement narratives",
+            body="Long title regression case",
+            source="manual",
+            created_by="ui-user",
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/memory/timeline?limit=20")
+    assert response.status_code == 200, response.text
+
+    persisted = (
+        await session.execute(
+            select(ProjectEvolutionEvent).where(
+                ProjectEvolutionEvent.project_id == project.id,
+                ProjectEvolutionEvent.tenant_id == tenant_id,
+                ProjectEvolutionEvent.domain == "requirement",
+            )
+        )
+    ).scalars().all()
+    assert persisted
+    assert all(len(row.title) <= 220 for row in persisted)
+
+
+@pytest.mark.anyio
 async def test_project_memory_summaries_and_explain_api(db_session):
     session, tenant_id = db_session
     project = Project(name="Timeline intelligence", tenant_id=tenant_id)

@@ -273,6 +273,13 @@ async def create_approval(
         actor=ctx.user_id,
     )
     if target_run_id:
+        run = await session.scalar(
+            select(Run).where(
+                Run.id == target_run_id,
+                Run.project_id == project_id,
+                Run.tenant_id == ctx.tenant_id,
+            )
+        )
         await record_event(
             session,
             project_id=project_id,
@@ -289,6 +296,32 @@ async def create_approval(
             },
             tenant_id=ctx.tenant_id,
         )
+        if (
+            run is not None
+            and approval.status == "APPROVED"
+            and run.status == "PAUSED"
+        ):
+            run.status = "QUEUED"
+            run.finished_at = None
+            summary = dict(run.summary or {})
+            summary.pop("recovery_pause", None)
+            summary["auto_resumed_after_approval"] = True
+            summary["auto_resumed_at"] = datetime.now(UTC).isoformat()
+            run.summary = summary
+            session.add(run)
+            await record_event(
+                session,
+                project_id=project_id,
+                run_id=target_run_id,
+                event_type="RUN_AUTO_RESUMED_AFTER_APPROVAL",
+                actor_type="SYSTEM",
+                tenant_id=ctx.tenant_id,
+                payload={
+                    "reason": "approval_recorded",
+                    "approval_id": str(approval.id),
+                    "new_status": "QUEUED",
+                },
+            )
         await upsert_run_summary(session, target_run_id)
     await session.commit()
     await session.refresh(approval)

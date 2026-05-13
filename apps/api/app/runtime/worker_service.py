@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from sqlalchemy import select, and_, exists, update
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
@@ -25,6 +26,24 @@ from app.services.work_item_state import is_dependency_satisfied
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 log = logging.getLogger("app.runtime.worker")
+_BASE_TICK_SLEEP_SECONDS = 0.5
+_MAX_DEGRADED_SLEEP_SECONDS = 8.0
+
+
+def _is_transient_worker_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, ConnectionError, OperationalError)):
+        return True
+    if isinstance(exc, DBAPIError) and bool(getattr(exc, "connection_invalidated", False)):
+        return True
+    text = str(exc).lower()
+    markers = ("timeout", "timed out", "connection reset", "connection refused", "temporarily unavailable")
+    return any(marker in text for marker in markers)
+
+
+def _degraded_backoff_seconds(streak: int) -> float:
+    # 1.0, 2.0, 4.0, 8.0 ... capped, so flaky networks don't spin the worker loop.
+    exp = max(0, min(streak - 1, 10))
+    return min(_MAX_DEGRADED_SLEEP_SECONDS, float(2**exp))
 
 
 def _work_item_terminal_event_type(status: str) -> str:
@@ -68,7 +87,16 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
             event_type=_work_item_terminal_event_type(wi.status),
             actor_type="AGENT",
             actor_id=str(agent_id),
-            payload={"work_item_id": str(work_item_id), "status": wi.status},
+            payload={
+                "work_item_id": str(work_item_id),
+                "status": wi.status,
+                "mutation_strategy": (wi.result or {}).get("mutation_strategy"),
+                "selected_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("selected"),
+                "effective_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("effective"),
+                "transition_reason": ((wi.result or {}).get("mutation_strategy") or {}).get("strategy_transition_reason"),
+                "drift_risk_score": ((wi.result or {}).get("mutation_strategy") or {}).get("drift_risk_score"),
+                "execution_zone": ((wi.result or {}).get("mutation_strategy") or {}).get("execution_zone"),
+            },
         )
         await session.flush()
         failure_stage = "recovery_policy"
@@ -282,12 +310,29 @@ async def main():
         await session.commit()
         log.info("Registered worker agent_id=%s name=%s", agent.id, agent.name)
 
+    transient_error_streak = 0
     while True:
         try:
             await tick_worker(agent_id)
-        except Exception:
+            transient_error_streak = 0
+            await asyncio.sleep(_BASE_TICK_SLEEP_SECONDS)
+            continue
+        except Exception as exc:
+            if _is_transient_worker_error(exc):
+                transient_error_streak += 1
+                sleep_for = _degraded_backoff_seconds(transient_error_streak)
+                log.warning(
+                    "Worker tick transient failure agent_id=%s streak=%s backoff_seconds=%.1f error=%s",
+                    agent_id,
+                    transient_error_streak,
+                    sleep_for,
+                    exc,
+                )
+                await asyncio.sleep(sleep_for)
+                continue
+            transient_error_streak = 0
             log.exception("Worker tick failed agent_id=%s", agent_id)
-        await asyncio.sleep(0.5)
+            await asyncio.sleep(_BASE_TICK_SLEEP_SECONDS)
 
 
 if __name__ == "__main__":

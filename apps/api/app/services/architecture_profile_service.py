@@ -365,6 +365,15 @@ def _infer_commands(
             kind="preview",
             paths=["."],
         )
+    if "index.html" in repo_set and "test_index_html.py" in repo_set and "frontend_test" not in commands:
+        _set_command(
+            commands,
+            key="static_frontend_test",
+            command="python3 -m pytest -q test_index_html.py",
+            label="Static frontend tests",
+            kind="test",
+            paths=["."],
+        )
     if not commands and packages:
         for package in packages[:2]:
             if package["kind"] == "frontend":

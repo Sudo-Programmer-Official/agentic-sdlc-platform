@@ -339,20 +339,24 @@ async def sync_run_resume_state(
             None,
         )
 
-    can_resume = (
-        run.status in {"FAILED", "CANCELED"}
-        and run.workspace_status != "ERROR"
-        and not active_items
-        and latest_safe is not None
-    )
+    if run.status == "PAUSED":
+        # Paused runs should be resumable when the workspace is healthy and no item is actively executing.
+        can_resume = run.workspace_status != "ERROR" and not active_items
+    else:
+        can_resume = (
+            run.status in {"FAILED", "CANCELED"}
+            and run.workspace_status != "ERROR"
+            and not active_items
+            and latest_safe is not None
+        )
     blocked_reason = None
-    if run.status not in {"FAILED", "CANCELED"}:
+    if run.status not in {"FAILED", "CANCELED", "PAUSED"}:
         blocked_reason = "run_not_terminal"
     elif run.workspace_status == "ERROR":
         blocked_reason = "workspace_error"
     elif active_items:
         blocked_reason = "active_work_items_present"
-    elif latest_safe is None:
+    elif run.status in {"FAILED", "CANCELED"} and latest_safe is None:
         blocked_reason = "no_safe_checkpoint"
 
     resume_state = {
@@ -440,8 +444,8 @@ async def prepare_run_for_resume(
     actor_type: str = "USER",
     actor_id: str | None = None,
 ) -> Run:
-    if run.status not in {"FAILED", "CANCELED"}:
-        raise ValueError("Only failed or canceled runs can be resumed")
+    if run.status not in {"FAILED", "CANCELED", "PAUSED"}:
+        raise ValueError("Only failed, canceled, or paused runs can be resumed")
 
     resume_state = await sync_run_resume_state(session, run)
     if not resume_state.get("can_resume"):
@@ -451,9 +455,11 @@ async def prepare_run_for_resume(
     checkpoint_records = await _load_checkpoint_records(session, run)
     checkpoints = _merged_checkpoints(summary, checkpoint_records)
     checkpoint = _latest_safe_checkpoint(checkpoints)
-    if checkpoint is None:
-        raise ValueError("No safe checkpoint available for resume")
-    durable_checkpoint = _record_by_checkpoint_id(checkpoint_records).get(str(checkpoint.get("checkpoint_id") or ""))
+    durable_checkpoint = (
+        _record_by_checkpoint_id(checkpoint_records).get(str(checkpoint.get("checkpoint_id") or ""))
+        if checkpoint is not None
+        else None
+    )
 
     work_items = (
         await session.execute(
@@ -463,14 +469,21 @@ async def prepare_run_for_resume(
     if any(item.status in {"RUNNING", "CLAIMED"} for item in work_items):
         raise ValueError("Run still has active work items")
 
-    workspace_rehydrated = await _ensure_resume_workspace(session, run)
-    restore_source = _restore_workspace_to_checkpoint(run, checkpoint, patch_blob=_checkpoint_blob(durable_checkpoint))
+    workspace_rehydrated = False
+    restore_source = "paused_continue"
+    if run.status in {"FAILED", "CANCELED"}:
+        if checkpoint is None:
+            raise ValueError("No safe checkpoint available for resume")
+        workspace_rehydrated = await _ensure_resume_workspace(session, run)
+        restore_source = _restore_workspace_to_checkpoint(run, checkpoint, patch_blob=_checkpoint_blob(durable_checkpoint))
 
     requeued_ids: list[str] = []
     for item in work_items:
         should_requeue = item.status in REQUEUEABLE_STATUSES or (
             item.status == "FAILED" and is_blocking_failure(item)
         )
+        if run.status == "PAUSED" and item.status in {"RUNNING", "CLAIMED"}:
+            should_requeue = True
         if not should_requeue:
             continue
         item.status = "QUEUED"
@@ -491,9 +504,9 @@ async def prepare_run_for_resume(
         {
             "resumed_at": _now_iso(),
             "previous_status": previous,
-            "checkpoint_id": checkpoint.get("checkpoint_id"),
+            "checkpoint_id": checkpoint.get("checkpoint_id") if checkpoint else None,
             "requeued_work_item_ids": requeued_ids,
-            "checkpoint_storage_mode": checkpoint.get("storage_mode"),
+            "checkpoint_storage_mode": checkpoint.get("storage_mode") if checkpoint else None,
             "restore_source": restore_source,
             "workspace_rehydrated": workspace_rehydrated,
         }
@@ -503,7 +516,7 @@ async def prepare_run_for_resume(
         **previous_state,
         "resume_count": int(previous_state.get("resume_count") or 0) + 1,
         "last_resume_at": _now_iso(),
-        "last_resume_checkpoint_id": checkpoint.get("checkpoint_id"),
+        "last_resume_checkpoint_id": checkpoint.get("checkpoint_id") if checkpoint else None,
         "last_resume_restore_source": restore_source,
         "last_resume_workspace_rehydrated": workspace_rehydrated,
     }
@@ -522,9 +535,9 @@ async def prepare_run_for_resume(
         payload={
             "previous": previous,
             "new": "QUEUED",
-            "checkpoint_id": checkpoint.get("checkpoint_id"),
+            "checkpoint_id": checkpoint.get("checkpoint_id") if checkpoint else None,
             "requeued_work_item_ids": requeued_ids,
-            "checkpoint_storage_mode": checkpoint.get("storage_mode"),
+            "checkpoint_storage_mode": checkpoint.get("storage_mode") if checkpoint else None,
             "restore_source": restore_source,
             "workspace_rehydrated": workspace_rehydrated,
         },

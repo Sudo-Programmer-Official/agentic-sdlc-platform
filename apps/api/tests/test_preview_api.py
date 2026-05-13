@@ -83,6 +83,25 @@ async def test_project_preview_profile_roundtrip(db_session):
 
 
 @pytest.mark.anyio
+async def test_project_preview_profile_get_bootstraps_default_when_missing(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Preview default", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        fetch_resp = await client.get(f"/api/v1/projects/{project.id}/preview-profile")
+
+    assert fetch_resp.status_code == 200, fetch_resp.text
+    data = fetch_resp.json()
+    assert data["project_id"] == str(project.id)
+    assert data["enabled"] is True
+    assert data["mode"] == "local"
+    assert data["ttl_hours"] == 24
+
+
+@pytest.mark.anyio
 async def test_run_preview_routes_return_launcher_payload(db_session, monkeypatch):
     session, tenant_id = db_session
     project = Project(name="Preview run", tenant_id=tenant_id)

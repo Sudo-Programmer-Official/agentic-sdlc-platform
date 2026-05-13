@@ -22,6 +22,7 @@ RUN_PROGRESS_EVENT_TYPES = {"WORK_ITEM_CLAIMED", "WORK_ITEM_DONE", "WORK_ITEM_FA
 STALL_TIMEOUT_SECONDS = 90
 STALL_EVENT_THROTTLE_SECONDS = 60
 STALL_RECOVERY_MAX_ATTEMPTS = 2
+ACTIVE_STALL_PAUSE_SECONDS = 600
 BUDGET_WARNING_EVENT_THROTTLE_SECONDS = 120
 MAX_IDENTICAL_TEST_FAILURES = 3
 
@@ -270,6 +271,22 @@ def _is_budget_exhausted_failure(item: WorkItem) -> bool:
     )
 
 
+def _is_quota_exhausted_failure(item: WorkItem) -> bool:
+    result = item.result if isinstance(item.result, dict) else {}
+    error_kind = str(result.get("error_kind") or "").lower()
+    error_message = str(result.get("error_message") or "").lower()
+    last_error = str(item.last_error or "").lower()
+    return (
+        error_kind in {"model_error", "rate_limit_error"}
+        and (
+            "insufficient_quota" in error_message
+            or "exceeded your current quota" in error_message
+            or "insufficient_quota" in last_error
+            or "exceeded your current quota" in last_error
+        )
+    )
+
+
 async def _maybe_emit_budget_warning(session, run: Run) -> None:
     summary = dict(run.summary or {})
     contract = summary.get("execution_contract") if isinstance(summary.get("execution_contract"), dict) else {}
@@ -427,6 +444,8 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
         return False
     blocking_failed = [item for item in failed_items if is_blocking_failure(item)]
     if not blocking_failed:
+        return False
+    if any(_is_quota_exhausted_failure(item) for item in blocking_failed):
         return False
     source = blocking_failed[0]
     next_cycle = current_cycles + 1
@@ -605,6 +624,44 @@ async def tick(session):
         if queued and active == 0 and runnable_items:
             await _nudge_worker_if_stalled(session, run, runnable_items, active)
 
+        # Guard: active work items should still emit progress. If not, pause for operator recovery.
+        if active > 0:
+            last_progress = await _latest_progress_ts(session, run)
+            progress_anchor = last_progress or run.updated_at or run.started_at or run.created_at
+            if progress_anchor is not None and progress_anchor.tzinfo is None:
+                progress_anchor = progress_anchor.replace(tzinfo=timezone.utc)
+            stalled_for = (datetime.now(timezone.utc) - progress_anchor).total_seconds() if progress_anchor else 0.0
+            if stalled_for >= ACTIVE_STALL_PAUSE_SECONDS:
+                ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+                if ok:
+                    summary = dict(run.summary or {})
+                    summary["goal_state"] = "NEEDS_HUMAN_INPUT"
+                    summary["recovery_pause"] = {
+                        "reason": "active_work_stalled_no_progress",
+                        "paused_at": datetime.now(timezone.utc).isoformat(),
+                        "active_count": int(active),
+                        "queued_count": int(queued),
+                        "stalled_for_seconds": int(stalled_for),
+                    }
+                    run.summary = summary
+                    session.add(run)
+                    await record_event(
+                        session,
+                        project_id=run.project_id,
+                        run_id=run.id,
+                        event_type="RUN_ACTIVE_STALLED_PAUSED",
+                        actor_type="SYSTEM",
+                        tenant_id=run.tenant_id,
+                        message="Paused run: active work item execution stalled with no progress signal.",
+                        payload={
+                            "reason": "active_work_stalled_no_progress",
+                            "active_count": int(active),
+                            "queued_count": int(queued),
+                            "stalled_for_seconds": int(stalled_for),
+                        },
+                    )
+                    continue
+
         # Watchdog: avoid infinite RUNNING/QUEUED when there is no execution progress.
         if queued and active == 0:
             last_progress = await _latest_progress_ts(session, run)
@@ -779,6 +836,10 @@ async def tick(session):
             locked.finished_at = datetime.now(timezone.utc)
             summary = dict(locked.summary or {})
             summary["goal_state"] = "DONE"
+            if final_status == "COMPLETED":
+                summary.pop("degraded_completion", None)
+                summary.pop("degraded_reason", None)
+                summary.pop("degraded_at", None)
             locked.summary = summary
             session.add(locked)
             await record_event(

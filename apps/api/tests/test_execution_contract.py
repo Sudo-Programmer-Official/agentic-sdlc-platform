@@ -183,3 +183,29 @@ def test_build_execution_contract_merges_project_contract_assumptions():
     assert "Repository: acme/example" in contract.assumptions_used
     assert "Branch strategy: run_branch_then_pr" in contract.assumptions_used
     assert "Default branch: main" in contract.assumptions_used
+
+
+def test_build_execution_contract_prefers_static_frontend_test_command():
+    contract = build_execution_contract(
+        run_summary={
+            "goal": "Refine portfolio navigation",
+            "target_files": ["index.html", "styles.css"],
+        },
+        architecture_profile={
+            "command_index": {
+                "static_frontend_test": {
+                    "command": "python3 -m pytest -q test_index_html.py",
+                    "kind": "test",
+                    "paths": ["."],
+                },
+                "repo_tests": {
+                    "command": "python3 -m pytest -q",
+                    "kind": "test",
+                    "paths": ["."],
+                },
+            }
+        },
+        plan_snapshot=None,
+    )
+
+    assert contract.test_command == "python3 -m pytest -q test_index_html.py"

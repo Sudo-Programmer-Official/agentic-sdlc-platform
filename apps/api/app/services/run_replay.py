@@ -30,6 +30,15 @@ def _fork_branch_name(source_run: Run, override: str | None) -> str:
 
 def _fork_summary(source_run: Run, overrides: dict[str, Any] | None) -> dict[str, Any]:
     summary = copy.deepcopy(source_run.summary or {})
+    for key in (
+        "degraded_completion",
+        "degraded_reason",
+        "degraded_at",
+        "stall_recovery_attempts",
+        "goal_state",
+        "recovery_pause",
+    ):
+        summary.pop(key, None)
     summary["forked_from_run_id"] = str(source_run.id)
     summary["forked_from_status"] = source_run.status
     if overrides:

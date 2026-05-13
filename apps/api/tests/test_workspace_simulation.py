@@ -361,3 +361,53 @@ async def test_test_executor_skips_when_pytest_collects_no_tests(tmp_path, monke
     assert result["status"] == "SKIPPED"
     assert result["message"] == "No relevant tests were collected; validation skipped."
     assert result["payload"]["skip_reason"] == "no_tests_collected"
+
+
+@pytest.mark.anyio
+async def test_test_executor_scopes_static_layout_changes_to_static_test_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_COMMAND", "pytest -q")
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_workspace_command_async(command, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(
+            status="SUCCEEDED",
+            stdout="scoped",
+            stderr="",
+            exit_code=0,
+            timed_out=False,
+            log_path=None,
+            audit_path=None,
+        )
+
+    monkeypatch.setattr("app.runtime.test_executor.run_workspace_command_async", fake_run_workspace_command_async)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "test_index_html.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    logs_root = tmp_path / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+
+    work_item = WorkItem(
+        project_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        type="RUN_TESTS",
+        executor="test",
+        payload={
+            "target_files": ["index.html", "styles.css"],
+        },
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        repo_path=str(repo_root),
+        logs_path=str(logs_root),
+        workspace_status="READY",
+    )
+
+    result = await TestExecutor().execute(work_item, context)
+
+    assert result["status"] == "DONE"
+    assert captured["command"] == [sys.executable, "-m", "pytest", "-q", "test_index_html.py"]

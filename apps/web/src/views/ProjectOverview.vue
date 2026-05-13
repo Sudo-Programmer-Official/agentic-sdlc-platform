@@ -12,6 +12,15 @@
       </div>
     </div>
 
+    <div class="rounded-2xl border-2 border-sky-300 bg-sky-50 p-4 shadow-sm">
+      <div class="text-xs font-semibold uppercase tracking-[0.2em] text-sky-700">Live Execution Status</div>
+      <div class="mt-2 grid gap-2 text-sm font-semibold text-slate-900 md:grid-cols-3">
+        <div>Queue: {{ overviewStatusBanner.queue }}</div>
+        <div>In Progress: {{ overviewStatusBanner.inProgress }} ({{ overviewStatusBanner.inProgressTaskName }})</div>
+        <div>Completed: {{ overviewStatusBanner.completed }} / {{ overviewStatusBanner.total }}</div>
+      </div>
+    </div>
+
     <div class="project-overview-primary rounded-2xl border border-slate-200 p-5 shadow-sm">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -454,6 +463,9 @@
           <el-table-column prop="finished_at" label="Finished" width="150" />
           <el-table-column label="Actions" width="280">
             <template #default="{ row }">
+              <el-button size="small" plain :loading="Boolean(runResumeLoading[row.id])" :disabled="row.status !== 'PAUSED'" @click="resumeRunById(row.id)">
+                Resume
+              </el-button>
               <el-button size="small" plain :loading="Boolean(runUnblockLoading[row.id])" :disabled="!['RUNNING','QUEUED'].includes(row.status)" @click="unblockRunById(row.id)">
                 Unblock
               </el-button>
@@ -859,13 +871,38 @@
     <el-dialog v-model="showTasksDialog" title="Tasks" width="640px">
       <div class="mb-3 flex items-center justify-between gap-3">
         <div class="text-xs text-slate-500">
-          Create a task manually, or approve requirements/create a document and use Regenerate Tasks.
+          Create tasks manually or from approved requirements. Use Run All to execute in deterministic order.
         </div>
-        <el-button type="primary" size="small" plain @click="openCreateTaskDialog">
-          Create Task
-        </el-button>
+        <div class="flex items-center gap-2">
+          <el-button type="primary" size="small" plain @click="openCreateTaskDialog">
+            Create Task
+          </el-button>
+          <el-button
+            type="success"
+            size="small"
+            plain
+            :disabled="!runnableTasks.length || runAllLoading"
+            :loading="runAllLoading"
+            @click="runAllTasksOrdered"
+          >
+            Run All (Ordered)
+          </el-button>
+        </div>
       </div>
-      <el-table :data="tasks" size="small">
+      <div class="mb-3 flex flex-wrap gap-2 text-xs">
+        <el-tag effect="light" type="info">Total {{ sortedTasks.length }}</el-tag>
+        <el-tag effect="light" type="warning">Queued {{ taskStatusCounts.queued }}</el-tag>
+        <el-tag effect="light" type="primary">In Progress {{ taskStatusCounts.inProgress }}</el-tag>
+        <el-tag effect="light" type="success">Done {{ taskStatusCounts.done }}</el-tag>
+        <el-tag effect="light" type="danger">Blocked/Failed {{ taskStatusCounts.failed }}</el-tag>
+      </div>
+      <div v-if="runAllProgressLabel" class="mb-2 text-xs text-slate-500">{{ runAllProgressLabel }}</div>
+      <el-table :data="sortedTasks" size="small">
+        <el-table-column label="#" width="56">
+          <template #default="scope">
+            <span class="font-mono text-xs text-slate-500">{{ scope.$index + 1 }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="id" label="ID" width="240" />
         <el-table-column label="Title" min-width="260">
           <template #default="scope">
@@ -903,6 +940,7 @@
               type="primary"
               size="small"
               text
+              :disabled="runAllLoading || !canRunTask(scope.row)"
               :loading="taskRunLoadingId === scope.row.id"
               @click="runTask(scope.row)"
             >
@@ -1014,7 +1052,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
@@ -1044,6 +1082,7 @@ import {
   listRuns,
   createRun,
   updateRunStatus,
+  resumeRun,
   unblockRun,
   listWorkItems,
   listRunEvents,
@@ -1070,11 +1109,43 @@ const error = ref("");
 const projectId = computed(() => (route.params.projectId as string) || projectContext.projectId);
 const projectName = computed(() => projectContext.projectName || "Project");
 const stage = computed(() => projectContext.stage || "UNKNOWN");
+const runStatusPriority: Record<string, number> = {
+  RUNNING: 0,
+  CLAIMED: 1,
+  QUEUED: 2,
+  PAUSED: 3,
+  FAILED: 4,
+  CANCELED: 5,
+  DONE: 6,
+  COMPLETED: 7,
+};
+function runTimestampScore(run: any) {
+  return (
+    Date.parse(String(run?.started_at || "")) ||
+    Date.parse(String(run?.created_at || "")) ||
+    Date.parse(String(run?.updated_at || "")) ||
+    0
+  );
+}
+function canonicalizeRuns(runList: any[]) {
+  const rows = Array.isArray(runList) ? [...runList] : [];
+  return rows.sort((a, b) => {
+    const aStatus = String(a?.status || "").toUpperCase();
+    const bStatus = String(b?.status || "").toUpperCase();
+    const aPriority = runStatusPriority[aStatus] ?? 99;
+    const bPriority = runStatusPriority[bStatus] ?? 99;
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    const byTime = runTimestampScore(b) - runTimestampScore(a);
+    if (byTime !== 0) return byTime;
+    return String(b?.id || "").localeCompare(String(a?.id || ""));
+  });
+}
 const runSummary = computed(() => {
   if (!runs.value.length) return "No runs yet";
   return `${runs.value.length} run${runs.value.length === 1 ? "" : "s"}`;
 });
-const latestRunText = computed(() => runs.value[0]?.id || projectContext.latestRunId || "None");
+const latestRunRecord = computed(() => runs.value[0] || null);
+const latestRunText = computed(() => latestRunRecord.value?.id || projectContext.latestRunId || "None");
 const architectureRefreshNeeded = computed(() => projectContext.architectureRefreshNeeded);
 const planRefreshNeeded = computed(() => projectContext.planRefreshNeeded);
 const testRefreshNeeded = computed(() => projectContext.testRefreshNeeded);
@@ -1155,6 +1226,8 @@ const improvementRequestsError = ref("");
 const requirementSummaryCards = ref<any[]>([]);
 const tasksError = ref("");
 const taskRunLoadingId = ref("");
+const runAllLoading = ref(false);
+const runAllProgressLabel = ref("");
 const createTaskLoading = ref(false);
 const createTaskError = ref("");
 const newTask = ref({
@@ -1212,6 +1285,9 @@ const runs = ref<any[]>([]);
 const runsLoading = ref(false);
 const runError = ref("");
 const runUnblockLoading = ref<Record<string, boolean>>({});
+const runResumeLoading = ref<Record<string, boolean>>({});
+let overviewPollHandle: ReturnType<typeof setTimeout> | null = null;
+let overviewPollInFlight = false;
 const selectedExecutor = ref("codex");
 const executorSelectionDirty = ref(false);
 const workItems = ref<any[]>([]);
@@ -1239,6 +1315,24 @@ const taskLifecycle = computed(() => {
     needsRerun: rows.filter((r) => has(r, ["FAILED", "CANCELED", "BLOCKED"])).length,
   };
 });
+const overviewStatusBanner = computed(() => {
+  const rows = taskSnapshot.value || [];
+  const statusOf = (row: any) => String(row?.status || "").toUpperCase();
+  const inProgressStatuses = new Set(["RUNNING", "IN_PROGRESS", "CLAIMED"]);
+  const queueStatuses = new Set(["PENDING", "QUEUED"]);
+  const doneStatuses = new Set(["DONE", "COMPLETED", "CLOSED"]);
+  const inProgressTask = rows.find((row) => inProgressStatuses.has(statusOf(row)));
+  const inProgressTaskName = String(
+    inProgressTask?.title || inProgressTask?.task_title || inProgressTask?.name || inProgressTask?.id || "None"
+  );
+  return {
+    queue: rows.filter((row) => queueStatuses.has(statusOf(row))).length,
+    inProgress: rows.filter((row) => inProgressStatuses.has(statusOf(row))).length,
+    completed: rows.filter((row) => doneStatuses.has(statusOf(row))).length,
+    total: rows.length,
+    inProgressTaskName,
+  };
+});
 const improvementLifecycle = computed(() => {
   const rows = improvementRequests.value || [];
   const statusOf = (row: any) => String(row?.status || "").toUpperCase();
@@ -1249,6 +1343,47 @@ const improvementLifecycle = computed(() => {
     running: count(["RUNNING"]),
     completed: count(["COMPLETED", "DONE"]),
     failed: count(["FAILED", "CANCELED"]),
+  };
+});
+const statusPriority: Record<string, number> = {
+  RUNNING: 0,
+  CLAIMED: 1,
+  PENDING: 2,
+  QUEUED: 3,
+  FAILED: 4,
+  BLOCKED: 5,
+  CANCELED: 6,
+  DONE: 7,
+  COMPLETED: 8,
+  CLOSED: 9,
+};
+const sortedTasks = computed(() => {
+  const rows = Array.isArray(tasks.value) ? [...tasks.value] : [];
+  return rows.sort((a, b) => {
+    const aStatus = String(a?.status || "").toUpperCase();
+    const bStatus = String(b?.status || "").toUpperCase();
+    const aPriority = statusPriority[aStatus] ?? 99;
+    const bPriority = statusPriority[bStatus] ?? 99;
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    const aVersion = Number(a?.generated_from_document_version || 0);
+    const bVersion = Number(b?.generated_from_document_version || 0);
+    if (aVersion !== bVersion) return bVersion - aVersion;
+    const aCreated = Date.parse(String(a?.created_at || "")) || 0;
+    const bCreated = Date.parse(String(b?.created_at || "")) || 0;
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    return String(a?.id || "").localeCompare(String(b?.id || ""));
+  });
+});
+const runnableTasks = computed(() => sortedTasks.value.filter((task) => canRunTask(task)));
+const taskStatusCounts = computed(() => {
+  const rows = sortedTasks.value;
+  const statusOf = (row: any) => String(row?.status || "").toUpperCase();
+  const count = (statuses: string[]) => rows.filter((row) => statuses.includes(statusOf(row))).length;
+  return {
+    queued: count(["PENDING", "QUEUED"]),
+    inProgress: count(["RUNNING", "IN_PROGRESS", "CLAIMED"]),
+    done: count(["DONE", "COMPLETED", "CLOSED"]),
+    failed: count(["FAILED", "BLOCKED", "CANCELED"]),
   };
 });
 const requirementsNeedingReview = computed(
@@ -1707,6 +1842,42 @@ async function runTask(task: any) {
     runError.value = message;
   } finally {
     taskRunLoadingId.value = "";
+  }
+}
+
+function canRunTask(task: any) {
+  const status = String(task?.status || "").toUpperCase();
+  return ["PENDING", "QUEUED", "FAILED", "BLOCKED", "CANCELED"].includes(status);
+}
+
+async function runAllTasksOrdered() {
+  if (!projectId.value || runAllLoading.value) return;
+  const queue = runnableTasks.value;
+  if (!queue.length) {
+    ElMessage.info("No runnable tasks found.");
+    return;
+  }
+  runAllLoading.value = true;
+  runAllProgressLabel.value = `Starting 0/${queue.length} tasks…`;
+  tasksError.value = "";
+  runError.value = "";
+  let started = 0;
+  try {
+    for (const task of queue) {
+      runAllProgressLabel.value = `Starting ${started + 1}/${queue.length}: ${task.title || task.id}`;
+      await createRun(projectId.value, selectedExecutor.value, task.id);
+      started += 1;
+    }
+    await Promise.all([loadTasks(), loadRuns()]);
+    ElMessage.success(`Queued ${started} task run${started === 1 ? "" : "s"} in order.`);
+  } catch (err: any) {
+    const message = err?.message || "Failed while queueing all tasks";
+    tasksError.value = message;
+    runError.value = message;
+    ElMessage.error(`Queued ${started}/${queue.length}. ${message}`);
+  } finally {
+    runAllLoading.value = false;
+    runAllProgressLabel.value = "";
   }
 }
 
@@ -2226,10 +2397,10 @@ async function loadRuns() {
   runsLoading.value = true;
   runError.value = "";
   try {
-    runs.value = await listRuns(projectId.value);
+    runs.value = canonicalizeRuns(await listRuns(projectId.value));
     updateProjectContext({
-      latestRunId: runs.value[0]?.id || "",
-      runStatus: runs.value[0]?.status || "IDLE",
+      latestRunId: latestRunRecord.value?.id || "",
+      runStatus: latestRunRecord.value?.status || "IDLE",
       hasActiveRun: Boolean(runs.value.length),
       updatedAt: new Date().toISOString(),
     });
@@ -2287,14 +2458,30 @@ async function unblockRunById(runId: string) {
   }
 }
 
+async function resumeRunById(runId: string) {
+  runError.value = "";
+  runResumeLoading.value = { ...runResumeLoading.value, [runId]: true };
+  try {
+    await resumeRun(runId, { start_now: true });
+    ElMessage.success("Run resumed.");
+    await loadRuns();
+    await loadWorkItems();
+    await loadRunEvents();
+  } catch (err: any) {
+    runError.value = err?.message || "Failed to resume run";
+  } finally {
+    runResumeLoading.value = { ...runResumeLoading.value, [runId]: false };
+  }
+}
+
 async function loadWorkItems() {
-  if (!projectId.value || !runs.value.length) {
+  if (!projectId.value || !latestRunRecord.value?.id) {
     workItems.value = [];
     return;
   }
   workItemsLoading.value = true;
   workItemError.value = "";
-  const currentRunId = runs.value[0].id;
+  const currentRunId = latestRunRecord.value.id;
   try {
     workItems.value = await listWorkItems(projectId.value, currentRunId);
   } catch (err: any) {
@@ -2305,16 +2492,49 @@ async function loadWorkItems() {
 }
 
 async function loadRunEvents() {
-  if (!runs.value.length) {
+  if (!latestRunRecord.value?.id) {
     runEvents.value = [];
     return;
   }
-  const currentRunId = runs.value[0].id;
+  const currentRunId = latestRunRecord.value.id;
   try {
     runEvents.value = await listRunEvents(currentRunId);
   } catch (err) {
     // ignore
   }
+}
+
+function shouldPollOverview() {
+  const status = String(latestRunRecord.value?.status || "").toUpperCase();
+  return status === "RUNNING" || status === "QUEUED" || status === "CLAIMED";
+}
+
+function stopOverviewPolling() {
+  if (overviewPollHandle) {
+    clearTimeout(overviewPollHandle);
+    overviewPollHandle = null;
+  }
+}
+
+async function pollOverviewOnce() {
+  if (!projectId.value || overviewPollInFlight) return;
+  overviewPollInFlight = true;
+  try {
+    await loadRuns();
+  } finally {
+    overviewPollInFlight = false;
+    syncOverviewPolling();
+  }
+}
+
+function syncOverviewPolling() {
+  stopOverviewPolling();
+  if (!shouldPollOverview()) return;
+  const hidden = typeof document !== "undefined" && document.hidden;
+  const delayMs = hidden ? 5000 : 2000;
+  overviewPollHandle = setTimeout(() => {
+    void pollOverviewOnce();
+  }, delayMs);
 }
 
 async function advanceStage(target: string) {
@@ -2429,12 +2649,24 @@ onMounted(async () => {
   await loadWorkItems();
   await loadRunEvents();
   await hydrateGitHubInstallFromRoute();
+  syncOverviewPolling();
+});
+
+onBeforeUnmount(() => {
+  stopOverviewPolling();
 });
 
 watch(
   () => [route.query.installation_id, route.query.setup_action],
   () => {
     void hydrateGitHubInstallFromRoute();
+  }
+);
+
+watch(
+  () => latestRunRecord.value?.status,
+  () => {
+    syncOverviewPolling();
   }
 );
 </script>

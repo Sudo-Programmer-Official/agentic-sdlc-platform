@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, RunSummary, Task
+from app.db.models import Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, RunSummary, Task, WorkItem
 from app.schemas.mission_control import (
     MissionControlArtifactRef,
     MissionControlChangeImpact,
@@ -19,6 +19,7 @@ from app.schemas.mission_control import (
     MissionControlPreviewAndPrs,
     MissionControlRunCard,
     MissionControlStrategyInsight,
+    MissionControlEtaProfile,
     MissionControlSystemInsights,
     MissionControlViolationInsights,
     MissionControlViolationSample,
@@ -684,6 +685,64 @@ def _build_system_insights(summaries: list[RunSummary]) -> MissionControlSystemI
     )
 
 
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return float(ordered[mid])
+    return float((ordered[mid - 1] + ordered[mid]) / 2)
+
+
+async def _build_eta_profiles(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    recent_run_ids: list[uuid.UUID],
+) -> list[MissionControlEtaProfile]:
+    if not recent_run_ids:
+        return []
+    rows = (
+        await session.execute(
+            select(WorkItem.type, WorkItem.started_at, WorkItem.finished_at)
+            .where(
+                WorkItem.tenant_id == tenant_id,
+                WorkItem.project_id == project_id,
+                WorkItem.run_id.in_(recent_run_ids),
+                WorkItem.status == "DONE",
+                WorkItem.started_at.is_not(None),
+                WorkItem.finished_at.is_not(None),
+            )
+            .order_by(WorkItem.finished_at.desc())
+            .limit(800)
+        )
+    ).all()
+    durations_by_type: dict[str, list[float]] = {}
+    for work_item_type, started_at, finished_at in rows:
+        if not work_item_type or started_at is None or finished_at is None:
+            continue
+        elapsed = (finished_at - started_at).total_seconds()
+        if elapsed <= 0:
+            continue
+        durations_by_type.setdefault(str(work_item_type), []).append(float(elapsed))
+    profiles: list[MissionControlEtaProfile] = []
+    for work_item_type, values in durations_by_type.items():
+        if not values:
+            continue
+        profiles.append(
+            MissionControlEtaProfile(
+                work_item_type=work_item_type,
+                median_seconds=round(_median(values), 3),
+                sample_count=len(values),
+            )
+        )
+    profiles.sort(key=lambda item: item.work_item_type)
+    return profiles
+
+
 async def build_mission_control_overview(
     session: AsyncSession,
     *,
@@ -761,6 +820,12 @@ async def build_mission_control_overview(
         tenant_id=tenant_id,
         project_id=project_id,
     )
+    eta_profiles = await _build_eta_profiles(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        recent_run_ids=[summary.run_id for summary in summaries[:20]],
+    )
     return MissionControlOverviewResponse(
         work_intake=work_intake,
         recent_runs=recent_runs,
@@ -772,6 +837,7 @@ async def build_mission_control_overview(
             latest_run.summary if latest_run is not None and isinstance(latest_run.summary, dict) else None
         ),
         strategy_learning=_build_strategy_learning(runs),
+        eta_profiles=eta_profiles,
         system_insights=_build_system_insights(summaries),
         violation_insights=_build_violation_insights(summaries, run_by_id),
         imported_references=imported_references,

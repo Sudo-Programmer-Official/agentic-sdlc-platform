@@ -115,6 +115,12 @@ class MissionControlStrategyInsight(BaseModel):
     average_elapsed_seconds: float | None = None
 
 
+class MissionControlEtaProfile(BaseModel):
+    work_item_type: str
+    median_seconds: float
+    sample_count: int = 0
+
+
 class MissionControlNamedCount(BaseModel):
     name: str
     count: int
@@ -284,6 +290,7 @@ class MissionControlOverviewResponse(BaseModel):
     project_contract: ProjectContractSummaryOut | None = None
     latest_execution_contract: MissionControlExecutionContractTelemetry | None = None
     strategy_learning: list[MissionControlStrategyInsight] = Field(default_factory=list)
+    eta_profiles: list[MissionControlEtaProfile] = Field(default_factory=list)
     system_insights: MissionControlSystemInsights
     violation_insights: MissionControlViolationInsights | None = None
     imported_references: list[MissionControlImportedReference] = Field(default_factory=list)

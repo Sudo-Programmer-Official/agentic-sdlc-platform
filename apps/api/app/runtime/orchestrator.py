@@ -710,6 +710,12 @@ class RunOrchestrator:
                     "work_item_id": str(wi.id),
                     "status": wi.status,
                     "message": result.get("message"),
+                    "mutation_strategy": (wi.result or {}).get("mutation_strategy"),
+                    "selected_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("selected"),
+                    "effective_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("effective"),
+                    "transition_reason": ((wi.result or {}).get("mutation_strategy") or {}).get("strategy_transition_reason"),
+                    "drift_risk_score": ((wi.result or {}).get("mutation_strategy") or {}).get("drift_risk_score"),
+                    "execution_zone": ((wi.result or {}).get("mutation_strategy") or {}).get("execution_zone"),
                 },
             )
             session.add(wi)

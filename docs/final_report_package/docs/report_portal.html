@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agentic SDLC Platform - Final Report Portal</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #e2e8f0;
+      --accent: #0369a1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1, h2, h3 { margin: 0 0 12px; }
+    p { margin: 0 0 10px; color: var(--muted); }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    .grid-2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+    .links a {
+      color: var(--accent);
+      text-decoration: none;
+      display: block;
+      margin: 6px 0;
+    }
+    .links a:hover { text-decoration: underline; }
+    .diagram {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f1f5f9; }
+    code { background: #f1f5f9; padding: 1px 5px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Final Report Portal</h1>
+      <p>Autonomous, governed software delivery platform with persistent engineering memory and bounded execution.</p>
+      <div class="links">
+        <a href="./final_report.md">Open full report (Markdown)</a>
+        <a href="./index.md">Open package index</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>All Assets</h2>
+      <div class="grid grid-2 links">
+        <div>
+          <h3>Diagrams</h3>
+          <a href="../diagrams/system_architecture.svg">system_architecture.svg</a>
+          <a href="../diagrams/autonomous_execution_pipeline.svg">autonomous_execution_pipeline.svg</a>
+          <a href="../diagrams/context_selection_ranking_engine.svg">context_selection_ranking_engine.svg</a>
+          <a href="../diagrams/autonomous_recovery_workflow.svg">autonomous_recovery_workflow.svg</a>
+          <a href="../diagrams/requirement_centric_engineering_memory.svg">requirement_centric_engineering_memory.svg</a>
+        </div>
+        <div>
+          <h3>Tables and Appendix</h3>
+          <a href="../tables/table_1_existing_vs_proposed.md">table_1_existing_vs_proposed.md</a>
+          <a href="../tables/table_2_runtime_evaluation_metrics.md">table_2_runtime_evaluation_metrics.md</a>
+          <a href="../tables/table_3_dataset_input_sources.md">table_3_dataset_input_sources.md</a>
+          <a href="../tables/table_4_agent_responsibilities.md">table_4_agent_responsibilities.md</a>
+          <a href="../tables/table_5_technology_stack.md">table_5_technology_stack.md</a>
+          <a href="../appendix/execution_lifecycle_example.md">execution_lifecycle_example.md</a>
+          <a href="../appendix/runtime_metrics_availability.md">runtime_metrics_availability.md</a>
+          <a href="../screenshots/README.md">screenshots/README.md</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Diagrams Preview</h2>
+      <h3>Diagram 1 - Overall System Architecture</h3>
+      <img class="diagram" src="../diagrams/system_architecture.svg" alt="System Architecture" />
+      <h3>Diagram 2 - Autonomous Execution Pipeline</h3>
+      <img class="diagram" src="../diagrams/autonomous_execution_pipeline.svg" alt="Execution Pipeline" />
+      <h3>Diagram 3 - Context Selection and Ranking Engine</h3>
+      <img class="diagram" src="../diagrams/context_selection_ranking_engine.svg" alt="Context Ranking Engine" />
+      <h3>Diagram 4 - Autonomous Recovery Workflow</h3>
+      <img class="diagram" src="../diagrams/autonomous_recovery_workflow.svg" alt="Recovery Workflow" />
+      <h3>Diagram 5 - Requirement-Centric Engineering Memory</h3>
+      <img class="diagram" src="../diagrams/requirement_centric_engineering_memory.svg" alt="Engineering Memory" />
+    </div>
+
+    <div class="card">
+      <h2>Tables Preview</h2>
+
+      <h3>Table 1 - Existing Systems vs Proposed System</h3>
+      <table>
+        <thead><tr><th>Capability</th><th>Traditional CI/CD</th><th>AI Coding Assistants</th><th>Proposed System</th></tr></thead>
+        <tbody>
+          <tr><td>Multi-agent execution</td><td>Limited</td><td>Mostly single-agent/session</td><td>DAG work-items across planner/code/test/review roles</td></tr>
+          <tr><td>Autonomous recovery</td><td>Basic rerun/retry</td><td>Manual prompt retry</td><td>Failure-class policy + bounded retries</td></tr>
+          <tr><td>Context ranking</td><td>Minimal</td><td>Ad hoc</td><td>Scored ranking + top-k bounded pack</td></tr>
+          <tr><td>Requirement lineage</td><td>Weak</td><td>Often absent</td><td>Requirement-linked tasks/runs/artifacts/memory</td></tr>
+          <tr><td>Governance enforcement</td><td>Static checks</td><td>Limited</td><td>Patch guard + contract + budget controls</td></tr>
+          <tr><td>Runtime memory</td><td>Log-centric</td><td>Session-centric</td><td>Persistent replayable engineering memory</td></tr>
+          <tr><td>Deployment safety</td><td>Pipeline-dependent</td><td>Not core</td><td>Validation-gated delivery with escalation</td></tr>
+          <tr><td>Validation orchestration</td><td>Deterministic scripts</td><td>User-driven</td><td>Stage-aware validation and recovery checkpoints</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Table 2 - Runtime Evaluation Metrics</h3>
+      <table>
+        <thead><tr><th>Metric</th><th>Description</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>Patch success rate</td><td>Accepted mutation attempts ratio</td><td>Reliability</td></tr>
+          <tr><td>Recovery success rate</td><td>Successful repair attempts ratio</td><td>Repair effectiveness</td></tr>
+          <tr><td>Time-to-green</td><td>Run start to passing validation</td><td>Velocity</td></tr>
+          <tr><td>Validation pass rate</td><td>Pass ratio at validation gates</td><td>Quality</td></tr>
+          <tr><td>Average retries</td><td>Mean retries per run/work-item</td><td>Stability signal</td></tr>
+          <tr><td>Context efficiency ratio</td><td>Selected context / loaded context</td><td>Context discipline</td></tr>
+          <tr><td>Safe-change success rate</td><td>Scoped changes completed without policy violations</td><td>Governed autonomy</td></tr>
+          <tr><td>Budget utilization</td><td>Consumed budget vs configured limit</td><td>Bounded execution</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Table 3/4/5</h3>
+      <p>Open full versions from links above for dataset sources, agent responsibilities, and technology stack.</p>
+    </div>
+
+    <div class="card">
+      <h2>Screenshots</h2>
+      <p>Place UI captures at:</p>
+      <p><code>../screenshots/mission_control_view.png</code> and <code>../screenshots/requirements_view.png</code></p>
+      <p>Then add image tags in this file if you want inline preview.</p>
+    </div>
+  </div>
+</body>
+</html>

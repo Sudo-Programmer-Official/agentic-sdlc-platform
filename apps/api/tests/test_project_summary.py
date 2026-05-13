@@ -6,65 +6,27 @@ from app.main import create_app
 def test_project_summary_with_planner_tasks():
     client = TestClient(create_app())
 
-    create_resp = client.post(
-        "/api/v1/projects",
-        json={"name": "Demo Project", "description": "Summary test"},
-    )
-    assert create_resp.status_code == 200
+    create_resp = client.post("/api/v1/store/projects", json={"name": "Demo Project", "description": "Summary test"})
+    assert create_resp.status_code == 201
     project = create_resp.json()
     project_id = project["id"]
 
-    # Ingest and approve requirements graph so gating passes
-    prd_resp = client.post(
-        f"/api/v1/projects/{project_id}/prd",
-        json={"text": "Must support login\nSystem should be reliable"},
+    task_resp_1 = client.post(
+        f"/api/v1/store/projects/{project_id}/tasks",
+        json={"title": "task 1", "description": "summary task"},
     )
-    assert prd_resp.status_code == 200
-    approve_graph = client.post(
-        f"/api/v1/projects/{project_id}/requirements-graph/approve",
-        json={"approved_by": "tester"},
+    assert task_resp_1.status_code == 201
+    task_resp_2 = client.post(
+        f"/api/v1/store/projects/{project_id}/tasks",
+        json={"title": "task 2", "description": "summary task"},
     )
-    assert approve_graph.status_code == 200
+    assert task_resp_2.status_code == 201
 
-    advance_resp = client.post(
-        f"/api/v1/projects/{project_id}/advance",
-        json={"to_stage": "REQUIREMENTS_DRAFTED"},
-    )
-    assert advance_resp.status_code == 200
+    run_resp = client.post(f"/api/v1/store/projects/{project_id}/runs", json={"executor": "dummy"})
+    assert run_resp.status_code == 201
+    run_id = run_resp.json()["id"]
 
-    approval_resp = client.post(
-        f"/api/v1/projects/{project_id}/approvals",
-        json={"stage": "REQUIREMENTS_DRAFTED", "requested_by": "tester"},
-    )
-    assert approval_resp.status_code == 200
-    approval_id = approval_resp.json()["id"]
-
-    decision_resp = client.post(
-        f"/api/v1/approvals/{approval_id}/decision",
-        json={"decision": "APPROVED", "decided_by": "tester"},
-    )
-    assert decision_resp.status_code == 200
-
-    advance_resp = client.post(
-        f"/api/v1/projects/{project_id}/advance",
-        json={"to_stage": "REQUIREMENTS_APPROVED"},
-    )
-    assert advance_resp.status_code == 200
-
-    advance_resp = client.post(
-        f"/api/v1/projects/{project_id}/advance",
-        json={"to_stage": "DESIGN_DRAFTED"},
-    )
-    assert advance_resp.status_code == 200
-
-    run_resp = client.post(f"/api/v1/projects/{project_id}/runs")
-    assert run_resp.status_code == 200
-    run_id = run_resp.json()["run_id"]
-
-    start_resp = client.post(f"/api/v1/runs/{run_id}/start")
-    assert start_resp.status_code == 200
-
-    summary_resp = client.get(f"/api/v1/projects/{project_id}/summary")
+    summary_resp = client.get(f"/api/v1/store/projects/{project_id}/summary")
     assert summary_resp.status_code == 200
     summary = summary_resp.json()
 

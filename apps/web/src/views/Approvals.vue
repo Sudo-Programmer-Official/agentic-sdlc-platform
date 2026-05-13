@@ -116,6 +116,26 @@
                 <div class="text-[11px] uppercase tracking-[0.22em]" style="color: var(--text-soft);">
                   {{ approvalLabel(approval) }}
                 </div>
+                <div v-if="approval.status === 'PENDING'" class="flex flex-wrap items-center gap-2">
+                  <el-button
+                    size="small"
+                    type="success"
+                    plain
+                    :loading="decisionLoadingId === approval.id && decisionLoadingAction === 'APPROVED'"
+                    @click="decideAndContinue(approval, 'APPROVED')"
+                  >
+                    Approve & Continue
+                  </el-button>
+                  <el-button
+                    size="small"
+                    type="danger"
+                    plain
+                    :loading="decisionLoadingId === approval.id && decisionLoadingAction === 'REJECTED'"
+                    @click="decideAndContinue(approval, 'REJECTED')"
+                  >
+                    Reject
+                  </el-button>
+                </div>
                 <button
                   v-if="approval.target_type === 'artifact' && approval.target_id"
                   type="button"
@@ -130,7 +150,22 @@
         </div>
 
         <div v-else class="mt-4 premium-empty">
-          No approvals match the current filter.
+          <div v-if="approvals.length" class="space-y-2">
+            <div>No approvals match the current filter.</div>
+            <div class="text-xs" style="color: var(--text-soft);">
+              Try <strong>All statuses</strong> and <strong>All targets</strong>.
+            </div>
+          </div>
+          <div v-else class="space-y-3">
+            <div class="font-medium" style="color: var(--text-strong);">No approval records yet for this project.</div>
+            <div class="text-xs" style="color: var(--text-soft);">
+              This page shows explicit governance decisions (artifact/task/document approvals) once a run or review creates them.
+            </div>
+            <div class="flex flex-wrap items-center justify-center gap-2">
+              <el-button size="small" @click="goToRequirements">Open Requirements</el-button>
+              <el-button size="small" plain @click="goToMissionControl">Open Mission Control</el-button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -196,10 +231,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 
 import AppIcon from "../components/AppIcon.vue";
 import MetricCard from "../components/MetricCard.vue";
-import { listApprovals, fetchProjectMeta } from "../api/lifecycle";
+import { createApproval, fetchProjectMeta, listApprovals, listRuns, resumeRun } from "../api/lifecycle";
 import { updateProjectContext } from "../state/projectContext";
 
 type ApprovalRecord = {
@@ -224,6 +260,8 @@ const projectStage = ref("");
 const approvals = ref<ApprovalRecord[]>([]);
 const statusFilter = ref("ALL");
 const typeFilter = ref("ALL");
+const decisionLoadingId = ref("");
+const decisionLoadingAction = ref<"APPROVED" | "REJECTED" | "">("");
 
 const projectId = computed(() => String(route.params.projectId || ""));
 
@@ -277,9 +315,65 @@ async function loadPage() {
   }
 }
 
+async function decideAndContinue(approval: ApprovalRecord, decision: "APPROVED" | "REJECTED") {
+  if (!projectId.value) return;
+  decisionLoadingId.value = approval.id;
+  decisionLoadingAction.value = decision;
+  error.value = "";
+  try {
+    await createApproval(projectId.value, {
+      target_type: approval.target_type,
+      target_id: approval.target_id,
+      status: decision,
+      decided_by: "ui-user",
+      comment:
+        decision === "APPROVED"
+          ? "Approved by operator from Approvals surface."
+          : "Rejected by operator from Approvals surface.",
+    });
+
+    if (decision === "APPROVED") {
+      await attemptAutoResume();
+      ElMessage.success("Approval recorded. Runtime continuation attempted.");
+    } else {
+      ElMessage.warning("Rejection recorded.");
+    }
+    await loadPage();
+  } catch (err: any) {
+    error.value = err?.message || `Failed to ${decision.toLowerCase()} approval.`;
+  } finally {
+    decisionLoadingId.value = "";
+    decisionLoadingAction.value = "";
+  }
+}
+
+async function attemptAutoResume() {
+  if (!projectId.value) return;
+  const runs = await listRuns(projectId.value);
+  const ordered = Array.isArray(runs)
+    ? [...runs].sort((a, b) => {
+        const aTs = Date.parse(String(a?.updated_at || a?.started_at || a?.created_at || "")) || 0;
+        const bTs = Date.parse(String(b?.updated_at || b?.started_at || b?.created_at || "")) || 0;
+        return bTs - aTs;
+      })
+    : [];
+  const resumablePaused = ordered.find((run: any) => {
+    const status = String(run?.status || "").toUpperCase();
+    const canResume = Boolean(run?.summary?.resume_state?.can_resume);
+    return status === "PAUSED" && canResume;
+  });
+  if (!resumablePaused?.id) return;
+  await resumeRun(String(resumablePaused.id), { start_now: true });
+}
+
 function goToMissionControl() {
   if (!projectId.value) return;
   router.push(`/projects/${projectId.value}/run`);
+}
+
+function goToRequirements() {
+  if (!projectId.value) return;
+  router.push(`/projects/${projectId.value}/requirements`);
 }
 
 function approvalStatusStyle(status?: string | null) {

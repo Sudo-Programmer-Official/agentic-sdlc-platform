@@ -23,6 +23,7 @@ from app.services.repo_connector import (
     repo_has_changes,
 )
 from app.services.vcs import get_vcs_adapter
+from app.services.vcs.providers import get_default_installation_id
 from app.services.workspace_supervisor import ensure_run_workspace
 
 _FORBIDDEN_PATCH_PATH_PARTS = {"__pycache__", ".pytest_cache"}
@@ -140,6 +141,14 @@ async def create_pr_from_artifact(
         raise RuntimeError(f"{project_repo.provider} integration is not configured")
     if not project_repo.repo_full_name:
         raise ValueError("Connected repository is missing repo_full_name")
+    provider = str(project_repo.provider or "").strip().lower()
+    resolved_installation_id = project_repo.installation_id
+    if provider == "github" and resolved_installation_id is None:
+        resolved_installation_id = get_default_installation_id(provider)
+    if provider == "github" and resolved_installation_id is None:
+        raise ValueError(
+            "GitHub App installation is required to create a PR. Reconnect the repository via GitHub App and try again."
+        )
 
     working_branch = (branch_name or run.branch_name or f"run/{str(run.id)[:8]}").strip()
     if run.branch_name != working_branch:
@@ -155,7 +164,7 @@ async def create_pr_from_artifact(
         repo_branch=project_repo.default_branch,
         repo_provider=project_repo.provider,
         repo_full_name=project_repo.repo_full_name,
-        repo_installation_id=project_repo.installation_id,
+        repo_installation_id=resolved_installation_id,
         repo_auth_strategy=project_repo.auth_strategy,
     )
     repo_path = Path(run.repo_path or "")
@@ -168,7 +177,7 @@ async def create_pr_from_artifact(
         repo_url=project_repo.repo_url,
         default_branch=project_repo.default_branch,
         repo_full_name=project_repo.repo_full_name,
-        installation_id=project_repo.installation_id,
+        installation_id=resolved_installation_id,
         auth_strategy=project_repo.auth_strategy,
         work_branch=working_branch,
     )
@@ -246,7 +255,7 @@ async def create_pr_from_artifact(
             provider=project_repo.provider,
             repo_url=project_repo.repo_url,
             repo_full_name=project_repo.repo_full_name,
-            installation_id=project_repo.installation_id,
+            installation_id=resolved_installation_id,
             auth_strategy=project_repo.auth_strategy,
         )
     else:
@@ -263,7 +272,7 @@ async def create_pr_from_artifact(
         ),
         head=working_branch,
         base=project_repo.default_branch,
-        installation_id=project_repo.installation_id,
+        installation_id=resolved_installation_id,
     )
 
     pr_url = pr_payload.get("html_url") or pr_payload.get("url")

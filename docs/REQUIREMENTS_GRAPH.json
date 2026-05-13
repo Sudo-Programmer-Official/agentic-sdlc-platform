@@ -1,28 +1,100 @@
 {
-  "project_id": "1c66b4dc-dda9-45e5-ba45-c5b63657c79f",
-  "version": 1,
+  "project_id": "0f39d7ad-9d1f-462c-b489-402089305ac9",
+  "version": 2,
   "status": "APPROVED",
-  "created_at": "2026-05-10T21:54:14.482974",
-  "updated_at": "2026-05-10T21:54:14.485095",
-  "approved_at": "2026-05-10T21:54:14.485095",
+  "created_at": "2026-05-11T18:24:10.676215",
+  "updated_at": "2026-05-11T18:26:51.522741",
+  "approved_at": "2026-05-11T18:26:51.522741",
   "approved_by": "ui-user",
   "nodes": [
     {
       "id": "FR-001",
       "type": "FR",
-      "text": "Users can create a portfolio",
-      "confidence": 0.8,
-      "source": "HUMAN_EDITED",
+      "text": "Home section with hero headline and CTA.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-002",
+      "type": "FR",
+      "text": "About section with bio and skills.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-003",
+      "type": "FR",
+      "text": "Projects section with at least 4 cards.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-004",
+      "type": "FR",
+      "text": "Contact section with name/email/message form.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-005",
+      "type": "FR",
+      "text": "Top navigation for desktop and hamburger menu for mobile.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-006",
+      "type": "FR",
+      "text": "Active nav link highlighting based on section in view.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
       "quality_type": null,
       "tags": []
     },
     {
       "id": "QR-001",
       "type": "QR",
-      "text": "Portfolio creation should complete quickly",
-      "confidence": 0.8,
-      "source": "HUMAN_EDITED",
-      "quality_type": "performance",
+      "text": "Responsive from 320px to 1440px.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-002",
+      "type": "QR",
+      "text": "Keyboard accessible nav and form controls.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-003",
+      "type": "QR",
+      "text": "Lighthouse accessibility >= 90.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-004",
+      "type": "QR",
+      "text": "Page load <= 2.5s on local preview.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
       "tags": []
     }
   ],
@@ -32,9 +104,201 @@
       "from_id": "FR-001",
       "to_id": "QR-001",
       "relation": "constrains",
-      "weight": 0.7,
-      "rationale": "Creation speed matters"
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-002",
+      "from_id": "FR-001",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-003",
+      "from_id": "FR-001",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-004",
+      "from_id": "FR-001",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-005",
+      "from_id": "FR-002",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-006",
+      "from_id": "FR-002",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-007",
+      "from_id": "FR-002",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-008",
+      "from_id": "FR-002",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-009",
+      "from_id": "FR-003",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-010",
+      "from_id": "FR-003",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-011",
+      "from_id": "FR-003",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-012",
+      "from_id": "FR-003",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-013",
+      "from_id": "FR-004",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-014",
+      "from_id": "FR-004",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-015",
+      "from_id": "FR-004",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-016",
+      "from_id": "FR-004",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-017",
+      "from_id": "FR-005",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-018",
+      "from_id": "FR-005",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-019",
+      "from_id": "FR-005",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-020",
+      "from_id": "FR-005",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-021",
+      "from_id": "FR-006",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-022",
+      "from_id": "FR-006",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-023",
+      "from_id": "FR-006",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-024",
+      "from_id": "FR-006",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-025",
+      "from_id": "FR-001",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": ""
     }
   ],
-  "sha256": "1ad7723ae27c38116184c2fbd0eccc2bd4ef3b4e1a6a51d322ee6810c2285780"
+  "sha256": "7e37aa367a82ae48c461be5f5a5d0f942f2a54e8810d2ac87942531d81c338aa"
 }

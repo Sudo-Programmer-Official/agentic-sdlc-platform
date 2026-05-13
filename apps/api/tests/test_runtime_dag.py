@@ -151,7 +151,7 @@ async def test_generate_template_dag_omits_backend_for_frontend_scoped_task(tmp_
 
 
 @pytest.mark.anyio
-async def test_generate_template_dag_rejects_task_runs_without_file_scope(tmp_path):
+async def test_generate_template_dag_applies_fallback_scope_for_task_runs_without_file_scope(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime-dag-empty-scope.db'}", future=True)
     session_factory = async_sessionmaker(
         bind=engine,
@@ -170,18 +170,23 @@ async def test_generate_template_dag_rejects_task_runs_without_file_scope(tmp_pa
             session.add(Project(id=project_id, name="Scope-less project", tenant_id=tenant_id))
             await session.flush()
 
-            with pytest.raises(TaskScopeError, match="has no file scope"):
-                await generate_template_dag(
-                    session,
-                    project_id,
-                    run_id,
-                    executor="codex",
-                    tenant_id=tenant_id,
-                    run_summary={
-                        "task_id": "task-noscope",
-                        "task_title": "Implement backend",
-                        "goal": "Implement backend",
-                    },
-                )
+            created = await generate_template_dag(
+                session,
+                project_id,
+                run_id,
+                executor="codex",
+                tenant_id=tenant_id,
+                run_summary={
+                    "task_id": "task-noscope",
+                    "task_title": "Implement backend",
+                    "goal": "Implement backend",
+                },
+            )
+            assert created > 0
+            items = (
+                await session.execute(select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.priority))
+            ).scalars().all()
+            backend = next(item for item in items if item.key == "CODE_BACKEND")
+            assert backend.payload["target_files"] == ["app.py"]
     finally:
         await engine.dispose()

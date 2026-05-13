@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:justify-between">
+  <div class="flex flex-col gap-3 p-3 md:p-4 lg:flex-row lg:items-center lg:justify-between">
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.28em]" style="color: var(--text-soft);">
         <span>{{ headerLabel }}</span>
@@ -18,8 +18,12 @@
         </div>
       </div>
       <div class="mt-2 flex flex-wrap items-center gap-2 text-xs" style="color: var(--text-muted);">
-        <span>Project ID {{ projectContext.projectId || "—" }}</span>
-        <span v-if="projectContext.updatedAt">Updated {{ projectContext.updatedAt }}</span>
+        <span class="topbar-chip" :title="projectContext.projectId || ''">
+          Project {{ shortProjectId }}
+        </span>
+        <span v-if="projectContext.updatedAt" class="topbar-chip">
+          Updated {{ updatedAtLabel }}
+        </span>
         <el-popover
           v-if="versionText"
           v-model:visible="versionPopoverOpen"
@@ -66,8 +70,8 @@
       </div>
     </div>
 
-    <div class="flex flex-col gap-3 lg:min-w-[48rem] lg:flex-row lg:items-center lg:justify-end">
-      <label class="search-shell lg:w-[24rem]">
+    <div class="flex w-full min-w-0 flex-col gap-3 lg:w-auto lg:flex-1 lg:flex-row lg:items-center lg:justify-end">
+      <label class="search-shell w-full lg:max-w-[24rem]">
         <AppIcon name="search" />
         <input
           v-model="searchText"
@@ -79,7 +83,7 @@
 
       <el-select
         v-model="selectedProject"
-        class="min-w-[220px]"
+        class="w-full sm:min-w-[220px] lg:w-[18rem]"
         placeholder="Switch project"
         filterable
         clearable
@@ -249,6 +253,18 @@ const runIndicatorStyle = computed(() => {
 });
 
 const themeButtonLabel = computed(() => (uiTheme.mode === "dark" ? "Switch to light mode" : "Switch to dark mode"));
+const shortProjectId = computed(() => {
+  const id = projectContext.projectId;
+  if (!id) return "—";
+  return id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+});
+const updatedAtLabel = computed(() => {
+  const updatedAt = projectContext.updatedAt;
+  if (!updatedAt) return "";
+  const parsed = new Date(updatedAt);
+  if (Number.isNaN(parsed.getTime())) return updatedAt;
+  return parsed.toLocaleString();
+});
 
 watch(
   () => projectContext.projectId,

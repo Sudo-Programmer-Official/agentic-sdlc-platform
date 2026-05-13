@@ -53,6 +53,20 @@ Do not invent files outside the repo. Do not include explanations outside JSON."
 STRUCTURED_OUTPUT_RETRY_LIMIT = 1
 REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT = 2
 MAX_FRONTEND_WRITE_FILE_BYTES = 24_000
+MUTATION_STRATEGIES = {"apply_patch", "write_file", "structured_transform", "component_replace", "multi_phase_patch"}
+LAYOUT_SENSITIVE_HINTS = {
+    "nav",
+    "navbar",
+    "header",
+    "hero",
+    "landing",
+    "homepage",
+    "home page",
+    "layout",
+    "responsive",
+    "footer",
+}
+EXECUTION_ZONES = {"layout_zone", "logic_zone", "config_zone", "schema_zone", "infrastructure_zone"}
 
 log = logging.getLogger("app.runtime.codex_executor")
 _UNIFIED_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$")
@@ -256,6 +270,22 @@ def _extract_structured_json_candidate(raw: str) -> str | None:
     return _extract_balanced_json_block(raw)
 
 
+def _payload_text_blob(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("task_title", "goal", "task_description", "title", "description"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip().lower())
+    return "\n".join(parts)
+
+
+def _layout_sensitive_from_payload(payload: dict[str, Any] | None) -> bool:
+    text = _payload_text_blob(payload)
+    return any(hint in text for hint in LAYOUT_SENSITIVE_HINTS)
+
+
 def _edit_budget_from_payload(payload: dict[str, Any] | None) -> dict[str, int | str | None]:
     budget = payload.get("edit_budget") if isinstance(payload, dict) else None
     mode = "minimal_patch"
@@ -338,6 +368,101 @@ class CodexExecutor(TaskExecutor):
             # changed-lines/original-lines ratios for these bounded scopes.
             return float("inf")
         return ratio
+
+    def _frontend_retry_cap_bump_active(self, work_item: WorkItem) -> bool:
+        if not bool(getattr(self.settings, "codex_frontend_cap_bump_enabled", True)):
+            return False
+        if work_item.type != "CODE_FRONTEND":
+            return False
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        if not _is_static_frontend_scope(payload):
+            return False
+        try:
+            prior_patch_failures = int(payload.get("prior_patch_failures") or 0)
+        except (TypeError, ValueError):
+            prior_patch_failures = 0
+        recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
+        return prior_patch_failures > 0 or recovery_strategy == "write_file_preferred"
+
+    def _max_patch_lines_for(self, work_item: WorkItem) -> int:
+        default_limit = int(self.max_patch_lines)
+        if not self._frontend_retry_cap_bump_active(work_item):
+            return default_limit
+        boosted_limit = int(getattr(self.settings, "codex_frontend_retry_max_patch_lines", default_limit))
+        return max(default_limit, boosted_limit)
+
+    def _select_mutation_strategy(
+        self,
+        *,
+        work_item: WorkItem,
+        payload: dict[str, Any] | None,
+        allowed_files: list[str],
+    ) -> tuple[str, list[str], list[str], float, float, str]:
+        execution_zone = "layout_zone" if work_item.type == "CODE_FRONTEND" else "logic_zone"
+        if execution_zone not in EXECUTION_ZONES:
+            execution_zone = "logic_zone"
+        if isinstance(payload, dict):
+            configured = payload.get("mutation_strategy")
+            if isinstance(configured, str):
+                normalized = configured.strip().lower()
+                if normalized in MUTATION_STRATEGIES:
+                    fallback = ["write_file"] if normalized == "apply_patch" else ["apply_patch"]
+                    return normalized, fallback, ["configured_in_payload"], 0.1, 0.95, execution_zone
+            recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
+            if work_item.type == "CODE_FRONTEND" and recovery_strategy == "write_file_preferred":
+                return "write_file", ["apply_patch"], ["recovery_strategy_write_file_preferred"], 0.9, 0.9, execution_zone
+        static_frontend_scope = work_item.type == "CODE_FRONTEND" and _is_static_frontend_scope(payload)
+        target_files = _target_files_from_payload(payload)
+        frontend_candidates = [path for path in dict.fromkeys(target_files + allowed_files) if Path(path).suffix.lower() in {".html", ".css", ".js", ".mjs", ".cjs"}]
+        layout_sensitive_hints = _layout_sensitive_from_payload(payload)
+        prior_patch_failures = 0
+        if isinstance(payload, dict):
+            try:
+                prior_patch_failures = int(payload.get("prior_patch_failures") or 0)
+            except (TypeError, ValueError):
+                prior_patch_failures = 0
+            recovery_reason = str(payload.get("recovery_reason") or "").strip().lower()
+            if "patch" in recovery_reason and "fail" in recovery_reason:
+                prior_patch_failures = max(prior_patch_failures, 1)
+        retry_count = 1 if prior_patch_failures > 0 else 0
+        reasons: list[str] = []
+        if static_frontend_scope:
+            reasons.append("static_frontend_scope")
+        if len(allowed_files) <= 1 and len(target_files) <= 1:
+            reasons.append("single_file_scope")
+        if any(Path(path).suffix.lower() in {".html", ".css"} for path in (target_files or allowed_files)):
+            reasons.append("layout_sensitive_file_type")
+        if layout_sensitive_hints:
+            reasons.append("layout_sensitive_task_text")
+        if prior_patch_failures > 0:
+            reasons.append("prior_patch_failures")
+        drift_risk_score = 0.15
+        if "layout_sensitive_file_type" in reasons:
+            drift_risk_score += 0.25
+        if "layout_sensitive_task_text" in reasons:
+            drift_risk_score += 0.25
+        if "bounded_frontend_candidate_scope" in reasons or "single_file_scope" in reasons:
+            drift_risk_score += 0.1
+        if prior_patch_failures > 0:
+            drift_risk_score += 0.35
+        drift_risk_score = min(1.0, drift_risk_score)
+        if (
+            work_item.type == "CODE_FRONTEND"
+            and frontend_candidates
+            and any(Path(path).suffix.lower() == ".html" for path in frontend_candidates)
+            and len(frontend_candidates) <= 3
+        ):
+            reasons.append("bounded_frontend_candidate_scope")
+            strategy_confidence = 0.9 if drift_risk_score >= 0.5 else 0.8
+            return "write_file", ["apply_patch"], reasons, drift_risk_score, strategy_confidence, execution_zone
+        if work_item.type == "CODE_FRONTEND" and layout_sensitive_hints and frontend_candidates:
+            strategy_confidence = 0.88 if drift_risk_score >= 0.5 else 0.8
+            return "write_file", ["apply_patch"], reasons, drift_risk_score, strategy_confidence, execution_zone
+        if retry_count > 0 and work_item.type == "CODE_FRONTEND":
+            return "write_file", ["apply_patch"], reasons, drift_risk_score, 0.92, execution_zone
+        if static_frontend_scope and ("single_file_scope" in reasons or "layout_sensitive_file_type" in reasons):
+            return "write_file", ["apply_patch"], reasons, drift_risk_score, 0.82, execution_zone
+        return "apply_patch", ["write_file"], reasons or ["default_apply_patch"], drift_risk_score, 0.65, execution_zone
 
     def _system_prompt_for(self, work_item: WorkItem) -> str:
         if work_item.type in {"PLAN_DAG", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
@@ -468,6 +593,26 @@ class CodexExecutor(TaskExecutor):
                 allowed_files = list(writable_scope)
         elif target_files:
             allowed_files = list(dict.fromkeys(target_files + allowed_files))
+        (
+            selected_mutation_strategy,
+            mutation_strategy_fallbacks,
+            mutation_strategy_reasons,
+            drift_risk_score,
+            strategy_confidence,
+            execution_zone,
+        ) = self._select_mutation_strategy(
+            work_item=work_item,
+            payload=work_item.payload if isinstance(work_item.payload, dict) else {},
+            allowed_files=allowed_files,
+        )
+        if isinstance(work_item.payload, dict):
+            work_item.payload["mutation_strategy"] = selected_mutation_strategy
+            work_item.payload["mutation_strategy_fallbacks"] = mutation_strategy_fallbacks
+            work_item.payload["drift_risk_score"] = drift_risk_score
+            work_item.payload["strategy_confidence"] = strategy_confidence
+            work_item.payload["execution_zone"] = execution_zone
+        effective_mutation_strategy = selected_mutation_strategy
+        mutation_strategy_transitions: list[dict[str, str]] = []
         edit_budget = (
             {
                 "mode": contract.scope_mode,
@@ -519,6 +664,14 @@ class CodexExecutor(TaskExecutor):
             scope_mode=str(edit_budget["mode"]) if edit_budget.get("mode") else None,
             target_files=target_files,
         )
+        context_bundle["meta"]["mutation_strategy"] = {
+            "selected": selected_mutation_strategy,
+            "fallback_chain": mutation_strategy_fallbacks,
+            "reasons": mutation_strategy_reasons,
+            "drift_risk_score": drift_risk_score,
+            "strategy_confidence": strategy_confidence,
+            "execution_zone": execution_zone,
+        }
         recovery_mode = is_recovery_work_item(work_item)
         if contract is not None:
             contract.budget.refresh(recovery_mode=recovery_mode)
@@ -874,6 +1027,7 @@ class CodexExecutor(TaskExecutor):
 
         patch_guard = None
         patch_repair_attempted = False
+        patch_repair_parse_retry_attempted = False
         stage_scope_repair_attempted = False
         project_contract_repair_attempted = False
         while True:
@@ -973,6 +1127,13 @@ class CodexExecutor(TaskExecutor):
             stage_violations.extend(
                 self._frontend_writefile_violations(
                     work_item=work_item,
+                    actions=plan.actions,
+                )
+            )
+            stage_violations.extend(
+                self._mutation_strategy_violations(
+                    work_item=work_item,
+                    selected_strategy=effective_mutation_strategy,
                     actions=plan.actions,
                 )
             )
@@ -1163,7 +1324,8 @@ class CodexExecutor(TaskExecutor):
                             for ln in current_action.patch.splitlines()
                             if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))
                         )
-                        if changed_lines > self.max_patch_lines:
+                        max_patch_lines = self._max_patch_lines_for(work_item)
+                        if changed_lines > max_patch_lines:
                             raise ValueError("Patch changes too many lines")
                         per_file_changes = self._parse_patch_file_stats(current_action.patch)
                         for rel_path, stats in per_file_changes.items():
@@ -1188,6 +1350,30 @@ class CodexExecutor(TaskExecutor):
                     )
                 ):
                     patch_repair_attempted = True
+                    if self._try_deterministic_frontend_patch_recovery(
+                        work_item=work_item,
+                        action=current_action,
+                        repo=repo,
+                        allowed_files=allowed_files,
+                    ):
+                        if current_action is not None:
+                            current_action.type = "note"
+                            current_action.text = (
+                                "Deterministic frontend patch recovery applied after apply_patch failure."
+                            )
+                            current_action.patch = None
+                            current_action.content = None
+                            current_action.path = None
+                        continue
+                    if effective_mutation_strategy == "apply_patch":
+                        effective_mutation_strategy = "write_file"
+                        mutation_strategy_transitions.append(
+                            {
+                                "from": "apply_patch",
+                                "to": "write_file",
+                                "reason": "patch_drift_high_risk_static_frontend",
+                            }
+                        )
                     await self._job_manager.record_retry(prepared.job_id, "patch_apply_error")
                     try:
                         plan, raw, repair_usage, repair_model_tier, repair_model_name = await self._repair_plan_after_patch_failure(
@@ -1200,6 +1386,81 @@ class CodexExecutor(TaskExecutor):
                             contract=contract,
                         )
                     except Exception as repair_exc:
+                        lowered_repair_error = str(repair_exc).lower()
+                        if "patch repair output was invalid" in lowered_repair_error and isinstance(work_item.payload, dict):
+                            work_item.payload["recovery_strategy"] = "write_file_preferred"
+                            work_item.payload["prior_patch_failures"] = int(work_item.payload.get("prior_patch_failures") or 0) + 1
+                            if not patch_repair_parse_retry_attempted:
+                                patch_repair_parse_retry_attempted = True
+                                await self._job_manager.record_retry(prepared.job_id, "patch_repair_output_invalid")
+                                try:
+                                    plan, raw, repair_usage, repair_model_tier, repair_model_name = (
+                                        await self._repair_plan_after_patch_failure(
+                                            client=client,
+                                            prepared=prepared,
+                                            user_prompt=user_prompt,
+                                            allowed_files=allowed_files,
+                                            error_message=str(exc),
+                                            work_item=work_item,
+                                            contract=contract,
+                                        )
+                                    )
+                                except Exception as forced_repair_exc:
+                                    exc = forced_repair_exc
+                                else:
+                                    repair_input_tokens = int(
+                                        repair_usage.get("input_tokens") or estimate_tokens(system_prompt + user_prompt)
+                                    )
+                                    repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
+                                    usage_input_tokens += repair_input_tokens
+                                    usage_output_tokens += repair_output_tokens
+                                    usage_cost_cents = round(
+                                        usage_cost_cents
+                                        + self._job_manager.estimate_cost_cents(
+                                            repair_model_tier,
+                                            repair_input_tokens,
+                                            repair_output_tokens,
+                                        ),
+                                        4,
+                                    )
+                                    usage = {
+                                        "input_tokens": usage_input_tokens,
+                                        "output_tokens": usage_output_tokens,
+                                    }
+                                    attempt_tiers.append(repair_model_tier)
+                                    effective_model_tier = repair_model_tier
+                                    effective_model_name = repair_model_name
+                                    contract = await self._record_execution_budget(
+                                        context,
+                                        prepared_job_id=str(prepared.job_id),
+                                        work_item_id=str(work_item.id),
+                                        selected_model_tier=repair_model_tier,
+                                        input_tokens=repair_input_tokens,
+                                        output_tokens=repair_output_tokens,
+                                    )
+                                    if contract is not None and contract.budget.budget_mode == "BLOCKED":
+                                        next_action = self._budget_next_action(work_item)
+                                        await self._job_manager.fail_job(
+                                            prepared.job_id,
+                                            reason="run_budget_exhausted",
+                                            next_action=next_action,
+                                            error_kind="run_budget_exhausted",
+                                            input_tokens=usage_input_tokens,
+                                            output_tokens=usage_output_tokens,
+                                            actual_cost_cents=usage_cost_cents,
+                                            details={
+                                                "attempt_tiers": attempt_tiers,
+                                                "provider": self.settings.llm_provider,
+                                                "model_name": repair_model_name,
+                                                "budget": contract.budget.to_dict(),
+                                            },
+                                        )
+                                        return self._run_budget_exhausted_result(
+                                            contract=contract,
+                                            prepared_job_id=str(prepared.job_id),
+                                            next_action=next_action,
+                                        )
+                                    continue
                         exc = repair_exc
                     else:
                         repair_input_tokens = int(
@@ -1328,6 +1589,19 @@ class CodexExecutor(TaskExecutor):
                     "attempt_tiers": attempt_tiers,
                     "effective_model_tier": effective_model_tier,
                     "model_name": effective_model_name,
+                    "mutation_strategy": {
+                        "selected": selected_mutation_strategy,
+                        "effective": effective_mutation_strategy,
+                        "strategy_transition_reason": (
+                            mutation_strategy_transitions[-1]["reason"] if mutation_strategy_transitions else None
+                        ),
+                        "fallback_chain": mutation_strategy_fallbacks,
+                        "reasons": mutation_strategy_reasons,
+                        "drift_risk_score": drift_risk_score,
+                        "strategy_confidence": strategy_confidence,
+                        "execution_zone": execution_zone,
+                        "transitions": mutation_strategy_transitions,
+                    },
                 },
                 status=final_status,
             )
@@ -1346,6 +1620,19 @@ class CodexExecutor(TaskExecutor):
                     "attempt_tiers": attempt_tiers,
                     "effective_model_tier": effective_model_tier,
                     "model_name": effective_model_name,
+                    "mutation_strategy": {
+                        "selected": selected_mutation_strategy,
+                        "effective": effective_mutation_strategy,
+                        "strategy_transition_reason": (
+                            mutation_strategy_transitions[-1]["reason"] if mutation_strategy_transitions else None
+                        ),
+                        "fallback_chain": mutation_strategy_fallbacks,
+                        "reasons": mutation_strategy_reasons,
+                        "drift_risk_score": drift_risk_score,
+                        "strategy_confidence": strategy_confidence,
+                        "execution_zone": execution_zone,
+                        "transitions": mutation_strategy_transitions,
+                    },
                 },
             )
 
@@ -1375,6 +1662,19 @@ class CodexExecutor(TaskExecutor):
                 },
                 "review": review_metrics,
                 "usage": usage,
+                "mutation_strategy": {
+                    "selected": selected_mutation_strategy,
+                    "effective": effective_mutation_strategy,
+                    "strategy_transition_reason": (
+                        mutation_strategy_transitions[-1]["reason"] if mutation_strategy_transitions else None
+                    ),
+                    "fallback_chain": mutation_strategy_fallbacks,
+                    "reasons": mutation_strategy_reasons,
+                    "drift_risk_score": drift_risk_score,
+                    "strategy_confidence": strategy_confidence,
+                    "execution_zone": execution_zone,
+                    "transitions": mutation_strategy_transitions,
+                },
             },
         }
 
@@ -1632,6 +1932,85 @@ class CodexExecutor(TaskExecutor):
             return "Patch is missing file headers (---/+++) before diff hunks."
         return None
 
+    def _try_deterministic_frontend_patch_recovery(
+        self,
+        *,
+        work_item: WorkItem,
+        action: Any | None,
+        repo: RepoTools,
+        allowed_files: list[str],
+    ) -> bool:
+        if work_item.type != "CODE_FRONTEND":
+            return False
+        if action is None or getattr(action, "type", None) != "apply_patch":
+            return False
+        rel_path = str(getattr(action, "path", "") or "").strip()
+        patch_text = getattr(action, "patch", None)
+        if not rel_path or not isinstance(patch_text, str) or not patch_text.strip():
+            return False
+        if allowed_files and rel_path not in allowed_files:
+            return False
+        if Path(rel_path).suffix.lower() not in {".html", ".css", ".js", ".mjs", ".cjs"}:
+            return False
+        return self._apply_patch_by_hunk_replacement(repo=repo, rel_path=rel_path, patch_text=patch_text)
+
+    def _apply_patch_by_hunk_replacement(self, *, repo: RepoTools, rel_path: str, patch_text: str) -> bool:
+        normalized_patch = patch_text if patch_text.endswith("\n") else f"{patch_text}\n"
+        lines = normalized_patch.splitlines()
+        hunks: list[tuple[str, str]] = []
+        in_hunk = False
+        old_lines: list[str] = []
+        new_lines: list[str] = []
+        for line in lines:
+            if line.startswith("@@"):
+                if in_hunk:
+                    hunks.append(("".join(old_lines), "".join(new_lines)))
+                    old_lines = []
+                    new_lines = []
+                in_hunk = True
+                continue
+            if not in_hunk:
+                continue
+            if line.startswith(("diff --git ", "--- ", "+++ ")):
+                continue
+            marker = line[:1] if line else ""
+            body = line[1:] if marker in {" ", "+", "-"} else line
+            rendered = f"{body}\n"
+            if marker in {" ", "-"}:
+                old_lines.append(rendered)
+            if marker in {" ", "+"}:
+                new_lines.append(rendered)
+        if in_hunk:
+            hunks.append(("".join(old_lines), "".join(new_lines)))
+        if not hunks:
+            return False
+
+        target_path = (repo.root / rel_path).resolve()
+        repo_root = repo.root.resolve()
+        if not str(target_path).startswith(str(repo_root)):
+            return False
+        if not target_path.exists() or not target_path.is_file():
+            return False
+
+        text = target_path.read_text(encoding="utf-8")
+        cursor = 0
+        applied = 0
+        for old_block, new_block in hunks:
+            if not old_block:
+                continue
+            idx = text.find(old_block, cursor)
+            if idx < 0:
+                idx = text.find(old_block)
+                if idx < 0:
+                    return False
+            text = f"{text[:idx]}{new_block}{text[idx + len(old_block):]}"
+            cursor = idx + len(new_block)
+            applied += 1
+        if applied == 0:
+            return False
+        repo.write_file(rel_path, text)
+        return True
+
     def _is_patch_repair_candidate(
         self,
         *,
@@ -1674,8 +2053,37 @@ class CodexExecutor(TaskExecutor):
         if work_item.type == "WRITE_TESTS":
             return any("WRITE_TESTS may only modify Python test files" in violation for violation in violations)
         if work_item.type == "CODE_FRONTEND":
-            return any("CODE_FRONTEND write_file payload too large" in violation for violation in violations)
+            return any(
+                (
+                    "CODE_FRONTEND write_file payload too large" in violation
+                    or "CODE_FRONTEND mutation_strategy violation" in violation
+                )
+                for violation in violations
+            )
         return False
+
+    def _mutation_strategy_violations(
+        self,
+        *,
+        work_item: WorkItem,
+        selected_strategy: str,
+        actions: list[Any],
+    ) -> list[str]:
+        if work_item.type != "CODE_FRONTEND":
+            return []
+        # Treat strategy as a preference signal for CODE_FRONTEND. A plan can still
+        # be valid when it emits one coherent mutating strategy that differs from
+        # the selected preference. Reject only conflicting mixed mutation output.
+        mutating_types = {
+            getattr(action, "type", None)
+            for action in actions
+            if getattr(action, "type", None) in {"write_file", "apply_patch"}
+        }
+        if len(mutating_types) > 1:
+            return [
+                "CODE_FRONTEND mutation_strategy violation: plan emitted mixed mutating action types (write_file and apply_patch)."
+            ]
+        return []
 
     def _frontend_writefile_violations(self, *, work_item: WorkItem, actions: list[Any]) -> list[str]:
         if work_item.type != "CODE_FRONTEND" or not _is_static_frontend_scope(work_item.payload):
@@ -1764,6 +2172,15 @@ class CodexExecutor(TaskExecutor):
             boosted_cap = 6000 if selected_model_tier != "tier_economy" else 3200
         elif work_item.type in {"CODE_FRONTEND", "CODE_BACKEND"}:
             boosted_floor = max(boosted_floor, 2200 if selected_model_tier != "tier_economy" else 1200)
+            if self._frontend_retry_cap_bump_active(work_item):
+                boosted_floor = max(
+                    boosted_floor,
+                    int(getattr(self.settings, "codex_frontend_retry_completion_boost_tokens", boosted_floor)),
+                )
+                boosted_cap = max(
+                    boosted_cap,
+                    int(getattr(self.settings, "codex_frontend_retry_completion_cap_tokens", boosted_cap)),
+                )
         elif work_item.type not in {"PLAN_DAG", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
             boosted_floor = max(boosted_floor, 1600)
         boosted = min(max(current_max_tokens * 2, boosted_floor), boosted_cap)
@@ -1838,6 +2255,10 @@ class CodexExecutor(TaskExecutor):
                     "Recovery override: the previous patch failed to apply."
                     " For this retry, prefer write_file for the primary scoped file with complete updated contents."
                 )
+                guidance.append(
+                    "Do not embed data: URIs, minified script blobs, or base64 payloads inside HTML."
+                    " Keep scripts in concise source form only."
+                )
             else:
                 guidance.append(
                     "If output size is large, avoid full-file write_file rewrites; emit minimal apply_patch hunks to keep JSON compact."
@@ -1854,6 +2275,9 @@ class CodexExecutor(TaskExecutor):
             if recovery_strategy == "write_file_preferred":
                 guidance.append(
                     "For this bounded static frontend recovery attempt, use write_file for index.html when in scope."
+                )
+                guidance.append(
+                    "Keep the write concise and deterministic. Do not add external helper files, data: URLs, or inline encoded script payloads."
                 )
             else:
                 guidance.append(
@@ -1881,6 +2305,20 @@ class CodexExecutor(TaskExecutor):
         contract: ExecutionContract | None,
     ) -> tuple[CodexPlan, str, dict[str, Any], str, str]:
         allowed_text = ", ".join(allowed_files[:6]) if allowed_files else "the planned file scope"
+        lowered_error = (error_message or "").lower()
+        static_frontend_scope = work_item.type == "CODE_FRONTEND" and _is_static_frontend_scope(
+            work_item.payload if isinstance(work_item.payload, dict) else {}
+        )
+        patch_drift_error = any(
+            marker in lowered_error
+            for marker in (
+                "patch does not apply",
+                "patch check failed",
+                "corrupt patch",
+                "error: patch failed:",
+                "patch fragment without header",
+            )
+        )
         repair_prompt = (
             f"{user_prompt}\n\n"
             "The previous action plan failed while applying a generated patch.\n"
@@ -1904,11 +2342,12 @@ class CodexExecutor(TaskExecutor):
             )
         if work_item.type == "CODE_FRONTEND":
             recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
-            if recovery_strategy == "write_file_preferred":
+            if recovery_strategy == "write_file_preferred" or (static_frontend_scope and patch_drift_error):
                 repair_prompt += (
                     "\nFor this CODE_FRONTEND recovery retry, avoid apply_patch."
                     " Emit write_file for the primary scoped file (index.html when present) with complete updated content."
                     " Keep scope bounded to allowed files."
+                    " Do not embed data: URLs, base64 blobs, or encoded inline scripts."
                 )
         current_prompt = repair_prompt
         current_max_tokens = self.settings.codex_max_tokens
@@ -1918,7 +2357,10 @@ class CodexExecutor(TaskExecutor):
         effective_model_tier = prepared.policy.selected_model_tier
         effective_model_name = prepared.model_name or self.settings.codex_model
         system_prompt = self._system_prompt_for(work_item)
-        for retry_count in range(REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT + 1):
+        repair_retry_limit = REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT + (
+            1 if (static_frontend_scope and patch_drift_error) else 0
+        )
+        for retry_count in range(repair_retry_limit + 1):
             effective_model_tier = self._effective_model_tier(
                 policy=prepared.policy,
                 work_item=work_item,
@@ -1942,9 +2384,29 @@ class CodexExecutor(TaskExecutor):
                 break
             except Exception as exc:
                 parse_failure = isinstance(exc, json.JSONDecodeError) or "validation" in exc.__class__.__name__.lower()
-                if parse_failure and retry_count < REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT:
+                if parse_failure and retry_count < repair_retry_limit:
                     await self._job_manager.record_retry(prepared.job_id, "structured_parser_failure")
                     retry_reason = "structured_parser_failure"
+                    if work_item.type == "CODE_FRONTEND" and static_frontend_scope and patch_drift_error:
+                        if isinstance(work_item.payload, dict):
+                            work_item.payload["recovery_strategy"] = "write_file_preferred"
+                            work_item.payload["prior_patch_failures"] = int(work_item.payload.get("prior_patch_failures") or 0) + 1
+                        # Hard guard: on malformed repair output in drift recovery, force deterministic write mode.
+                        current_prompt = (
+                            f"{repair_prompt}\n\n"
+                            "Repair output parsing failed. Switch immediately to deterministic write mode.\n"
+                            "Return JSON only. Emit write_file actions for the primary scoped frontend file with complete updated content.\n"
+                            "Do not emit apply_patch in this retry.\n"
+                        )
+                    else:
+                        current_prompt = self._build_parse_retry_prompt(
+                            user_prompt=repair_prompt,
+                            raw=raw,
+                            error=exc,
+                            work_item=work_item,
+                            allowed_files=allowed_files,
+                            retry_count=retry_count + 1,
+                        )
                     next_retry_tier = self._effective_model_tier(
                         policy=prepared.policy,
                         work_item=work_item,
@@ -1956,14 +2418,6 @@ class CodexExecutor(TaskExecutor):
                         selected_model_tier=next_retry_tier,
                         work_item=work_item,
                         contract=contract,
-                    )
-                    current_prompt = self._build_parse_retry_prompt(
-                        user_prompt=repair_prompt,
-                        raw=raw,
-                        error=exc,
-                        work_item=work_item,
-                        allowed_files=allowed_files,
-                        retry_count=retry_count + 1,
                     )
                     continue
                 raise ValueError(f"Patch repair output was invalid: {exc}") from exc
@@ -2215,6 +2669,7 @@ class CodexExecutor(TaskExecutor):
     def _instructions_for(self, work_item: WorkItem, context: RunContext | None = None) -> str:
         payload = work_item.payload or {}
         recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
+        mutation_strategy = str(payload.get("mutation_strategy") or "").strip().lower()
         contract = context.execution_contract if context is not None else None
         target_files = (
             list(contract.target_files)
@@ -2258,6 +2713,12 @@ class CodexExecutor(TaskExecutor):
                 f" Restrict edits to these files unless validation proves a neighboring file is required: {file_list}. "
                 f"Keep the patch within {edit_budget['file_budget']} files and prefer a {edit_budget['mode']} strategy."
             )
+        if mutation_strategy in MUTATION_STRATEGIES:
+            base += f" Mutation strategy: {mutation_strategy}."
+            if mutation_strategy == "write_file":
+                base += " Prefer write_file for scoped deterministic updates; avoid apply_patch unless absolutely required."
+            elif mutation_strategy == "apply_patch":
+                base += " Prefer apply_patch for minimal surgical changes."
         protected_paths = (
             list(contract.protected_paths)
             if contract is not None
@@ -2603,3 +3064,11 @@ class CodexExecutor(TaskExecutor):
             "budget_cents": policy.budget_cents,
             "requires_human_review": policy.requires_human_review,
         }
+
+
+_DEFAULT_EXECUTOR = CodexExecutor()
+
+
+async def execute(work_item: WorkItem, context: RunContext) -> TaskResult:
+    """Compatibility entrypoint used by older runtime tests and adapters."""
+    return await _DEFAULT_EXECUTOR.execute(work_item, context)

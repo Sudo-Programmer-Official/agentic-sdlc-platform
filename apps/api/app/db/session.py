@@ -4,18 +4,23 @@ import contextlib
 from typing import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 
 
 settings = get_settings()
 
-# Use NullPool for short-lived API workers; swap to QueuePool if you add RDS proxying.
+# RDS-friendly pooled engine: avoids reconnect-per-request behavior that can
+# starve workers when network jitter introduces asyncpg connect timeouts.
 engine = create_async_engine(
     settings.database_url,
     echo=settings.db_echo,
-    poolclass=NullPool,
+    pool_pre_ping=True,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+    pool_timeout=settings.db_pool_timeout_seconds,
+    pool_recycle=settings.db_pool_recycle_seconds,
+    connect_args={"timeout": settings.db_connect_timeout_seconds},
     future=True,
 )
 

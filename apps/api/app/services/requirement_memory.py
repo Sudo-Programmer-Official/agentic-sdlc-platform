@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import uuid
 from typing import Any
 
@@ -115,6 +116,8 @@ async def compress_requirement_memory(
             tenant_id=tenant_id,
             project_id=project_id,
             requirement_id=requirement_id,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
         session.add(existing)
 

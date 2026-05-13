@@ -562,7 +562,13 @@ async def create_vision_run(
             schedule=payload.auto_start,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        detail = str(exc)
+        lowered = detail.lower()
+        if "installation is required" in lowered or "github app installation" in lowered:
+            code = status.HTTP_400_BAD_REQUEST
+        else:
+            code = status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=detail) from exc
 
     for index, screenshot in enumerate(payload.screenshots, start=1):
         session.add(
@@ -1137,9 +1143,20 @@ async def fetch_project_preview_profile(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectPreviewProfileOut:
+    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     profile = await get_project_preview_profile(session, tenant_id=ctx.tenant_id, project_id=project_id)
     if profile is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project preview profile not configured")
+        default_payload = ProjectPreviewProfileUpsert().model_dump()
+        profile = await upsert_project_preview_profile(
+            session,
+            project_id=project_id,
+            tenant_id=ctx.tenant_id,
+            payload=default_payload,
+        )
+        await session.commit()
+        await session.refresh(profile)
     return _project_preview_profile_out(profile)
 
 
@@ -1586,7 +1603,10 @@ async def discard_run_workspace(
     try:
         workspace_deleted = destroy_run_workspace(run)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        detail = str(exc)
+        conflict_markers = ("already exists", "conflict", "422")
+        code = status.HTTP_409_CONFLICT if any(marker in detail.lower() for marker in conflict_markers) else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
 
     run.workspace_root = None
     run.repo_path = None
@@ -1672,7 +1692,12 @@ async def create_run_pull_request(
         )
         return PullRequestOut.model_validate(result)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        detail = str(exc)
+        conflict_markers = ("already exists", "conflict", "422")
+        code = status.HTTP_409_CONFLICT if any(marker in detail.lower() for marker in conflict_markers) else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=detail) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 

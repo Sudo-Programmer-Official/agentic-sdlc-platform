@@ -19,6 +19,7 @@ from app.runtime.codex_executor import (
     _target_files_from_payload,
     _write_tests_writable_scope,
     _verification_from_action_scope,
+    execute as module_execute,
     CodexExecutor,
 )
 from app.runtime.execution_contract import build_execution_contract
@@ -76,6 +77,25 @@ class SequenceRawClient:
         response = self._responses.pop(0)
         raw = json.dumps(response) if isinstance(response, dict) else response
         return raw, {"input_tokens": 1, "output_tokens": 1}
+
+
+@pytest.mark.anyio
+async def test_codex_executor_module_execute_entrypoint_delegates(monkeypatch):
+    class _StubExecutor:
+        async def execute(self, work_item, context):
+            return {
+                "status": "DONE",
+                "outputs": {"work_item_id": str(work_item.id)},
+                "summary": "ok",
+                "artifacts": [],
+                "telemetry": {},
+            }
+
+    work_item = SimpleNamespace(id=uuid.uuid4())
+    context = SimpleNamespace()
+    monkeypatch.setattr("app.runtime.codex_executor._DEFAULT_EXECUTOR", _StubExecutor())
+    result = await module_execute(work_item, context)
+    assert result["status"] == "DONE"
 
 
 @pytest.fixture
@@ -268,6 +288,125 @@ def test_frontend_writefile_violations_flags_oversized_rewrite():
     assert "CODE_FRONTEND write_file payload too large" in violations[0]
 
 
+def test_mutation_strategy_violations_allows_single_coherent_fallback_strategy():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+    actions = [SimpleNamespace(type="apply_patch"), SimpleNamespace(type="note")]
+
+    violations = executor._mutation_strategy_violations(
+        work_item=work_item,
+        selected_strategy="write_file",
+        actions=actions,
+    )
+
+    assert violations == []
+
+
+def test_mutation_strategy_violations_flags_mixed_mutating_action_types():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+    actions = [SimpleNamespace(type="apply_patch"), SimpleNamespace(type="write_file")]
+
+    violations = executor._mutation_strategy_violations(
+        work_item=work_item,
+        selected_strategy="write_file",
+        actions=actions,
+    )
+
+    assert len(violations) == 1
+    assert "mixed mutating action types" in violations[0]
+
+
+def test_apply_patch_by_hunk_replacement_updates_file_when_context_matches(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    index_path = repo_root / "index.html"
+    index_path.write_text("<main>Portfolio</main>\n", encoding="utf-8")
+    executor = CodexExecutor(repo_root=repo_root)
+
+    from app.runtime.tools.repo_tools import RepoTools
+
+    repo = RepoTools(repo_root)
+    patch = (
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -1 +1 @@\n"
+        "-<main>Portfolio</main>\n"
+        "+<main>Rethemed portfolio</main>\n"
+    )
+    applied = executor._apply_patch_by_hunk_replacement(
+        repo=repo,
+        rel_path="index.html",
+        patch_text=patch,
+    )
+
+    assert applied is True
+    assert "Rethemed portfolio" in index_path.read_text(encoding="utf-8")
+
+
+def test_apply_patch_by_hunk_replacement_returns_false_when_old_block_missing(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    index_path = repo_root / "index.html"
+    index_path.write_text("<main>Different</main>\n", encoding="utf-8")
+    executor = CodexExecutor(repo_root=repo_root)
+
+    from app.runtime.tools.repo_tools import RepoTools
+
+    repo = RepoTools(repo_root)
+    patch = (
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -1 +1 @@\n"
+        "-<main>Portfolio</main>\n"
+        "+<main>Rethemed portfolio</main>\n"
+    )
+    applied = executor._apply_patch_by_hunk_replacement(
+        repo=repo,
+        rel_path="index.html",
+        patch_text=patch,
+    )
+
+    assert applied is False
+    assert "Different" in index_path.read_text(encoding="utf-8")
+
+
+def test_frontend_retry_cap_bump_active_for_static_scope_retry_payload():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"target_files": ["index.html"], "prior_patch_failures": 1},
+    )
+
+    assert executor._frontend_retry_cap_bump_active(work_item) is True
+    assert executor._max_patch_lines_for(work_item) >= executor.max_patch_lines
+
+
+def test_frontend_retry_cap_bump_inactive_without_retry_signal():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"target_files": ["index.html"]},
+    )
+
+    assert executor._frontend_retry_cap_bump_active(work_item) is False
+    assert executor._max_patch_lines_for(work_item) == executor.max_patch_lines
+
+
+def test_stage_scope_repair_candidate_allows_mutation_strategy_violation_for_frontend():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    allowed = executor._is_stage_scope_repair_candidate(
+        work_item=work_item,
+        violations=[
+            "CODE_FRONTEND mutation_strategy violation: plan emitted mixed mutating action types (write_file and apply_patch)."
+        ],
+    )
+
+    assert allowed is True
+
+
 def test_static_frontend_scope_detects_html_css_only_targets():
     assert _is_static_frontend_scope({"expected_files": ["index.html", "styles.css"]}) is True
     assert _is_static_frontend_scope({"expected_files": ["index.html", "hero.py"]}) is False
@@ -315,6 +454,119 @@ def test_write_tests_writable_scope_falls_back_to_scoped_tests_when_targets_are_
     )
 
     assert writable_scope == ["tests/test_nav.py"]
+
+
+def test_select_mutation_strategy_prefers_write_file_for_single_file_static_frontend():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    selected, fallback, reasons, drift_risk, confidence, zone = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={"target_files": ["index.html"]},
+        allowed_files=["index.html"],
+    )
+
+    assert selected == "write_file"
+    assert fallback == ["apply_patch"]
+    assert "static_frontend_scope" in reasons
+    assert drift_risk >= 0.5
+    assert confidence >= 0.8
+    assert zone == "layout_zone"
+
+
+def test_select_mutation_strategy_honors_payload_override():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    selected, fallback, reasons, drift_risk, confidence, zone = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={"target_files": ["index.html"], "mutation_strategy": "apply_patch"},
+        allowed_files=["index.html"],
+    )
+
+    assert selected == "apply_patch"
+    assert fallback == ["write_file"]
+    assert reasons == ["configured_in_payload"]
+    assert drift_risk == 0.1
+    assert confidence == 0.95
+    assert zone == "layout_zone"
+
+
+def test_select_mutation_strategy_prefers_write_file_for_bounded_html_scope_with_mixed_files():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    selected, fallback, reasons, _, _, _ = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={"target_files": ["index.html", "test_index_html.py"]},
+        allowed_files=["index.html", "styles.css", "test_index_html.py"],
+    )
+
+    assert selected == "write_file"
+    assert fallback == ["apply_patch"]
+    assert "bounded_frontend_candidate_scope" in reasons
+
+
+def test_select_mutation_strategy_honors_recovery_write_file_preferred():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    selected, fallback, reasons, drift_risk, confidence, zone = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={"target_files": ["index.html"], "recovery_strategy": "write_file_preferred"},
+        allowed_files=["index.html"],
+    )
+
+    assert selected == "write_file"
+    assert fallback == ["apply_patch"]
+    assert reasons == ["recovery_strategy_write_file_preferred"]
+    assert drift_risk >= 0.85
+    assert confidence >= 0.85
+    assert zone == "layout_zone"
+
+
+def test_select_mutation_strategy_prefers_write_file_for_layout_sensitive_task_text():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    selected, fallback, reasons, drift_risk, confidence, zone = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={
+            "target_files": ["src/components/NavBar.vue", "src/styles/main.css"],
+            "task_title": "Implement responsive navigation with hamburger menu",
+            "goal": "Refine homepage header layout behavior",
+        },
+        allowed_files=["src/components/NavBar.vue", "src/styles/main.css", "tests/test_nav.py"],
+    )
+
+    assert selected == "write_file"
+    assert fallback == ["apply_patch"]
+    assert "layout_sensitive_task_text" in reasons
+    assert drift_risk >= 0.5
+    assert confidence >= 0.8
+    assert zone == "layout_zone"
+
+
+def test_select_mutation_strategy_escalates_to_write_file_after_prior_patch_failures():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+
+    selected, fallback, reasons, drift_risk, confidence, zone = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={
+            "target_files": ["index.html", "styles.css", "test_index_html.py", "README.md"],
+            "task_title": "Navigation styling update",
+            "prior_patch_failures": 2,
+        },
+        allowed_files=["index.html", "styles.css", "test_index_html.py", "README.md"],
+    )
+
+    assert selected == "write_file"
+    assert fallback == ["apply_patch"]
+    assert "prior_patch_failures" in reasons
+    assert drift_risk >= 0.8
+    assert confidence >= 0.9
+    assert zone == "layout_zone"
 
 
 def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
@@ -386,6 +638,19 @@ def test_instructions_for_static_frontend_recovery_write_file_override():
 
     assert "Recovery override: previous patch application drifted." in instructions
     assert "prefer write_file with full contents for the primary scoped file" in instructions
+
+
+def test_instructions_include_selected_mutation_strategy():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"expected_files": ["index.html"], "mutation_strategy": "write_file"},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "Mutation strategy: write_file." in instructions
+    assert "Prefer write_file for scoped deterministic updates" in instructions
 
 
 def test_instructions_include_project_contract_brand_and_design_rules():
@@ -1241,12 +1506,124 @@ async def test_codex_executor_retries_truncated_json_with_higher_token_cap(
     assert len(client.prompts) == 2
     assert "truncated" in client.prompts[1]
     assert "Do not reconsider the broader feature plan" in client.prompts[1]
-    assert "prefer write_file with the full updated contents of the scoped file instead of apply_patch" in client.prompts[1]
+    assert "For single-file HTML/CSS/JS edits, prefer minimal apply_patch hunks" in client.prompts[1]
     assert client.models == ["gpt-4.1-mini", "gpt-4.1"]
     assert client.max_tokens[0] > 1200
     assert client.max_tokens[1] > client.max_tokens[0]
     assert result["payload"]["ai_attempt_tiers"] == ["tier_standard", "tier_premium"]
     assert result["payload"]["ai_effective_tier"] == "tier_premium"
+
+
+@pytest.mark.anyio
+async def test_codex_executor_retries_invalid_patch_repair_with_forced_writefile(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Patch repair fallback", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="PATCH_REPAIR_RECOVERY",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_file": "index.html"},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            {
+                "status": "DONE",
+                "message": "initial invalid patch",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "path": "index.html",
+                        "patch": "@@ ... @@\n-<main>Portfolio</main>\n+<main>Rethemed portfolio</main>\n",
+                    }
+                ],
+                "artifacts": [],
+            }
+        ]
+    )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    call_count = {"value": 0}
+
+    async def fake_repair_plan_after_patch_failure(**kwargs):
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise ValueError("Patch repair output was invalid: Unterminated string starting at: line 9 column 18 (char 304)")
+        repair_raw = json.dumps(
+            {
+                "status": "DONE",
+                "message": "repaired with write_file",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main class='theme-shell'>Rethemed portfolio</main>\n",
+                    }
+                ],
+                "artifacts": [],
+            }
+        )
+        return (
+            executor._parse_codex_plan(repair_raw),
+            repair_raw,
+            {"input_tokens": 1, "output_tokens": 1},
+            "tier_premium",
+            "gpt-4.1",
+        )
+
+    monkeypatch.setattr(executor, "_repair_plan_after_patch_failure", fake_repair_plan_after_patch_failure)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Recover malformed patch-repair output with deterministic write mode",
+                    "expected_files": ["index.html"],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    # Deterministic frontend fallback should avoid model-driven patch-repair calls.
+    assert call_count["value"] == 0
+    assert "Rethemed portfolio" in index_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.anyio
@@ -1798,6 +2175,239 @@ async def test_codex_executor_retries_truncated_patch_repair_output(
     assert "patch does not apply" in client.prompts[1]
     assert "structured output retry 1" in client.prompts[2].lower()
     assert client.max_tokens[2] > client.max_tokens[1]
+
+
+@pytest.mark.anyio
+async def test_code_frontend_patch_repair_prefers_write_file_for_static_scope(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Frontend patch drift repair", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_files": ["index.html"]},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequencePlanClient(
+        [
+            {
+                "status": "DONE",
+                "message": "patched",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "path": "index.html",
+                        "patch": (
+                            "--- a/index.html\n"
+                            "+++ b/index.html\n"
+                            "@@ -90,4 +90,4 @@\n"
+                            "-<main>Portfolio</main>\n"
+                            "+<main>Updated Portfolio</main>\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+            {
+                "status": "DONE",
+                "message": "patched after repair",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main>Updated Portfolio</main>\n",
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    def fake_apply_patch(self, patch: str):
+        raise ValueError(
+            "Patch apply error: Patch check failed: error: patch failed: index.html:90\n"
+            "error: index.html: patch does not apply"
+        )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+    monkeypatch.setattr("app.runtime.codex_executor.RepoTools.apply_patch", fake_apply_patch)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Enhance navigation only",
+                    "expected_files": ["index.html"],
+                    "steps": [
+                        {
+                            "title": "Scoped nav enhancement",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "CODE_FRONTEND",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert index_path.read_text(encoding="utf-8") == "<main>Updated Portfolio</main>\n"
+    # Deterministic fallback applies locally after patch failure; no repair prompt required.
+    assert len(client.prompts) == 1
+
+
+@pytest.mark.anyio
+async def test_code_frontend_patch_repair_survives_triple_parse_retry_for_static_scope(
+    monkeypatch,
+    db_session_factory,
+    tmp_path,
+):
+    tenant_id = uuid.uuid4()
+    index_path = tmp_path / "index.html"
+    index_path.write_text("<main>Portfolio</main>\n", encoding="utf-8")
+
+    async with db_session_factory() as session:
+        project = Project(name="Frontend patch drift parse retries", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="QUEUED",
+            executor="codex",
+            payload={"target_files": ["index.html"]},
+        )
+        session.add(work_item)
+        await session.commit()
+        project_id = project.id
+        run_id = run.id
+        work_item_id = work_item.id
+
+    client = SequenceRawClient(
+        [
+            {
+                "status": "DONE",
+                "message": "patched",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "apply_patch",
+                        "path": "index.html",
+                        "patch": (
+                            "--- a/index.html\n"
+                            "+++ b/index.html\n"
+                            "@@ -90,4 +90,4 @@\n"
+                            "-<main>Portfolio</main>\n"
+                            "+<main>Updated Portfolio</main>\n"
+                        ),
+                    }
+                ],
+                "artifacts": [],
+            },
+            "{\"status\":\"DONE\",\"message\":\"repair",
+            "{\"status\":\"DONE\",\"message\":\"repair",
+            "{\"status\":\"DONE\",\"message\":\"repair",
+            {
+                "status": "DONE",
+                "message": "patched after parse retries",
+                "warnings": [],
+                "actions": [
+                    {
+                        "type": "write_file",
+                        "path": "index.html",
+                        "content": "<main>Updated Portfolio</main>\n",
+                    }
+                ],
+                "artifacts": [],
+            },
+        ]
+    )
+
+    def fake_apply_patch(self, patch: str):
+        raise ValueError(
+            "Patch apply error: Patch check failed: error: patch failed: index.html:90\n"
+            "error: index.html: patch does not apply"
+        )
+
+    monkeypatch.setattr("app.runtime.codex_executor.SessionLocal", db_session_factory)
+    monkeypatch.setattr("app.runtime.codex_executor.RepoTools.apply_patch", fake_apply_patch)
+
+    executor = CodexExecutor(repo_root=tmp_path)
+    executor._job_manager = AIJobManager(session_factory=db_session_factory)
+    monkeypatch.setattr(executor, "_get_client", lambda: client)
+
+    async with db_session_factory() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+        result = await executor.execute(
+            work_item,
+            RunContext(
+                project_id=project_id,
+                run_id=run_id,
+                plan_snapshot={
+                    "goal": "Enhance navigation only",
+                    "expected_files": ["index.html"],
+                    "steps": [
+                        {
+                            "title": "Scoped nav enhancement",
+                            "work_item_id": str(work_item_id),
+                            "work_item_type": "CODE_FRONTEND",
+                            "expected_files": ["index.html"],
+                        }
+                    ],
+                },
+                repo_path=str(tmp_path),
+            ),
+        )
+
+    assert result["status"] == "DONE"
+    assert index_path.read_text(encoding="utf-8") == "<main>Updated Portfolio</main>\n"
+    # Deterministic fallback should avoid repeated parse-repair retries.
+    assert len(client.prompts) == 1
 
 
 @pytest.mark.anyio

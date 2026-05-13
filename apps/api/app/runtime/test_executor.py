@@ -65,13 +65,34 @@ class TestExecutor(TaskExecutor):
         return list(dict.fromkeys(scoped))
 
     @staticmethod
+    def _infer_static_frontend_test_targets(work_item: WorkItem, repo_root: Path) -> list[str]:
+        payload = work_item.payload or {}
+        referenced_files: list[str] = []
+        for key in ("target_files", "files", "expected_files"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                referenced_files.extend(value for value in values if isinstance(value, str))
+        normalized = [value.strip().lower() for value in referenced_files if value.strip()]
+        layout_touched = any(
+            path.endswith((".html", ".css", ".js", ".ts", ".tsx", ".vue"))
+            or "nav" in path
+            or "header" in path
+            or "layout" in path
+            for path in normalized
+        )
+        if not layout_touched:
+            return []
+        static_test = repo_root / "test_index_html.py"
+        return ["test_index_html.py"] if static_test.exists() else []
+
+    @staticmethod
     def _pytest_has_explicit_targets(command: list[str]) -> bool:
         if not command:
             return False
         args = command[1:] if Path(command[0]).name == "pytest" else command[3:]
         return any(arg and not arg.startswith("-") for arg in args)
 
-    def _resolve_test_command(self, work_item: WorkItem, context: RunContext) -> list[str]:
+    def _resolve_test_command(self, work_item: WorkItem, context: RunContext, repo_root: Path) -> list[str]:
         configured = (
             context.execution_contract.test_command
             if context.execution_contract is not None and context.execution_contract.test_command
@@ -80,13 +101,15 @@ class TestExecutor(TaskExecutor):
         command = self._normalize_test_command(shlex.split(configured))
         if self._is_pytest_command(command) and not self._pytest_has_explicit_targets(command):
             scoped_files = self._scoped_test_files(work_item)
+            if not scoped_files:
+                scoped_files = self._infer_static_frontend_test_targets(work_item, repo_root)
             if scoped_files:
                 command = [*command, *scoped_files]
         return command
 
     async def execute(self, work_item: WorkItem, context: RunContext) -> TaskResult:
         repo_root = Path(context.repo_path) if context.repo_path else self.repo_root
-        cmd = self._resolve_test_command(work_item, context)
+        cmd = self._resolve_test_command(work_item, context, repo_root)
         log_dir = Path(context.logs_path) if context.logs_path else repo_root / ".agentic-sdlc-logs"
         try:
             result = await run_workspace_command_async(

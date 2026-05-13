@@ -269,6 +269,8 @@ async def test_create_run_seeds_workspace_from_connected_repo(db_session, monkey
             repo_url=str(remote),
             repo_full_name="example/repo",
             default_branch="main",
+            installation_id=4242,
+            auth_strategy="ssh",
         )
     )
     await session.commit()
@@ -318,6 +320,8 @@ async def test_publish_run_branch_if_ready_commits_and_pushes_workspace_changes(
             repo_url=str(remote),
             repo_full_name="example/repo",
             default_branch="main",
+            installation_id=4242,
+            auth_strategy="ssh",
         )
     )
     run = Run(
@@ -374,6 +378,7 @@ async def test_publish_run_branch_if_ready_pushes_clean_branch_without_new_commi
             repo_url=str(remote),
             repo_full_name="example/repo",
             default_branch="main",
+            installation_id=4242,
         )
     )
     run = Run(
@@ -553,6 +558,7 @@ async def test_feedback_fork_materializes_branch_before_publish(db_session):
             repo_url=str(remote),
             repo_full_name="example/repo",
             default_branch="main",
+            installation_id=4242,
         )
     )
     source_run = Run(
@@ -682,6 +688,62 @@ async def test_fork_run_excludes_recovery_items_and_recomputes_dependencies(db_s
     assert cloned_plan.depends_on_count == 0
     assert cloned_code.depends_on_count == 1
 
+
+@pytest.mark.anyio
+async def test_fork_run_clears_inherited_degraded_summary_flags(db_session):
+    session, tenant_id, _tmp_path = db_session
+    project = Project(name="Fork degraded summary reset", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        summary={
+            "goal": "stale degraded summary should not propagate",
+            "degraded_completion": True,
+            "degraded_reason": "stalled_no_progress",
+            "degraded_at": "2026-05-12T00:00:00Z",
+            "goal_state": "CONCLUDED_UNRESOLVABLE",
+            "stall_recovery_attempts": 4,
+        },
+    )
+    session.add(source_run)
+    await session.flush()
+
+    plan = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="PLAN_DAG",
+        key="PLAN_DAG",
+        status="DONE",
+        executor="codex",
+        priority=1,
+        depends_on_count=0,
+        payload={},
+        result={},
+    )
+    session.add(plan)
+    await session.commit()
+
+    forked_run = await run_replay.fork_run(
+        session,
+        source_run=source_run,
+        executor="codex",
+        start_now=False,
+    )
+
+    assert isinstance(forked_run.summary, dict)
+    assert forked_run.summary.get("forked_from_run_id") == str(source_run.id)
+    assert "degraded_completion" not in forked_run.summary
+    assert "degraded_reason" not in forked_run.summary
+    assert "degraded_at" not in forked_run.summary
+    assert "goal_state" not in forked_run.summary
+    assert "stall_recovery_attempts" not in forked_run.summary
+
 @pytest.mark.anyio
 async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_session, monkeypatch):
     session, tenant_id, tmp_path = db_session
@@ -711,6 +773,7 @@ async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_s
             repo_url=str(remote),
             repo_full_name="example/repo",
             default_branch="main",
+            installation_id=4242,
         )
     )
     run = Run(
@@ -760,8 +823,8 @@ async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_s
     ):
         assert provider == "github"
         assert repo_full_name == "example/repo"
-        assert installation_id is None
-        assert auth_strategy == "runtime_default"
+        assert installation_id == 4242
+        assert auth_strategy == "ssh"
         origin_url = _run_git(["remote", "get-url", "origin"], cwd=repo_dir)
         assert origin_url == str(remote)
         assert repo_url == str(remote)
@@ -862,6 +925,7 @@ async def test_create_pr_from_artifact_uses_already_published_branch(db_session,
             repo_url=str(remote),
             repo_full_name="example/repo",
             default_branch="main",
+            installation_id=4242,
         )
     )
     run = Run(
@@ -969,6 +1033,7 @@ async def test_create_pr_returns_409_when_provider_reports_conflict(db_session, 
             repo_url=str(remote),
             repo_full_name="example/repo",
             default_branch="main",
+            installation_id=4242,
         )
     )
     run = Run(
@@ -1031,3 +1096,94 @@ async def test_create_pr_returns_409_when_provider_reports_conflict(db_session, 
 
     assert response.status_code == 409
     assert "already exists" in response.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_create_pr_returns_400_when_github_installation_missing(db_session, monkeypatch):
+    session, tenant_id, _tmp_path = db_session
+    project = Project(name="Missing installation project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="https://github.com/example/repo.git",
+            repo_full_name="example/repo",
+            default_branch="main",
+            installation_id=None,
+            auth_strategy="ssh",
+        )
+    )
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/missing-install",
+    )
+    session.add(run)
+    await session.commit()
+
+    class DummyGitHubAdapter:
+        def create_pull_request(self, *args, **kwargs):
+            raise AssertionError("create_pull_request should not be called when installation is missing")
+
+    monkeypatch.setattr(pr_service, "get_vcs_adapter", lambda provider: DummyGitHubAdapter())
+    monkeypatch.setattr(pr_service, "get_default_installation_id", lambda provider: None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/runs/{run.id}/create-pr",
+            json={"branch_name": "run/missing-install"},
+        )
+
+    assert response.status_code == 400
+    assert "installation" in response.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_approval_auto_queues_paused_run_for_resume(db_session):
+    session, tenant_id, _tmp_path = db_session
+    project = Project(name="Approval auto resume project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="PAUSED",
+        executor="codex",
+        summary={"goal_state": "NEEDS_HUMAN_INPUT", "recovery_pause": {"reason": "requires_approval"}},
+    )
+    session.add(run)
+    await session.flush()
+    artifact = Artifact(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="git_diff",
+        uri="workspace://patches/needs-approval.patch",
+        version=1,
+    )
+    session.add(artifact)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        approval_resp = await client.post(
+            f"/api/v1/projects/{project.id}/approvals",
+            json={
+                "target_type": "artifact",
+                "target_id": str(artifact.id),
+                "status": "APPROVED",
+                "decided_by": "demo-user",
+                "comment": "Approved for demo flow",
+            },
+        )
+    assert approval_resp.status_code == 201, approval_resp.text
+
+    await session.refresh(run)
+    assert run.status == "QUEUED"
+    summary = run.summary or {}
+    assert summary.get("auto_resumed_after_approval") is True
+    assert "recovery_pause" not in summary

@@ -1,0 +1,94 @@
+services:
+  - type: web
+    name: agentic-sdlc-api
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: RUNTIME_MODE
+        value: external
+      - key: MAX_WORKITEM_CONCURRENCY
+        value: "3"
+      - key: RUN_MIGRATIONS_ON_STARTUP
+        value: "1"
+      - key: RUNTIME_GIT_AUTH_MODE
+        value: github_app_https
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: GITHUB_ALLOWED_ORG
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://prompt2pr.com,https://www.prompt2pr.com,https://agentic-sdlc-web.vercel.app
+
+  - type: worker
+    name: agentic-sdlc-scheduler
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    plan: starter
+    autoDeploy: true
+    dockerCommand: python -m app.runtime.scheduler_service
+    envVars:
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        sync: false
+      - key: RUNTIME_MODE
+        value: external
+      - key: MAX_WORKITEM_CONCURRENCY
+        value: "3"
+      - key: RUN_MIGRATIONS_ON_STARTUP
+        value: "0"
+      - key: RUNTIME_GIT_AUTH_MODE
+        value: github_app_https
+
+  - type: worker
+    name: agentic-sdlc-worker
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    plan: starter
+    autoDeploy: true
+    dockerCommand: python -m app.runtime.worker_service
+    envVars:
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: RUNTIME_MODE
+        value: external
+      - key: MAX_WORKITEM_CONCURRENCY
+        value: "3"
+      - key: RUN_MIGRATIONS_ON_STARTUP
+        value: "0"
+      - key: RUNTIME_GIT_AUTH_MODE
+        value: github_app_https
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: GITHUB_ALLOWED_ORG
+        sync: false

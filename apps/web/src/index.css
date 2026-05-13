@@ -183,6 +183,18 @@ a {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.sidebar-link.is-attention {
+  color: #f8d8a6;
+  border-color: rgba(245, 158, 11, 0.38);
+  box-shadow: inset 3px 0 0 #f59e0b, 0 0 0 1px rgba(245, 158, 11, 0.15);
+  animation: approvalPulse 1.5s ease-in-out infinite;
+}
+
+.sidebar-link.is-attention .sidebar-link__icon {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+}
+
 .sidebar-link.is-disabled {
   opacity: 0.45;
   pointer-events: none;
@@ -218,6 +230,16 @@ a {
   margin-top: 0.15rem;
   font-size: 0.73rem;
   color: var(--text-soft);
+}
+
+@keyframes approvalPulse {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(2px);
+  }
 }
 
 .sidebar-footer {

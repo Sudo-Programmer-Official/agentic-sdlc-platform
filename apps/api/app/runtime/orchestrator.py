@@ -10,6 +10,7 @@ from typing import Callable
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.db.models import Agent, Run, WorkItem, WorkItemEdge
 from app.runtime.executor import TaskExecutor
@@ -30,6 +31,7 @@ from app.services.work_item_state import is_blocking_failure, is_dependency_sati
 from app.services.workspace_supervisor import build_run_context, ensure_run_workspace
 
 log = logging.getLogger("app.runtime.orchestrator")
+_ORCHESTRATOR_MAX_DEGRADED_SLEEP_SECONDS = 8.0
 
 
 def _work_item_terminal_event_type(status: str) -> str:
@@ -38,6 +40,35 @@ def _work_item_terminal_event_type(status: str) -> str:
     if status == "SKIPPED":
         return "WORK_ITEM_SKIPPED"
     return "WORK_ITEM_FAILED"
+
+
+def _extract_failed_result_error(result: dict) -> str:
+    payload = result.get("payload")
+    message = result.get("message")
+    if isinstance(payload, dict):
+        for key in ("error", "last_error", "exception", "failure_reason", "reason", "details"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return "executor returned FAILED without error details"
+
+
+def _is_transient_orchestrator_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, ConnectionError, OperationalError)):
+        return True
+    if isinstance(exc, DBAPIError) and bool(getattr(exc, "connection_invalidated", False)):
+        return True
+    text = str(exc).lower()
+    markers = ("timeout", "timed out", "connection reset", "connection refused", "temporarily unavailable")
+    return any(marker in text for marker in markers)
+
+
+def _orchestrator_backoff_seconds(streak: int) -> float:
+    exp = max(0, min(streak - 1, 10))
+    return min(_ORCHESTRATOR_MAX_DEGRADED_SLEEP_SECONDS, float(2**exp))
+
 
 class RunOrchestrator:
     """Drives a run end-to-end using a provided executor."""
@@ -338,6 +369,7 @@ class RunOrchestrator:
         # Step 3: scheduler loop
         max_conc = max(1, self.settings.max_workitem_concurrency)
         run_failed = False
+        transient_error_streak = 0
 
         async with self.session_factory() as session:
             use_external_runtime = await self._should_use_external_runtime(session, run_id, actor_type, actor_id)
@@ -367,73 +399,89 @@ class RunOrchestrator:
             )
             await session.commit()
             while True:
-                await session.commit()
-                # refresh run status
-                run = await session.get(Run, run_id)
-                if not run:
-                    return
-                if run.status in {"COMPLETED", "FAILED", "CANCELED"}:
-                    break
+                try:
+                    await session.commit()
+                    # refresh run status
+                    run = await session.get(Run, run_id)
+                    if not run:
+                        return
+                    if run.status in {"COMPLETED", "FAILED", "CANCELED"}:
+                        break
 
-                if await reclaim_expired_work_items(session, run_id=run_id):
-                    await session.flush()
+                    if await reclaim_expired_work_items(session, run_id=run_id):
+                        await session.flush()
 
-                # check completion/failed
-                statuses = (
-                    await session.execute(
-                        select(
-                            func.count().filter(WorkItem.status.in_(["RUNNING", "CLAIMED"])),
-                            func.count().filter(WorkItem.status == "QUEUED"),
-                        ).where(WorkItem.run_id == run_id)
-                    )
-                ).first()
-                active_count, queued_count = statuses
-                failed_items = (
-                    await session.execute(
-                        select(WorkItem).where(
-                            WorkItem.run_id == run_id,
-                            WorkItem.status == "FAILED",
+                    # check completion/failed
+                    statuses = (
+                        await session.execute(
+                            select(
+                                func.count().filter(WorkItem.status.in_(["RUNNING", "CLAIMED"])),
+                                func.count().filter(WorkItem.status == "QUEUED"),
+                            ).where(WorkItem.run_id == run_id)
                         )
-                    )
-                ).scalars().all()
-                failed_count = sum(1 for item in failed_items if is_blocking_failure(item))
+                    ).first()
+                    active_count, queued_count = statuses
+                    failed_items = (
+                        await session.execute(
+                            select(WorkItem).where(
+                                WorkItem.run_id == run_id,
+                                WorkItem.status == "FAILED",
+                            )
+                        )
+                    ).scalars().all()
+                    failed_count = sum(1 for item in failed_items if is_blocking_failure(item))
 
-                if failed_count == 0 and queued_count == 0 and active_count == 0:
+                    if failed_count == 0 and queued_count == 0 and active_count == 0:
+                        if use_external_runtime:
+                            await asyncio.sleep(0.2)
+                            continue
+                        break
+
+                    # find runnable items (QUEUED and deps done/skipped)
+                    runnable: list[WorkItem] = []
+                    if queued_count:
+                        runnable = await self._runnable_queued_items(session, run_id=run_id, limit=max_conc)
+
+                    if failed_count and active_count == 0 and not use_external_runtime:
+                        if queued_count == 0:
+                            run_failed = True
+                            break
+                        if not runnable:
+                            await self._cancel_terminally_blocked_items(
+                                session,
+                                run=run,
+                                actor_type=actor_type,
+                                actor_id=actor_id,
+                            )
+                            run_failed = True
+                            break
+
                     if use_external_runtime:
+                        # external mode: do not execute items here, just wait for workers
                         await asyncio.sleep(0.2)
                         continue
-                    break
 
-                # find runnable items (QUEUED and deps done/skipped)
-                runnable: list[WorkItem] = []
-                if queued_count:
-                    runnable = await self._runnable_queued_items(session, run_id=run_id, limit=max_conc)
-
-                if failed_count and active_count == 0 and not use_external_runtime:
-                    if queued_count == 0:
-                        run_failed = True
-                        break
                     if not runnable:
-                        await self._cancel_terminally_blocked_items(
-                            session,
-                            run=run,
-                            actor_type=actor_type,
-                            actor_id=actor_id,
+                        await asyncio.sleep(0.2)
+                        continue
+
+                    for wi in runnable:
+                        await self._process_work_item(session, wi, run)
+                    transient_error_streak = 0
+                except Exception as exc:
+                    if _is_transient_orchestrator_error(exc):
+                        transient_error_streak += 1
+                        sleep_for = _orchestrator_backoff_seconds(transient_error_streak)
+                        log.warning(
+                            "Run orchestration transient failure run_id=%s streak=%s backoff_seconds=%.1f error=%s",
+                            run_id,
+                            transient_error_streak,
+                            sleep_for,
+                            exc,
                         )
-                        run_failed = True
-                        break
-
-                if use_external_runtime:
-                    # external mode: do not execute items here, just wait for workers
-                    await asyncio.sleep(0.2)
-                    continue
-
-                if not runnable:
-                    await asyncio.sleep(0.2)
-                    continue
-
-                for wi in runnable:
-                    await self._process_work_item(session, wi, run)
+                        await asyncio.sleep(sleep_for)
+                        continue
+                    raise
 
             if use_external_runtime:
                 return
@@ -693,7 +741,10 @@ class RunOrchestrator:
             wi.status = result.get("status", "DONE")
             wi.result = result.get("payload", {})
             wi.finished_at = datetime.now(timezone.utc)
-            wi.last_error = None
+            if wi.status == "FAILED":
+                wi.last_error = _extract_failed_result_error(result)
+            else:
+                wi.last_error = None
             failure_stage = "artifact_persistence"
             await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
             if wi.status in {"DONE", "SKIPPED"}:
@@ -710,6 +761,8 @@ class RunOrchestrator:
                     "work_item_id": str(wi.id),
                     "status": wi.status,
                     "message": result.get("message"),
+                    "error": wi.last_error if wi.status == "FAILED" else None,
+                    "failure_stage": "executor_execute" if wi.status == "FAILED" else None,
                     "mutation_strategy": (wi.result or {}).get("mutation_strategy"),
                     "selected_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("selected"),
                     "effective_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("effective"),

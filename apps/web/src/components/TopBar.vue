@@ -24,6 +24,10 @@
         <span v-if="projectContext.updatedAt" class="topbar-chip">
           Updated {{ updatedAtLabel }}
         </span>
+        <span class="topbar-chip" :style="networkChipStyle" :title="networkTooltip">
+          <AppIcon name="status" size="sm" />
+          Network {{ networkStatusLabel }}
+        </span>
         <el-popover
           v-if="versionText"
           v-model:visible="versionPopoverOpen"
@@ -152,7 +156,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import AppIcon from "./AppIcon.vue";
@@ -174,6 +178,11 @@ const versionText = ref<string | null>(null);
 const envText = ref<string | null>(null);
 const versionHistory = ref<BuildEntry[]>([]);
 const versionPopoverOpen = ref(false);
+const networkStatus = ref<"ONLINE" | "DEGRADED" | "OFFLINE">(
+  typeof navigator !== "undefined" && navigator.onLine ? "ONLINE" : "OFFLINE"
+);
+const networkLatencyMs = ref<number | null>(null);
+let networkMonitorTimer: number | null = null;
 
 type RecentProject = { id: string; name: string };
 type BuildEntry = {
@@ -257,6 +266,31 @@ const shortProjectId = computed(() => {
   const id = projectContext.projectId;
   if (!id) return "—";
   return id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+});
+const networkStatusLabel = computed(() => {
+  if (networkStatus.value === "ONLINE") return "Good";
+  if (networkStatus.value === "DEGRADED") return "Degraded";
+  return "Offline";
+});
+const networkTooltip = computed(() => {
+  if (networkStatus.value === "ONLINE") {
+    return networkLatencyMs.value == null ? "API reachable" : `API reachable · ${networkLatencyMs.value} ms`;
+  }
+  if (networkStatus.value === "DEGRADED") {
+    return networkLatencyMs.value == null
+      ? "Browser online, API unstable"
+      : `Browser online, API slow/unstable · ${networkLatencyMs.value} ms`;
+  }
+  return "Browser offline";
+});
+const networkChipStyle = computed(() => {
+  if (networkStatus.value === "ONLINE") {
+    return { background: "rgba(34, 197, 94, 0.12)", color: "var(--success)" };
+  }
+  if (networkStatus.value === "DEGRADED") {
+    return { background: "rgba(245, 158, 11, 0.12)", color: "var(--warning)" };
+  }
+  return { background: "rgba(239, 68, 68, 0.12)", color: "var(--danger)" };
 });
 const updatedAtLabel = computed(() => {
   const updatedAt = projectContext.updatedAt;
@@ -372,6 +406,15 @@ async function hydrateRecentProjectsFromApi() {
 onMounted(() => {
   void hydrateRecentProjectsFromApi();
   void fetchVersionInfo();
+  startNetworkMonitor();
+  window.addEventListener("online", handleBrowserOnline);
+  window.addEventListener("offline", handleBrowserOffline);
+});
+
+onBeforeUnmount(() => {
+  stopNetworkMonitor();
+  window.removeEventListener("online", handleBrowserOnline);
+  window.removeEventListener("offline", handleBrowserOffline);
 });
 
 function loadRecentProjects(): RecentProject[] {
@@ -430,5 +473,53 @@ function formatBuildEntry(entry: BuildEntry) {
     parts.push(Number.isNaN(parsed.getTime()) ? entry.built_at : parsed.toLocaleString());
   }
   return parts.join(" · ");
+}
+
+function handleBrowserOnline() {
+  networkStatus.value = "DEGRADED";
+  void probeNetworkStatus();
+}
+
+function handleBrowserOffline() {
+  networkStatus.value = "OFFLINE";
+  networkLatencyMs.value = null;
+}
+
+async function probeNetworkStatus() {
+  if (typeof navigator !== "undefined" && !navigator.onLine) {
+    networkStatus.value = "OFFLINE";
+    networkLatencyMs.value = null;
+    return;
+  }
+  const apiHost = API_BASE.replace(/\/api\/v1$/, "");
+  const startedAt = performance.now();
+  try {
+    const resp = await fetch(`${apiHost}/health`, { cache: "no-store" });
+    const latency = Math.round(performance.now() - startedAt);
+    networkLatencyMs.value = latency;
+    if (!resp.ok) {
+      networkStatus.value = "DEGRADED";
+      return;
+    }
+    networkStatus.value = latency > 1800 ? "DEGRADED" : "ONLINE";
+  } catch {
+    networkStatus.value = "DEGRADED";
+    networkLatencyMs.value = null;
+  }
+}
+
+function startNetworkMonitor() {
+  stopNetworkMonitor();
+  void probeNetworkStatus();
+  networkMonitorTimer = window.setInterval(() => {
+    void probeNetworkStatus();
+  }, 10000);
+}
+
+function stopNetworkMonitor() {
+  if (networkMonitorTimer !== null) {
+    window.clearInterval(networkMonitorTimer);
+    networkMonitorTimer = null;
+  }
 }
 </script>

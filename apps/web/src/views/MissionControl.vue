@@ -1205,6 +1205,24 @@
               Open
             </a>
           </div>
+          <div
+            v-if="previewRefreshSuggested"
+            class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700"
+          >
+            Newer run {{ shortRunId(latestCompletedRunId) }} is available. Current preview is from
+            run {{ shortRunId(previewsAndPrs.run_id) }}.
+            <div class="mt-2 flex flex-wrap gap-2">
+              <el-button size="small" type="primary" plain :loading="previewLaunchLoading" @click="refreshPreviewToLatestRun">
+                Refresh to Latest
+              </el-button>
+              <el-button size="small" type="warning" plain :loading="previewLaunchLoading" @click="restartPreviewToLatestRun">
+                Restart to Latest
+              </el-button>
+              <el-button size="small" plain @click="openTimelinePage(latestCompletedRunId)">
+                Go to Run
+              </el-button>
+            </div>
+          </div>
           <div v-if="previewsAndPrs.preview_url" class="mission-preview-embed">
             <div class="mission-preview-embed__top">
               <div class="text-xs uppercase tracking-wide text-slate-400">Live Preview</div>
@@ -2712,6 +2730,29 @@ const projectContractStrictLoading = ref(false);
 const projectContractActionError = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
+const runStatusPriority: Record<string, number> = {
+  RUNNING: 0,
+  CLAIMED: 1,
+  QUEUED: 2,
+  PAUSED: 3,
+  FAILED: 4,
+  CANCELED: 5,
+  DONE: 6,
+  COMPLETED: 7,
+};
+function canonicalizeRuns(runList: any[]) {
+  const rows = Array.isArray(runList) ? [...runList] : [];
+  return rows.sort((a, b) => {
+    const aStatus = String(a?.status || "").toUpperCase();
+    const bStatus = String(b?.status || "").toUpperCase();
+    const aPriority = runStatusPriority[aStatus] ?? 99;
+    const bPriority = runStatusPriority[bStatus] ?? 99;
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    const byTime = timestampScore(b) - timestampScore(a);
+    if (byTime !== 0) return byTime;
+    return String(b?.id || "").localeCompare(String(a?.id || ""));
+  });
+}
 const canonicalRunId = computed(() => {
   const statusPriority = ["RUNNING", "CLAIMED", "QUEUED"];
   const active = runs.value
@@ -2859,6 +2900,17 @@ const latestExecutionContract = computed(
 const previewRunId = computed(
   () => previewsAndPrs.value?.run_id || latestChangeImpact.value?.run_id || latestRun.value?.id || ""
 );
+const latestCompletedRunId = computed(() => {
+  const completed = runs.value
+    .filter((run) => String(run?.status || "").toUpperCase() === "COMPLETED")
+    .sort((a, b) => timestampScore(b) - timestampScore(a))[0];
+  return completed?.id || "";
+});
+const previewRefreshSuggested = computed(() => {
+  const previewUrl = String(previewsAndPrs.value?.preview_url || "");
+  const previewSourceRunId = String(previewsAndPrs.value?.run_id || "");
+  return Boolean(previewUrl && latestCompletedRunId.value && previewSourceRunId && previewSourceRunId !== latestCompletedRunId.value);
+});
 const strategyLearning = computed(() => missionOverview.value?.strategy_learning || []);
 const systemInsights = computed(() => missionOverview.value?.system_insights || null);
 const violationInsights = computed(() => missionOverview.value?.violation_insights || null);
@@ -3522,11 +3574,12 @@ async function loadAll() {
     project.value = projectMeta;
     health.value = projectHealth;
     lifecycleScore.value = score;
-    runs.value = runList;
+    runs.value = canonicalizeRuns(runList);
     await loadRunRuntime();
-    await loadSimilarRuns();
-    await loadMissionOverview();
-    await loadMemoryTimeline();
+    // Load heavier surfaces in background to avoid blocking the first render.
+    void loadSimilarRuns();
+    void loadMissionOverview();
+    void loadMemoryTimeline();
     syncContext();
     syncPolling();
   } catch (err: any) {
@@ -3542,7 +3595,7 @@ async function loadMissionOverview() {
     return;
   }
   try {
-    missionOverview.value = await fetchMissionControlOverview(projectId.value);
+    missionOverview.value = await fetchMissionControlOverview(projectId.value, { includeHeavy: true });
     overviewError.value = "";
     previewLaunchError.value = "";
   } catch (err: any) {
@@ -3553,8 +3606,8 @@ async function loadMissionOverview() {
 
 async function refreshOverviewSurface() {
   if (!projectId.value.trim()) return;
-  runs.value = await listRuns(projectId.value);
-  await loadMissionOverview();
+  runs.value = canonicalizeRuns(await listRuns(projectId.value));
+  void loadMissionOverview();
   syncContext();
   syncPolling();
 }
@@ -3588,7 +3641,7 @@ async function bootstrapProjectContractFromMissionControl() {
     await bootstrapProjectContract(projectId.value, {
       created_by: "ui-user",
     });
-    await loadMissionOverview();
+    void loadMissionOverview();
     ElMessage.success("Project contract initialized.");
   } catch (err: any) {
     projectContractActionError.value = err?.message || "Failed to initialize project contract.";
@@ -3629,7 +3682,7 @@ async function enableProjectContractEnforcement() {
       },
       updated_by: "ui-user",
     });
-    await loadMissionOverview();
+    void loadMissionOverview();
     ElMessage.success(
       shouldBootstrap
         ? "Project contract initialized and WARN enforcement enabled."
@@ -3674,7 +3727,7 @@ async function upgradeProjectContractEnforcementToStrict() {
       },
       updated_by: "ui-user",
     });
-    await loadMissionOverview();
+    void loadMissionOverview();
     ElMessage.success(
       shouldBootstrap
         ? "Project contract initialized and STRICT enforcement enabled."
@@ -3696,7 +3749,7 @@ async function startPreviewLaunch() {
     const currentStatus = String(previewsAndPrs.value?.preview_status || "").toUpperCase();
     const shouldReuse = currentStatus === "READY";
     await launchRunPreview(previewRunId.value, { reuse_if_healthy: shouldReuse });
-    await loadMissionOverview();
+    void loadMissionOverview();
   } catch (err: any) {
     previewLaunchError.value = err?.message || "Failed to launch preview.";
   } finally {
@@ -3711,7 +3764,7 @@ async function stopPreviewLaunch() {
   previewLaunchInfo.value = "";
   try {
     await deleteRunPreview(previewRunId.value);
-    await loadMissionOverview();
+    void loadMissionOverview();
   } catch (err: any) {
     previewLaunchError.value = err?.message || "Failed to stop preview.";
   } finally {
@@ -3744,9 +3797,49 @@ async function restartPreviewLaunch() {
   }
 }
 
+async function refreshPreviewToLatestRun() {
+  if (!latestCompletedRunId.value) return;
+  previewLaunchLoading.value = true;
+  previewLaunchError.value = "";
+  previewLaunchInfo.value = `Refreshing preview for run ${shortRunId(latestCompletedRunId.value)}…`;
+  try {
+    await launchRunPreview(latestCompletedRunId.value, { reuse_if_healthy: false });
+    await loadMissionOverview();
+    previewLaunchInfo.value = "Preview switched to latest run.";
+  } catch (err: any) {
+    previewLaunchError.value = err?.message || "Failed to refresh preview to latest run.";
+    previewLaunchInfo.value = "";
+  } finally {
+    previewLaunchLoading.value = false;
+  }
+}
+
+async function restartPreviewToLatestRun() {
+  if (!latestCompletedRunId.value) return;
+  previewLaunchLoading.value = true;
+  previewLaunchError.value = "";
+  previewLaunchInfo.value = `Restarting preview for run ${shortRunId(latestCompletedRunId.value)}…`;
+  try {
+    try {
+      await deleteRunPreview(latestCompletedRunId.value);
+    } catch {
+      // stale/missing state should not block restart
+    }
+    await launchRunPreview(latestCompletedRunId.value, { reuse_if_healthy: false });
+    await loadMissionOverview();
+    previewLaunchInfo.value = "Latest run preview restarted.";
+  } catch (err: any) {
+    previewLaunchError.value = err?.message || "Failed to restart latest run preview.";
+    previewLaunchInfo.value = "";
+  } finally {
+    previewLaunchLoading.value = false;
+  }
+}
+
 async function refreshPreviewStateUntilSettled() {
   const maxPolls = 8;
   for (let i = 0; i < maxPolls; i += 1) {
+    // Avoid sequentially stalling the loop on expensive overview calls.
     await loadMissionOverview();
     const status = String(previewsAndPrs.value?.preview_status || "").toUpperCase();
     if (status === "READY" || status === "FAILED" || status === "STOPPED" || status === "EXPIRED") return;
@@ -3827,7 +3920,7 @@ async function refreshRuntime(force = false) {
   if (!projectId.value.trim() || (pollInFlight && !force)) return;
   pollInFlight = true;
   try {
-    runs.value = await listRuns(projectId.value);
+    runs.value = canonicalizeRuns(await listRuns(projectId.value));
     await loadRunRuntime();
     if (!["QUEUED", "RUNNING", "CLAIMED"].includes(latestRun.value?.status || "")) {
       const [projectHealth, score] = await Promise.all([
@@ -3837,9 +3930,10 @@ async function refreshRuntime(force = false) {
       health.value = projectHealth;
       lifecycleScore.value = score;
     }
-    await loadSimilarRuns();
-    await loadMissionOverview();
-    await loadMemoryTimeline();
+    // Keep refresh snappy; hydrate heavy cards asynchronously.
+    void loadSimilarRuns();
+    void loadMissionOverview();
+    void loadMemoryTimeline();
     syncContext();
     syncPolling();
   } catch (err: any) {
@@ -3883,12 +3977,12 @@ function pollIntervalMs() {
   }
   const hidden = typeof document !== "undefined" && document.hidden;
   if (status === "QUEUED") {
-    return hidden ? 15000 : 12000;
+    return hidden ? 9000 : 3500;
   }
   if (status === "CLAIMED") {
-    return hidden ? 8000 : 2500;
+    return hidden ? 7000 : 3000;
   }
-  return hidden ? 10000 : 6000;
+  return hidden ? 6000 : 2500;
 }
 
 function openVisionFilePicker() {
@@ -3989,7 +4083,15 @@ async function startRunFromIntake(item: any) {
   overviewError.value = "";
   try {
     const executor = "codex";
-    await createRun(projectId.value, executor);
+    const createdRun = await createRun(projectId.value, executor);
+    if (createdRun?.id) {
+      runs.value = canonicalizeRuns([createdRun, ...runs.value.filter((run) => run?.id !== createdRun.id)]);
+      ElMessage.success(`Run started: ${String(createdRun.id).slice(0, 8)}`);
+      syncContext();
+      syncPolling();
+    } else {
+      ElMessage.success("Run started.");
+    }
     await refreshRuntime(true);
   } catch (err: any) {
     overviewError.value = err?.message || "Failed to start run from work intake.";

@@ -135,7 +135,7 @@ async def test_bootstrap_fails_repo_runs_before_marking_them_running(monkeypatch
     monkeypatch.setattr(
         orchestrator_module,
         "get_settings",
-        lambda: types.SimpleNamespace(runtime_mode="external", max_workitem_concurrency=1),
+        lambda: types.SimpleNamespace(runtime_mode="external", max_workitem_concurrency=1, runtime_never_fail_runs=False),
     )
     monkeypatch.setattr(orchestrator_module, "get_executor", lambda name: types.SimpleNamespace(name=name))
     monkeypatch.setattr(orchestrator_module, "record_event", fake_record_event)
@@ -190,7 +190,7 @@ async def test_bootstrap_fails_closed_when_task_scope_is_missing(monkeypatch):
     monkeypatch.setattr(
         orchestrator_module,
         "get_settings",
-        lambda: types.SimpleNamespace(runtime_mode="external", max_workitem_concurrency=1),
+        lambda: types.SimpleNamespace(runtime_mode="external", max_workitem_concurrency=1, runtime_never_fail_runs=False),
     )
     monkeypatch.setattr(orchestrator_module, "get_executor", lambda name: types.SimpleNamespace(name=name))
     monkeypatch.setattr(orchestrator_module, "record_event", fake_record_event)

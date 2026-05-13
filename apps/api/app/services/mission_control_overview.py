@@ -748,12 +748,13 @@ async def build_mission_control_overview(
     *,
     tenant_id: uuid.UUID,
     project_id: uuid.UUID,
+    lightweight: bool = True,
 ) -> MissionControlOverviewResponse:
     project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
     if project is None:
         raise ValueError("Project not found")
 
-    work_intake = await _build_work_intake(session, tenant_id=tenant_id, project_id=project_id)
+    work_intake = [] if lightweight else await _build_work_intake(session, tenant_id=tenant_id, project_id=project_id)
     summaries, run_by_id, patch_artifacts, _ = await _load_recent_runs_and_artifacts(
         session,
         tenant_id=tenant_id,
@@ -815,16 +816,24 @@ async def build_mission_control_overview(
         tenant_id=tenant_id,
         project_id=project_id,
     )
-    imported_references = await _load_imported_references(
-        session,
-        tenant_id=tenant_id,
-        project_id=project_id,
+    imported_references = (
+        []
+        if lightweight
+        else await _load_imported_references(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
     )
-    eta_profiles = await _build_eta_profiles(
-        session,
-        tenant_id=tenant_id,
-        project_id=project_id,
-        recent_run_ids=[summary.run_id for summary in summaries[:20]],
+    eta_profiles = (
+        []
+        if lightweight
+        else await _build_eta_profiles(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            recent_run_ids=[summary.run_id for summary in summaries[:20]],
+        )
     )
     return MissionControlOverviewResponse(
         work_intake=work_intake,
@@ -836,7 +845,7 @@ async def build_mission_control_overview(
         latest_execution_contract=build_execution_contract_telemetry(
             latest_run.summary if latest_run is not None and isinstance(latest_run.summary, dict) else None
         ),
-        strategy_learning=_build_strategy_learning(runs),
+        strategy_learning=[] if lightweight else _build_strategy_learning(runs),
         eta_profiles=eta_profiles,
         system_insights=_build_system_insights(summaries),
         violation_insights=_build_violation_insights(summaries, run_by_id),

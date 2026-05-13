@@ -75,7 +75,33 @@ def resolve_preview_profile(
     repository_connected: bool,
 ) -> ProjectPreviewProfile | ResolvedPreviewProfile | None:
     if profile is not None:
-        return profile
+        has_start_command = bool(
+            (profile.frontend_start_command and profile.frontend_start_command.strip())
+            or (profile.backend_start_command and profile.backend_start_command.strip())
+        )
+        if has_start_command or not repository_connected:
+            return profile
+        # Backward-compatible fallback: if a profile exists but has no launch commands,
+        # keep operator-configured fields and inject the default static frontend launcher.
+        return ResolvedPreviewProfile(
+            enabled=profile.enabled,
+            mode=profile.mode or "local",
+            frontend_root=profile.frontend_root,
+            backend_root=profile.backend_root,
+            compose_file=profile.compose_file,
+            frontend_build_command=profile.frontend_build_command,
+            backend_build_command=profile.backend_build_command,
+            frontend_start_command=DEFAULT_STATIC_START_COMMAND,
+            backend_start_command=profile.backend_start_command,
+            frontend_healthcheck_path=profile.frontend_healthcheck_path or "/",
+            backend_healthcheck_path=profile.backend_healthcheck_path or "/",
+            frontend_port=profile.frontend_port,
+            backend_port=profile.backend_port,
+            env_overrides=profile.env_overrides or {},
+            ttl_hours=profile.ttl_hours or get_settings().preview_default_ttl_hours,
+            max_previews_per_project=profile.max_previews_per_project,
+            created_by=profile.created_by or "system:default-static-web-monorepo",
+        )
     if repository_connected:
         return build_default_preview_profile()
     return None

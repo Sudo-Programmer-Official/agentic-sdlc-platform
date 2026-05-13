@@ -369,8 +369,15 @@ export async function fetchProjectMeta(projectId: string) {
   return parseApiResponse(resp);
 }
 
-export async function fetchMissionControlOverview(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/mission-control/overview`);
+export async function fetchMissionControlOverview(
+  projectId: string,
+  options: { includeHeavy?: boolean; forceRefresh?: boolean } = {}
+) {
+  const search = new URLSearchParams();
+  if (options.includeHeavy) search.set("include_heavy", "true");
+  if (options.forceRefresh) search.set("force_refresh", "true");
+  const qs = search.toString();
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/mission-control/overview${qs ? `?${qs}` : ""}`);
   return parseApiResponse(resp);
 }
 
@@ -677,7 +684,9 @@ export async function createApproval(projectId: string, payload: CreateApprovalP
 
 // Runs
 export async function listRuns(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/runs`, {
+    cache: "no-store",
+  });
   return parseApiResponse(resp);
 }
 

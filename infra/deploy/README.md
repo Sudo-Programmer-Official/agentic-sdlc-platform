@@ -2,6 +2,22 @@
 
 Deployment scripts and infrastructure automation live here.
 
+## Render Blueprint (Vercel + Render + AWS RDS)
+
+For the non-AWS-compute production path, use:
+
+- [render.yaml](/Users/abhishekkumarjha/Documents/sudo-programmer-official/agentic-sdlc-platform/infra/deploy/render/render.yaml)
+
+This blueprint defines:
+
+- `agentic-sdlc-api` (web service)
+- `agentic-sdlc-scheduler` (worker service)
+- `agentic-sdlc-worker` (worker service)
+
+End-to-end rollout/runbook:
+
+- [vercel-render-aws-rds.md](/Users/abhishekkumarjha/Documents/sudo-programmer-official/agentic-sdlc-platform/docs/deployment/vercel-render-aws-rds.md)
+
 ## ECS Runtime Env Template
 
 Use [ecs-runtime-container-env.example.json](/Users/abhishekkumarjha/Documents/sudo-programmer-official/agentic-sdlc-platform/infra/deploy/ecs-runtime-container-env.example.json) as the source-controlled environment contract for ECS task-definition updates.

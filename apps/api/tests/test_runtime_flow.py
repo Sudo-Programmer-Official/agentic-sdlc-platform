@@ -1603,8 +1603,71 @@ async def test_scheduler_does_not_spawn_goal_recovery_retry_for_insufficient_quo
             ).scalars().all()
         ]
         assert "WORK_ITEM_RECOVERY" not in event_types
+
+
+@pytest.mark.anyio
+async def test_scheduler_pauses_run_for_operator_confirmation_required(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Operator confirmation pause project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True},
+            result={"message": "Patch execution requires operator confirmation before mutating the repository."},
+            last_error="Patch execution requires operator confirmation before mutating the repository.",
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "PAUSED"
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("goal_state") == "NEEDS_HUMAN_INPUT"
+        pause_meta = run.summary.get("operator_confirmation_pause")
+        assert isinstance(pause_meta, dict)
+        assert pause_meta.get("reason") == "operator_confirmation_required"
+
+        items = (
+            await session.execute(select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at.asc()))
+        ).scalars().all()
+        assert len(items) == 1
+        assert items[0].status == "FAILED"
+
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_OPERATOR_ACTION_REQUIRED" in event_types
+        assert "WORK_ITEM_RECOVERY" not in event_types
         assert "WORK_ITEM_CREATED" not in event_types
-        assert "RUN_FAILED" in event_types
 
 
 @pytest.mark.anyio

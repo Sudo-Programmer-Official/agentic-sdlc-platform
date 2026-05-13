@@ -54,6 +54,19 @@ def _work_item_terminal_event_type(status: str) -> str:
     return "WORK_ITEM_FAILED"
 
 
+def _extract_failed_result_error(result: dict) -> str:
+    payload = result.get("payload")
+    message = result.get("message")
+    if isinstance(payload, dict):
+        for key in ("error", "last_error", "exception", "failure_reason", "reason", "details"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return "executor returned FAILED without error details"
+
+
 async def execute_item(session, wi: WorkItem, agent: Agent):
     work_item_id = wi.id
     run_id = wi.run_id
@@ -72,7 +85,10 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
         wi.status = result.get("status", "DONE")
         wi.result = result.get("payload", {})
         wi.finished_at = datetime.now(timezone.utc)
-        wi.last_error = None
+        if wi.status == "FAILED":
+            wi.last_error = _extract_failed_result_error(result)
+        else:
+            wi.last_error = None
         session.add(wi)
         failure_stage = "artifact_persistence"
         await persist_work_item_artifacts(session, wi, (wi.result or {}).get("artifacts"))
@@ -90,6 +106,9 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
             payload={
                 "work_item_id": str(work_item_id),
                 "status": wi.status,
+                "message": result.get("message"),
+                "error": wi.last_error if wi.status == "FAILED" else None,
+                "failure_stage": "executor_execute" if wi.status == "FAILED" else None,
                 "mutation_strategy": (wi.result or {}).get("mutation_strategy"),
                 "selected_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("selected"),
                 "effective_strategy": ((wi.result or {}).get("mutation_strategy") or {}).get("effective"),

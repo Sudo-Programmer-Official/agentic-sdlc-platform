@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -28,20 +29,35 @@ from app.services.project_evolution_timeline import (
 from app.services.run_execution_console import build_run_execution_console
 
 public_router = APIRouter(tags=["mission-control"])
+_OVERVIEW_CACHE_TTL_SECONDS = 2.0
+_OVERVIEW_CACHE: dict[tuple[uuid.UUID, uuid.UUID, bool], tuple[float, MissionControlOverviewResponse]] = {}
 
 
 @public_router.get("/projects/{project_id}/mission-control/overview", response_model=MissionControlOverviewResponse)
 async def mission_control_overview(
     project_id: uuid.UUID,
+    include_heavy: bool = False,
+    force_refresh: bool = False,
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> MissionControlOverviewResponse:
+    cache_key = (ctx.tenant_id, project_id, include_heavy)
+    if not include_heavy and not force_refresh:
+        cached = _OVERVIEW_CACHE.get(cache_key)
+        if cached is not None:
+            cached_at, payload = cached
+            if (time.monotonic() - cached_at) < _OVERVIEW_CACHE_TTL_SECONDS:
+                return payload
     try:
-        return await build_mission_control_overview(
+        payload = await build_mission_control_overview(
             session,
             tenant_id=ctx.tenant_id,
             project_id=project_id,
+            lightweight=not include_heavy,
         )
+        if not include_heavy:
+            _OVERVIEW_CACHE[cache_key] = (time.monotonic(), payload)
+        return payload
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 

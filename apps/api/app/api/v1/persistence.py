@@ -115,6 +115,7 @@ from app.services.project_genesis import (
 from app.services.task_lineage import add_task_lineage_traces
 from app.services.pr_service import create_pr_from_artifact
 from app.services.preview_service import (
+    DEFAULT_STATIC_START_COMMAND,
     get_project_preview_profile,
     get_run_preview,
     launch_run_preview,
@@ -749,6 +750,7 @@ async def create_project_blueprint(
 @public_router.get("/projects/{project_id}/runs", response_model=List[RunOut])
 async def list_runs(
     project_id: uuid.UUID,
+    finalize_active: bool = Query(default=False),
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> List[RunOut]:
@@ -761,21 +763,22 @@ async def list_runs(
         .order_by(*_run_activity_ordering())
     )
     runs = result.scalars().all()
-    finalized_any = False
-    for run in runs:
-        if run.status in ACTIVE_RUN_STATUSES:
-            prior = run.status
-            await _maybe_finalize_run(session, run.id)
-            if run.status != prior:
-                finalized_any = True
-    if finalized_any:
-        await session.commit()
-        result = await session.execute(
-            select(Run)
-            .where(Run.project_id == project_id, Run.tenant_id == ctx.tenant_id)
-            .order_by(*_run_activity_ordering())
-        )
-        runs = result.scalars().all()
+    if finalize_active:
+        finalized_any = False
+        for run in runs:
+            if run.status in ACTIVE_RUN_STATUSES:
+                prior = run.status
+                await _maybe_finalize_run(session, run.id)
+                if run.status != prior:
+                    finalized_any = True
+        if finalized_any:
+            await session.commit()
+            result = await session.execute(
+                select(Run)
+                .where(Run.project_id == project_id, Run.tenant_id == ctx.tenant_id)
+                .order_by(*_run_activity_ordering())
+            )
+            runs = result.scalars().all()
     return [_run_out(r) for r in runs]
 
 
@@ -1148,7 +1151,9 @@ async def fetch_project_preview_profile(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     profile = await get_project_preview_profile(session, tenant_id=ctx.tenant_id, project_id=project_id)
     if profile is None:
-        default_payload = ProjectPreviewProfileUpsert().model_dump()
+        default_payload = ProjectPreviewProfileUpsert(
+            frontend_start_command=DEFAULT_STATIC_START_COMMAND
+        ).model_dump()
         profile = await upsert_project_preview_profile(
             session,
             project_id=project_id,

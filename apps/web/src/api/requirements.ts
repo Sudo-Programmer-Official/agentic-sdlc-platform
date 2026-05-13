@@ -73,7 +73,9 @@ export async function fetchRequirementSummary(projectId: string, limit = 50, off
     limit: String(limit),
     offset: String(offset),
   });
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/requirements/summary?${params.toString()}`);
+  const resp = await fetch(`${API_BASE}/projects/${projectId}/requirements/summary?${params.toString()}`, {
+    cache: "no-store",
+  });
   return parseApiResponse(resp);
 }
 

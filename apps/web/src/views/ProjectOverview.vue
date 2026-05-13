@@ -926,7 +926,11 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="Status" width="120" />
+        <el-table-column label="Status" width="140">
+          <template #default="scope">
+            <span>{{ taskEffectiveStatus(scope.row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="Branch" width="200">
           <template #default="scope">
             <div class="text-sm text-slate-800">{{ taskBranchLabel(scope.row) }}</div>
@@ -1360,8 +1364,8 @@ const statusPriority: Record<string, number> = {
 const sortedTasks = computed(() => {
   const rows = Array.isArray(tasks.value) ? [...tasks.value] : [];
   return rows.sort((a, b) => {
-    const aStatus = String(a?.status || "").toUpperCase();
-    const bStatus = String(b?.status || "").toUpperCase();
+    const aStatus = taskEffectiveStatus(a);
+    const bStatus = taskEffectiveStatus(b);
     const aPriority = statusPriority[aStatus] ?? 99;
     const bPriority = statusPriority[bStatus] ?? 99;
     if (aPriority !== bPriority) return aPriority - bPriority;
@@ -1377,7 +1381,7 @@ const sortedTasks = computed(() => {
 const runnableTasks = computed(() => sortedTasks.value.filter((task) => canRunTask(task)));
 const taskStatusCounts = computed(() => {
   const rows = sortedTasks.value;
-  const statusOf = (row: any) => String(row?.status || "").toUpperCase();
+  const statusOf = (row: any) => taskEffectiveStatus(row);
   const count = (statuses: string[]) => rows.filter((row) => statuses.includes(statusOf(row))).length;
   return {
     queued: count(["PENDING", "QUEUED"]),
@@ -1389,12 +1393,30 @@ const taskStatusCounts = computed(() => {
 const requirementsNeedingReview = computed(
   () => requirementSummaryCards.value.filter((card) => String(card?.status || "").toUpperCase() === "NEEDS_REVIEW").length
 );
-const totalRequirementAiSpendCents = computed(() =>
+const requirementsSpendCentsFromSummary = computed(() =>
   requirementSummaryCards.value.reduce((sum, card) => sum + Number(card?.ai_spend_cents || 0), 0)
+);
+const requirementsTokensFromSummary = computed(() =>
+  requirementSummaryCards.value.reduce((sum, card) => sum + Number(card?.ai_total_tokens || 0), 0)
+);
+const requirementsSpendCentsFromRuns = computed(() =>
+  (Array.isArray(runs.value) ? runs.value : []).reduce((sum, run) => {
+    const cents = Number(run?.summary?.execution_contract?.budget?.used_cost_cents || 0);
+    return sum + (Number.isFinite(cents) ? cents : 0);
+  }, 0)
+);
+const requirementsTokensFromRuns = computed(() =>
+  (Array.isArray(runs.value) ? runs.value : []).reduce((sum, run) => {
+    const tokens = Number(run?.summary?.execution_contract?.budget?.used_tokens || 0);
+    return sum + (Number.isFinite(tokens) ? tokens : 0);
+  }, 0)
+);
+const totalRequirementAiSpendCents = computed(() =>
+  Math.max(requirementsSpendCentsFromSummary.value, requirementsSpendCentsFromRuns.value)
 );
 const totalRequirementAiSpendUsd = computed(() => (totalRequirementAiSpendCents.value / 100).toFixed(4));
 const totalRequirementAiTokens = computed(() =>
-  requirementSummaryCards.value.reduce((sum, card) => sum + Number(card?.ai_total_tokens || 0), 0)
+  Math.max(requirementsTokensFromSummary.value, requirementsTokensFromRuns.value)
 );
 const topCostlyRequirements = computed(() =>
   [...requirementSummaryCards.value]
@@ -1832,10 +1854,21 @@ async function runTask(task: any) {
   tasksError.value = "";
   runError.value = "";
   try {
-    await createRun(projectId.value, selectedExecutor.value, task.id);
+    const createdRun = await createRun(projectId.value, selectedExecutor.value, task.id);
+    if (createdRun?.id) {
+      runs.value = canonicalizeRuns([createdRun, ...runs.value.filter((run) => run?.id !== createdRun.id)]);
+      updateProjectContext({
+        latestRunId: createdRun.id,
+        runStatus: createdRun.status || "QUEUED",
+        hasActiveRun: true,
+        updatedAt: new Date().toISOString(),
+      });
+      ElMessage.success(`Run queued for task: ${task.title} (${String(createdRun.id).slice(0, 8)})`);
+    } else {
+      ElMessage.success(`Run queued for task: ${task.title}`);
+    }
     await loadTasks();
     await loadRuns();
-    ElMessage.success(`Run queued for task: ${task.title}`);
   } catch (err: any) {
     const message = err?.message || "Failed to create run for task";
     tasksError.value = message;
@@ -1846,8 +1879,27 @@ async function runTask(task: any) {
 }
 
 function canRunTask(task: any) {
-  const status = String(task?.status || "").toUpperCase();
+  const status = taskEffectiveStatus(task);
   return ["PENDING", "QUEUED", "FAILED", "BLOCKED", "CANCELED"].includes(status);
+}
+
+function taskEffectiveStatus(task: any) {
+  const taskStatus = String(task?.status || "").toUpperCase();
+  const linkedRunStatus = String(
+    task?.latest_run_status ||
+      (task?.run_id ? runs.value.find((row: any) => row?.id === task.run_id)?.status : "") ||
+      ""
+  ).toUpperCase();
+  if (linkedRunStatus === "RUNNING" || linkedRunStatus === "CLAIMED" || linkedRunStatus === "QUEUED") {
+    return linkedRunStatus;
+  }
+  if (linkedRunStatus === "FAILED" || linkedRunStatus === "CANCELED") {
+    return linkedRunStatus;
+  }
+  if (linkedRunStatus === "COMPLETED") {
+    return "DONE";
+  }
+  return taskStatus || "PENDING";
 }
 
 async function runAllTasksOrdered() {
@@ -2418,7 +2470,17 @@ async function startRun() {
   if (!projectId.value) return;
   runError.value = "";
   try {
-    await createRun(projectId.value, selectedExecutor.value);
+    const createdRun = await createRun(projectId.value, selectedExecutor.value);
+    if (createdRun?.id) {
+      runs.value = canonicalizeRuns([createdRun, ...runs.value.filter((run) => run?.id !== createdRun.id)]);
+      updateProjectContext({
+        latestRunId: createdRun.id,
+        runStatus: createdRun.status || "QUEUED",
+        hasActiveRun: true,
+        updatedAt: new Date().toISOString(),
+      });
+      ElMessage.success(`Run queued: ${String(createdRun.id).slice(0, 8)}`);
+    }
     await loadRuns();
     await loadWorkItems();
     await loadRunEvents();

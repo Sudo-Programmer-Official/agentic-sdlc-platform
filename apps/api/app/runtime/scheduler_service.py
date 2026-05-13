@@ -287,6 +287,21 @@ def _is_quota_exhausted_failure(item: WorkItem) -> bool:
     )
 
 
+def _is_operator_confirmation_failure(item: WorkItem) -> bool:
+    result = item.result if isinstance(item.result, dict) else {}
+    message = str(result.get("message") or "").lower()
+    error = str(result.get("error") or "").lower()
+    last_error = str(item.last_error or "").lower()
+    markers = (
+        "requires operator confirmation",
+        "require operator confirmation",
+        "operator confirmation before mutating",
+        "approval required before mutating",
+    )
+    haystack = "\n".join((message, error, last_error))
+    return any(marker in haystack for marker in markers)
+
+
 async def _maybe_emit_budget_warning(session, run: Run) -> None:
     summary = dict(run.summary or {})
     contract = summary.get("execution_contract") if isinstance(summary.get("execution_contract"), dict) else {}
@@ -343,6 +358,39 @@ async def _pause_run_for_budget(session, run: Run, *, failed_items: list[WorkIte
         actor_type="SYSTEM",
         tenant_id=run.tenant_id,
         payload={"reason": "run_budget_exhausted", "failed_work_item_ids": [str(item.id) for item in budget_failed]},
+    )
+    return True
+
+
+async def _pause_run_for_operator_confirmation(session, run: Run, *, failed_items: list[WorkItem]) -> bool:
+    from app.services.state_guard import update_run_status
+
+    blocked = [item for item in failed_items if _is_operator_confirmation_failure(item)]
+    if not blocked:
+        return False
+    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+    if not ok:
+        return False
+    summary = dict(run.summary or {})
+    summary["goal_state"] = "NEEDS_HUMAN_INPUT"
+    summary["operator_confirmation_pause"] = {
+        "reason": "operator_confirmation_required",
+        "paused_at": datetime.now(timezone.utc).isoformat(),
+        "failed_work_item_ids": [str(item.id) for item in blocked],
+    }
+    run.summary = summary
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_OPERATOR_ACTION_REQUIRED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "reason": "operator_confirmation_required",
+            "failed_work_item_ids": [str(item.id) for item in blocked],
+        },
     )
     return True
 
@@ -446,6 +494,8 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
     if not blocking_failed:
         return False
     if any(_is_quota_exhausted_failure(item) for item in blocking_failed):
+        return False
+    if any(_is_operator_confirmation_failure(item) for item in blocking_failed):
         return False
     source = blocking_failed[0]
     next_cycle = current_cycles + 1
@@ -773,6 +823,8 @@ async def tick(session):
 
         if failed_non_superseded and active == 0 and queued == 0 and not recovery_pending:
             if await _pause_run_for_budget(session, run, failed_items=failed_items):
+                continue
+            if await _pause_run_for_operator_confirmation(session, run, failed_items=failed_items):
                 continue
             if await _pause_run_for_recovery_stall(session, run):
                 continue

@@ -43,6 +43,7 @@ STABLE_RECOVERY_ACTIONS = {
 
 FAILURE_CLASS_MAP = {
     "syntax_failure": "parser_error",
+    "output_contract_invalid": "parser_error",
     "patch_apply_failure": "patch_apply_failed",
     "test_assertion_failure": "test_failed",
     "test_failure": "test_failed",
@@ -77,6 +78,10 @@ class RuntimeRecoveryService:
         return mapped if mapped in STABLE_FAILURE_TYPES else "unknown"
 
     def select_recovery_action(self, rule_action: str, failure_type: str, attempt_number: int) -> str:
+        if failure_type == "parser_error":
+            if attempt_number == 1:
+                return "retry_with_write_file"
+            return "refresh_context"
         if failure_type == "patch_apply_failed":
             if attempt_number == 1:
                 return "retry_with_smaller_patch"

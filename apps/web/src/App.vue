@@ -77,17 +77,16 @@
       destroy-on-close
     >
       <template #header>
-        <div class="text-base font-semibold" style="color: var(--text-strong);">Approval Required</div>
+        <div class="text-base font-semibold" style="color: var(--text-strong);">{{ operatorDialogTitle }}</div>
       </template>
       <div class="text-sm leading-6" style="color: var(--text-muted);">
-        Run {{ operatorApprovalRunIdShort }} is waiting for operator confirmation before patch mutation.
-        Open Approvals to confirm and continue.
+        {{ operatorDialogMessage }}
       </div>
       <template #footer>
         <div class="flex items-center justify-end gap-2">
           <el-button @click="operatorApprovalDialogVisible = false">Later</el-button>
           <el-button @click="openExactRunFromDialog">Go to Exact Run</el-button>
-          <el-button type="primary" @click="openApprovalsFromDialog">Open Approvals</el-button>
+          <el-button type="primary" @click="openOperatorActionFromDialog">{{ operatorDialogPrimaryLabel }}</el-button>
         </div>
       </template>
     </el-dialog>
@@ -144,6 +143,7 @@ const knowledgePath = computed(() => (projectContext.projectId ? `/projects/${pr
 
 const operatorApprovalDialogVisible = ref(false);
 const operatorApprovalRunId = ref("");
+const operatorDialogKind = ref<"operator_confirmation" | "approval_queue">("operator_confirmation");
 const runIssueDialogVisible = ref(false);
 const runIssueRunId = ref("");
 const approvalAttentionRequired = ref(false);
@@ -153,6 +153,18 @@ let lastAlertSignature = "";
 const operatorApprovalRunIdShort = computed(() =>
   operatorApprovalRunId.value ? operatorApprovalRunId.value.slice(0, 8) : "—"
 );
+const operatorDialogTitle = computed(() =>
+  operatorDialogKind.value === "approval_queue" ? "Approval Required" : "Operator Confirmation Required"
+);
+const operatorDialogPrimaryLabel = computed(() =>
+  operatorDialogKind.value === "approval_queue" ? "Open Approvals" : "Go to Exact Run"
+);
+const operatorDialogMessage = computed(() => {
+  if (operatorDialogKind.value === "approval_queue") {
+    return `Run ${operatorApprovalRunIdShort.value} is waiting on approval queue decisions. Open Approvals to confirm and continue.`;
+  }
+  return `Run ${operatorApprovalRunIdShort.value} is paused for operator confirmation before patch mutation. Open the exact run to confirm and continue.`;
+});
 const runIssueRunIdShort = computed(() => (runIssueRunId.value ? runIssueRunId.value.slice(0, 8) : "—"));
 
 const navItems = computed(() => [
@@ -296,19 +308,18 @@ async function checkOperatorApprovalState() {
     const pendingApprovals = Array.isArray(approvals)
       ? approvals.filter((item: any) => String(item?.status || "").toUpperCase() === "PENDING")
       : [];
-    const pausedOperatorRun = Array.isArray(runs)
-      ? runs.find((run: any) => {
-          const status = String(run?.status || "").toUpperCase();
-          const reason = String(run?.summary?.operator_confirmation_pause?.reason || "").toLowerCase();
-          const failedError = String(run?.summary?.resume_state?.failed_error || "").toLowerCase();
-          return (
-            status === "PAUSED" &&
-            (reason === "operator_confirmation_required" || failedError.includes("operator confirmation"))
-          );
-        })
-      : null;
-
     const latestRun = Array.isArray(runs) && runs.length ? runs[0] : null;
+    const latestRunNeedsOperatorConfirmation = (() => {
+      const status = String(latestRun?.status || "").toUpperCase();
+      const reason = String(latestRun?.summary?.operator_confirmation_pause?.reason || "").toLowerCase();
+      const failedError = String(latestRun?.summary?.resume_state?.failed_error || "").toLowerCase();
+      return (
+        status === "PAUSED" &&
+        (reason === "operator_confirmation_required" || failedError.includes("operator confirmation"))
+      );
+    })();
+    const pausedOperatorRun = latestRunNeedsOperatorConfirmation ? latestRun : null;
+
     const latestStatus = String(latestRun?.status || "").toUpperCase();
     const latestGoalState = String(latestRun?.summary?.goal_state || "").toUpperCase();
     const latestDegradedReason = String(latestRun?.summary?.degraded_reason || "").toLowerCase();
@@ -323,10 +334,14 @@ async function checkOperatorApprovalState() {
     // Approval dialog should only open for an actual paused run that needs operator confirmation.
     if (!pausedOperatorRun) {
       operatorApprovalRunId.value = "";
+      if (!pendingApprovals.length) {
+        operatorDialogKind.value = "operator_confirmation";
+      }
     } else {
       const runId = String(pausedOperatorRun.id || "");
       operatorApprovalRunId.value = runId;
-      const signature = `${projectId}:approval:${runId}:${pendingApprovals.length}`;
+      operatorDialogKind.value = pendingApprovals.length ? "approval_queue" : "operator_confirmation";
+      const signature = `${projectId}:approval:${runId}:${operatorDialogKind.value}:${pendingApprovals.length}`;
       if (signature !== lastAlertSignature) {
         operatorApprovalDialogVisible.value = true;
         playApprovalChime();
@@ -369,6 +384,14 @@ function openApprovalsFromDialog() {
   operatorApprovalDialogVisible.value = false;
   if (!projectContext.projectId) return;
   router.push(`/projects/${projectContext.projectId}/approvals`);
+}
+
+function openOperatorActionFromDialog() {
+  if (operatorDialogKind.value === "approval_queue") {
+    openApprovalsFromDialog();
+    return;
+  }
+  openExactRunFromDialog();
 }
 
 function openExactRunFromDialog() {

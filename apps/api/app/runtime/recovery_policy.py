@@ -31,6 +31,7 @@ RECOVERY_TIER_BY_FAILURE_CLASS: dict[str, str] = {
     "budget_exhausted": "deterministic",
     "fix_applied": "deterministic",
     "patch_apply_failure": "cheap_recovery",
+    "output_contract_invalid": "cheap_recovery",
 }
 
 
@@ -47,6 +48,7 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         "max_retries": 3,
         "rules": (
             RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "output_contract_invalid", "retry"),
             RecoveryRule("FAILED", "transient", "retry"),
         ),
     },
@@ -198,6 +200,15 @@ def classify_failure(work_item: WorkItem) -> str:
         return "dependency_failure"
     if any(token in text for token in ("timeout", "temporarily unavailable", "connection reset", "network")):
         return "transient"
+    if any(
+        token in text
+        for token in (
+            "patch repair output was invalid",
+            "output_contract_invalid",
+            "unterminated string starting at",
+        )
+    ):
+        return "output_contract_invalid"
     if any(
         token in text
         for token in (
@@ -574,6 +585,9 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
             await session.flush()
         else:
             payload = dict(work_item.payload or {})
+            if failure_class == "output_contract_invalid":
+                payload["strict_output_contract_mode"] = True
+                payload["prior_output_contract_failures"] = int(payload.get("prior_output_contract_failures") or 0) + 1
             payload["recovery_action"] = recovery_action
             if recovery_action == "retry_with_write_file":
                 payload["recovery_strategy"] = "write_file_preferred"

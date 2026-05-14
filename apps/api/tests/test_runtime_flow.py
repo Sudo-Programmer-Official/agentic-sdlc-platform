@@ -441,6 +441,57 @@ async def test_recovery_retry_requeues_code_frontend_patch_apply_failure(monkeyp
 
 
 @pytest.mark.anyio
+async def test_recovery_retry_requeues_invalid_patch_repair_output_with_write_file_strategy(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Frontend contract-output recovery project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        work_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="FAILED",
+            executor="codex",
+            attempt=0,
+            max_attempts=3,
+            last_error="Action error: Patch repair output was invalid: Unterminated string starting at: line 9 column 18 (char 221)",
+        )
+        session.add(work_item)
+        await session.commit()
+        work_item_id = work_item.id
+
+    async with runtime_db() as session:
+        work_item = await session.get(WorkItem, work_item_id)
+        assert work_item is not None
+
+        recovery = await maybe_apply_recovery(session, work_item)
+        await session.commit()
+
+        assert recovery == {"action": "retry", "work_item_id": work_item_id}
+        assert work_item.status == "QUEUED"
+        assert work_item.attempt == 1
+        assert work_item.result["failure_class"] == "output_contract_invalid"
+        assert work_item.result["retry_state"] == "PENDING"
+        assert work_item.payload["recovery_action"] == "retry_with_write_file"
+        assert work_item.payload["recovery_strategy"] == "write_file_preferred"
+        assert work_item.payload["recovery_reason"] == "patch_apply_failed"
+        assert work_item.payload["strict_output_contract_mode"] is True
+        assert work_item.payload["prior_output_contract_failures"] == 1
+
+
+@pytest.mark.anyio
 async def test_test_failure_recovery_scopes_fix_node_to_implementation_files(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("OPENAI_API_KEY", "")
@@ -1084,6 +1135,7 @@ async def test_external_worker_treats_optional_write_tests_failure_as_satisfied_
 async def test_external_scheduler_terminalizes_stalled_run_after_90_seconds_without_progress(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
     get_settings.cache_clear()
     tenant_id = uuid.uuid4()
 
@@ -1168,6 +1220,96 @@ async def test_external_scheduler_terminalizes_stalled_run_after_90_seconds_with
             event.event_type == "RUN_FAILED" and (event.payload or {}).get("reason") == "stalled_no_progress"
             for event in events
         )
+
+
+@pytest.mark.anyio
+async def test_external_scheduler_does_not_mark_terminal_failure_as_stall(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "false")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    monkeypatch.setattr(scheduler_module, "STALL_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(scheduler_module, "STALL_RECOVERY_MAX_ATTEMPTS", 1)
+
+    stale_anchor = datetime.now(timezone.utc) - timedelta(seconds=120)
+
+    async def _stale_progress_ts(_session, _run):
+        return stale_anchor
+
+    monkeypatch.setattr(scheduler_module, "_latest_progress_ts", _stale_progress_ts)
+
+    async with runtime_db() as session:
+        project = Project(name="Terminal failure should not stall project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_frontend = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            last_error="AI policy halted execution: output_contract_invalid",
+            result={"error": "AI policy halted execution: output_contract_invalid"},
+        )
+        blocked_tests = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="QUEUED",
+            priority=5,
+            executor="test",
+            depends_on_count=1,
+        )
+        session.add_all([failed_frontend, blocked_tests])
+        await session.flush()
+        session.add(
+            WorkItemEdge(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                from_work_item_id=failed_frontend.id,
+                to_work_item_id=blocked_tests.id,
+            )
+        )
+        await session.commit()
+        run_id = run.id
+        blocked_id = blocked_tests.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        blocked = await session.get(WorkItem, blocked_id)
+        assert run is not None
+        assert blocked is not None
+        assert run.status == "FAILED"
+        assert blocked.status == "CANCELED"
+
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_STALLED" not in event_types
+        assert "RUN_STALL_RECOVERY_ATTEMPT" not in event_types
+        assert any(event.event_type == "RUN_FAILED" for event in events)
 
 
 @pytest.mark.anyio
@@ -1422,6 +1564,16 @@ def test_classify_failure_routes_patch_apply_error_to_patch_apply_failure():
         last_error="Patch apply error: Patch check failed: error: patch failed: index.html:97",
     )
     assert classify_failure(work_item) == "patch_apply_failure"
+
+
+def test_classify_failure_routes_invalid_patch_repair_output_to_output_contract_invalid():
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="FAILED",
+        key="CODE_FRONTEND",
+        last_error="Action error: Patch repair output was invalid: Unterminated string starting at: line 9 column 18 (char 221)",
+    )
+    assert classify_failure(work_item) == "output_contract_invalid"
 
 
 @pytest.mark.anyio

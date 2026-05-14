@@ -384,6 +384,16 @@ class CodexExecutor(TaskExecutor):
         recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
         return prior_patch_failures > 0 or recovery_strategy == "write_file_preferred"
 
+    def _strict_output_contract_mode(self, work_item: WorkItem) -> bool:
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        if bool(payload.get("strict_output_contract_mode")):
+            return True
+        try:
+            prior_failures = int(payload.get("prior_output_contract_failures") or 0)
+        except (TypeError, ValueError):
+            prior_failures = 0
+        return prior_failures > 0
+
     def _max_patch_lines_for(self, work_item: WorkItem) -> int:
         default_limit = int(self.max_patch_lines)
         if not self._frontend_retry_cap_bump_active(work_item):
@@ -835,11 +845,12 @@ class CodexExecutor(TaskExecutor):
             )
             await self._job_manager.record_attempt(prepared.job_id)
             try:
+                attempt_temperature = 0.0 if self._strict_output_contract_mode(work_item) else self.settings.codex_temperature
                 raw, usage = await client.generate(
                     system_prompt,
                     current_user_prompt,
                     model=current_model_name,
-                    temperature=self.settings.codex_temperature,
+                    temperature=attempt_temperature,
                     max_tokens=current_completion_token_estimate,
                     timeout=self.settings.codex_timeout_seconds,
                 )
@@ -2228,6 +2239,11 @@ class CodexExecutor(TaskExecutor):
         retry_count: int,
     ) -> str:
         allowed_text = ", ".join(allowed_files[:6]) if allowed_files else "the scoped files"
+        error_name = error.__class__.__name__
+        error_text = str(error).strip() or "unknown parse error"
+        raw_excerpt = (raw or "").strip()
+        if len(raw_excerpt) > 1200:
+            raw_excerpt = raw_excerpt[-1200:]
         issue = (
             "truncated before the JSON object finished"
             if self._is_likely_truncated_json_output(raw, error)
@@ -2235,12 +2251,16 @@ class CodexExecutor(TaskExecutor):
         )
         guidance = [
             f"Your previous output was {issue}. Re-emit the full response from scratch.",
+            f"Parser error: {error_name}: {error_text}",
             "Respond with EXACTLY one complete JSON object matching the schema.",
             "Do not include markdown fences, explanations, or any prose outside the JSON object.",
             "Do not omit closing quotes, braces, or brackets.",
             "Do not reconsider the broader feature plan; repair the existing bounded plan only.",
             f"Stay within these files: {allowed_text}.",
         ]
+        if raw_excerpt:
+            guidance.append("Previous raw output excerpt (for debugging; do not copy verbatim if malformed):")
+            guidance.append(raw_excerpt)
         primary_scope = _target_files_from_payload(work_item.payload) or allowed_files[:1]
         if primary_scope:
             guidance.append(f"Prefer touching only this primary file unless the schema requires otherwise: {', '.join(primary_scope[:2])}.")
@@ -2290,6 +2310,10 @@ class CodexExecutor(TaskExecutor):
             guidance.append(
                 "Do not leave conflicting old-behavior and new-behavior assertions in the same suite; reconcile stale tests to the current task goal."
             )
+        if self._strict_output_contract_mode(work_item):
+            guidance.append("Strict recovery mode is active after prior structured-output failures.")
+            guidance.append("Keep output deterministic and compact: emit one schema-valid JSON object with minimal fields.")
+            guidance.append("Avoid optional commentary or extra note actions unless required for execution.")
         guidance.append(f"This is structured output retry {retry_count}.")
         return f"{user_prompt}\n\n" + "\n".join(guidance)
 
@@ -2375,7 +2399,7 @@ class CodexExecutor(TaskExecutor):
                 system_prompt,
                 current_prompt,
                 model=effective_model_name,
-                temperature=self.settings.codex_temperature,
+                temperature=0.0 if retry_count > 0 else self.settings.codex_temperature,
                 max_tokens=current_max_tokens,
                 timeout=self.settings.codex_timeout_seconds,
             )
@@ -2869,6 +2893,11 @@ class CodexExecutor(TaskExecutor):
                 base
                 + " Focus on whether the change matches the requested scope, whether it introduces regressions, and whether validation evidence is sufficient."
                   " If there are no issues, return note actions confirming the review passed."
+            )
+        if self._strict_output_contract_mode(work_item):
+            base += (
+                " Strict recovery mode is active due to prior output-contract failures."
+                " Return compact deterministic JSON only and keep the action list minimal."
             )
         return base
 

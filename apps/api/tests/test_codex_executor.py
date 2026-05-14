@@ -640,6 +640,23 @@ def test_instructions_for_static_frontend_recovery_write_file_override():
     assert "prefer write_file with full contents for the primary scoped file" in instructions
 
 
+def test_instructions_enable_strict_output_contract_mode_when_recovery_flagged():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "expected_files": ["index.html"],
+            "strict_output_contract_mode": True,
+            "prior_output_contract_failures": 1,
+        },
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "Strict recovery mode is active due to prior output-contract failures." in instructions
+    assert "compact deterministic JSON only" in instructions
+
+
 def test_instructions_include_selected_mutation_strategy():
     executor = CodexExecutor()
     work_item = SimpleNamespace(

@@ -57,6 +57,24 @@
         </div>
         <div class="mission-hero__controls mission-subcard p-3">
           <div class="mission-hero__controls-label">Run Actions</div>
+          <div class="mission-run-picker">
+            <span class="mission-run-picker__label">Focus run</span>
+            <el-select
+              v-model="pinnedRunId"
+              size="small"
+              placeholder="Auto (current)"
+              class="mission-run-picker__select"
+              @change="onPinnedRunChange"
+            >
+              <el-option label="Auto (current)" value="" />
+              <el-option
+                v-for="option in runSelectorOptions"
+                :key="option.id"
+                :label="option.label"
+                :value="option.id"
+              />
+            </el-select>
+          </div>
           <div class="mission-density-toggle">
             <button
               type="button"
@@ -83,15 +101,15 @@
           <el-button plain :disabled="!forkEnabled" @click="openReplayDialog()">
             Replay Run
           </el-button>
-          <el-tooltip v-if="resumeBlockedHint" :content="resumeBlockedHint" placement="top">
+          <el-tooltip v-if="resumeBlockedHint && !operatorConfirmationPaused" :content="resumeBlockedHint" placement="top">
             <span class="inline-flex">
-              <el-button plain :disabled="!resumeEnabled" :loading="resumeLoading" @click="resumeLatestRun">
-                Resume Run
+              <el-button plain :disabled="!resumeActionEnabled" :loading="resumeLoading" @click="resumeLatestRun">
+                {{ resumeActionLabel }}
               </el-button>
             </span>
           </el-tooltip>
-          <el-button v-else plain :disabled="!resumeEnabled" :loading="resumeLoading" @click="resumeLatestRun">
-            Resume Run
+          <el-button v-else plain :disabled="!resumeActionEnabled" :loading="resumeLoading" @click="resumeLatestRun">
+            {{ resumeActionLabel }}
           </el-button>
           <el-button
             v-if="budgetPaused"
@@ -140,7 +158,7 @@
           <div class="mission-chip-panel__value font-mono">{{ projectId || "—" }}</div>
         </div>
         <div class="mission-chip-panel">
-          <div class="mission-chip-panel__label">Latest Run</div>
+          <div class="mission-chip-panel__label">Focused Run</div>
           <div class="mission-chip-panel__value font-mono">{{ latestRun?.id || "—" }}</div>
           <div class="mission-chip-panel__meta">{{ latestRun?.executor || "No executor" }}</div>
         </div>
@@ -234,6 +252,33 @@
       :description="budgetWarningHint"
       class="shadow-sm"
     />
+    <el-alert
+      v-if="operatorConfirmationPaused"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="Run paused for operator confirmation"
+      :description="operatorConfirmationHint"
+      class="shadow-sm"
+    />
+    <div v-if="operatorConfirmationPaused" class="mission-inline-actions">
+      <el-button
+        size="small"
+        type="warning"
+        plain
+        :disabled="!latestRun?.id || resumeLoading"
+        :loading="resumeLoading"
+        @click="resumeLatestRun"
+      >
+        Confirm & Resume
+      </el-button>
+      <el-button size="small" plain @click="openApprovalsView">
+        Open Approvals
+      </el-button>
+      <el-button size="small" plain @click="openTimelinePage(latestRun?.id || '')">
+        Go to Exact Run
+      </el-button>
+    </div>
     <div v-if="manualPushRequired" class="mission-inline-actions">
       <el-select v-model="retryPushStrategy" size="small" class="mission-inline-select">
         <el-option label="Runtime Default" value="runtime_default" />
@@ -2728,6 +2773,7 @@ const projectContractBootstrapLoading = ref(false);
 const projectContractEnforcementLoading = ref(false);
 const projectContractStrictLoading = ref(false);
 const projectContractActionError = ref("");
+const pinnedRunId = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
 const runStatusPriority: Record<string, number> = {
@@ -2754,6 +2800,10 @@ function canonicalizeRuns(runList: any[]) {
   });
 }
 const canonicalRunId = computed(() => {
+  if (pinnedRunId.value) {
+    const selected = runs.value.find((run) => run?.id === pinnedRunId.value);
+    if (selected?.id) return selected.id;
+  }
   const statusPriority = ["RUNNING", "CLAIMED", "QUEUED"];
   const active = runs.value
     .filter((run) => statusPriority.includes(String(run?.status || "").toUpperCase()))
@@ -2783,8 +2833,20 @@ const linkedRequirementUnresolved = computed(
 const hasRun = computed(() => Boolean(latestRun.value?.id));
 const forkEnabled = computed(() => Boolean(latestRun.value?.id));
 const resumeEnabled = computed(() => Boolean(latestRun.value?.id && latestRun.value?.summary?.resume_state?.can_resume));
+const operatorConfirmationPaused = computed(() => {
+  const run = latestRun.value;
+  const status = String(run?.status || "").toUpperCase();
+  const reason = String(run?.summary?.operator_confirmation_pause?.reason || "").toLowerCase();
+  const failedError = String(run?.summary?.resume_state?.failed_error || "").toLowerCase();
+  return status === "PAUSED" && (
+    reason === "operator_confirmation_required" || failedError.includes("operator confirmation")
+  );
+});
+const resumeActionEnabled = computed(() => Boolean(latestRun.value?.id) && (resumeEnabled.value || operatorConfirmationPaused.value));
+const resumeActionLabel = computed(() => (operatorConfirmationPaused.value ? "Confirm & Resume" : "Resume Run"));
 const resumeBlockedReason = computed(() => String(latestRun.value?.summary?.resume_state?.resume_blocked_reason || ""));
 const resumeBlockedHint = computed(() => {
+  if (operatorConfirmationPaused.value) return "";
   if (resumeEnabled.value || !latestRun.value?.id) return "";
   const reason = resumeBlockedReason.value.toLowerCase();
   if (!reason) return "Run is not resumable yet.";
@@ -2811,6 +2873,10 @@ const budgetWarningHint = computed(() => {
   const remainingTokens = typeof budget.remaining_tokens === "number" ? budget.remaining_tokens : "—";
   const remainingCost = typeof budget.remaining_cost_cents === "number" ? budget.remaining_cost_cents : "—";
   return `Run paused because budget was exhausted. Remaining tokens: ${remainingTokens}. Remaining cost cents: ${remainingCost}.`;
+});
+const operatorConfirmationHint = computed(() => {
+  const failedError = String(latestRun.value?.summary?.resume_state?.failed_error || "").trim();
+  return failedError || "Patch execution requires operator confirmation before mutating the repository.";
 });
 const budgetTelemetry = computed(() => {
   const budget = latestRun.value?.summary?.execution_contract?.budget || {};
@@ -2843,6 +2909,12 @@ const forkExecutorOptions = computed(() => {
   return Array.from(options);
 });
 const compareRunOptions = computed(() =>
+  runs.value.map((run) => ({
+    id: run.id,
+    label: runOptionLabel(run),
+  }))
+);
+const runSelectorOptions = computed(() =>
   runs.value.map((run) => ({
     id: run.id,
     label: runOptionLabel(run),
@@ -3522,6 +3594,7 @@ function resetState() {
   projectContractEnforcementLoading.value = false;
   projectContractStrictLoading.value = false;
   projectContractActionError.value = "";
+  pinnedRunId.value = "";
 }
 
 function primeContext() {
@@ -3556,6 +3629,21 @@ function syncContext() {
   });
 }
 
+function normalizePinnedRunSelection() {
+  if (!pinnedRunId.value) return;
+  if (!runs.value.some((run) => run?.id === pinnedRunId.value)) {
+    pinnedRunId.value = "";
+  }
+}
+
+async function onPinnedRunChange() {
+  await loadRunRuntime();
+  void loadSimilarRuns();
+  void loadMemoryTimeline();
+  syncContext();
+  syncPolling();
+}
+
 async function loadAll() {
   if (!projectId.value.trim()) {
     error.value = "Project ID is required.";
@@ -3575,6 +3663,7 @@ async function loadAll() {
     health.value = projectHealth;
     lifecycleScore.value = score;
     runs.value = canonicalizeRuns(runList);
+    normalizePinnedRunSelection();
     await loadRunRuntime();
     // Load heavier surfaces in background to avoid blocking the first render.
     void loadSimilarRuns();
@@ -3607,6 +3696,7 @@ async function loadMissionOverview() {
 async function refreshOverviewSurface() {
   if (!projectId.value.trim()) return;
   runs.value = canonicalizeRuns(await listRuns(projectId.value));
+  normalizePinnedRunSelection();
   void loadMissionOverview();
   syncContext();
   syncPolling();
@@ -3921,6 +4011,7 @@ async function refreshRuntime(force = false) {
   pollInFlight = true;
   try {
     runs.value = canonicalizeRuns(await listRuns(projectId.value));
+    normalizePinnedRunSelection();
     await loadRunRuntime();
     if (!["QUEUED", "RUNNING", "CLAIMED"].includes(latestRun.value?.status || "")) {
       const [projectHealth, score] = await Promise.all([
@@ -4131,13 +4222,17 @@ async function discardLatestRunWorkspace() {
 }
 
 async function resumeLatestRun() {
-  if (!latestRun.value?.id || !resumeEnabled.value) return;
+  if (!latestRun.value?.id || !resumeActionEnabled.value) return;
   resumeLoading.value = true;
   error.value = "";
   try {
     await resumeRun(latestRun.value.id, { start_now: true });
     await refreshRuntime(true);
-    ElMessage.success("Run resumed from the last safe checkpoint.");
+    ElMessage.success(
+      operatorConfirmationPaused.value
+        ? "Operator confirmation accepted. Run resumed."
+        : "Run resumed from the last safe checkpoint."
+    );
   } catch (err: any) {
     error.value = err?.message || "Failed to resume run.";
   } finally {
@@ -5165,6 +5260,25 @@ function artifactIntentText(explainResult: any) {
   margin-bottom: 0.5rem;
 }
 
+.mission-run-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.mission-run-picker__label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.mission-run-picker__select {
+  min-width: 16rem;
+}
+
 .mission-hero__controls-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5209,6 +5323,16 @@ function artifactIntentText(explainResult: any) {
   .mission-hero__controls-grid {
     grid-template-columns: 1fr;
     max-height: 12rem;
+  }
+
+  .mission-run-picker {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .mission-run-picker__select {
+    width: 100%;
+    min-width: 0;
   }
 
   .mission-primary-top {

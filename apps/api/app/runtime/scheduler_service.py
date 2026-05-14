@@ -256,6 +256,37 @@ async def _finalize_run_degraded(session, run: Run, *, reason: str, actor_type: 
     return True
 
 
+async def _mark_run_failed(
+    session,
+    run: Run,
+    *,
+    reason: str,
+    actor_type: str = "SYSTEM",
+) -> bool:
+    """Transition a run to FAILED with a defensive fallback when guarded update misses."""
+    from app.services.state_guard import update_run_status
+
+    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "FAILED", set_finished=True)
+    if not ok:
+        # Defensive fallback: some DB backends can report rowcount=0 for guarded updates
+        # even when the in-memory run still reflects a mutable RUNNING/QUEUED state.
+        if run.status not in {"RUNNING", "QUEUED"}:
+            return False
+        run.status = "FAILED"
+        run.finished_at = datetime.now(timezone.utc)
+        session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_FAILED",
+        actor_type=actor_type,
+        tenant_id=run.tenant_id,
+        payload={"reason": reason},
+    )
+    return True
+
+
 def _is_budget_exhausted_failure(item: WorkItem) -> bool:
     result = item.result if isinstance(item.result, dict) else {}
     message = str(result.get("message") or "").lower()
@@ -611,16 +642,7 @@ async def tick(session):
             if settings.runtime_never_fail_runs:
                 ok = await _finalize_run_degraded(session, run, reason="review_diff_rejected")
             else:
-                ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "FAILED", set_finished=True)
-                if ok:
-                    await record_event(
-                        session,
-                        project_id=run.project_id,
-                        run_id=run.id,
-                        event_type="RUN_FAILED",
-                        actor_type="SYSTEM",
-                        payload={"reason": "review_diff_rejected"},
-                    )
+                ok = await _mark_run_failed(session, run, reason="review_diff_rejected")
             if ok:
                 try:
                     await lifecycle_score(project_id=run.project_id, session=session)
@@ -713,7 +735,9 @@ async def tick(session):
                     continue
 
         # Watchdog: avoid infinite RUNNING/QUEUED when there is no execution progress.
-        if queued and active == 0:
+        # If we already have terminal blocking failures and no recovery pending, do not
+        # classify the run as "stalled"; downstream queued work is expected to be blocked.
+        if queued and active == 0 and not (failed_non_superseded and not recovery_pending):
             last_progress = await _latest_progress_ts(session, run)
             progress_anchor = last_progress or run.updated_at or run.started_at or run.created_at
             if progress_anchor is not None and progress_anchor.tzinfo is None:
@@ -758,17 +782,7 @@ async def tick(session):
                     if settings.runtime_never_fail_runs:
                         await _finalize_run_degraded(session, run, reason="stalled_no_active_workers")
                     else:
-                        ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "FAILED", set_finished=True)
-                        if ok:
-                            await record_event(
-                                session,
-                                project_id=run.project_id,
-                                run_id=run.id,
-                                event_type="RUN_FAILED",
-                                actor_type="SYSTEM",
-                                tenant_id=run.tenant_id,
-                                payload={"reason": "stalled_no_active_workers"},
-                            )
+                        await _mark_run_failed(session, run, reason="stalled_no_active_workers")
                     continue
                 attempts = int(summary.get("stall_recovery_attempts") or 0) + 1
                 summary["stall_recovery_attempts"] = attempts
@@ -801,17 +815,7 @@ async def tick(session):
                 if settings.runtime_never_fail_runs:
                     await _finalize_run_degraded(session, run, reason="stalled_no_progress")
                 else:
-                    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "FAILED", set_finished=True)
-                    if ok:
-                        await record_event(
-                            session,
-                            project_id=run.project_id,
-                            run_id=run.id,
-                            event_type="RUN_FAILED",
-                            actor_type="SYSTEM",
-                            tenant_id=run.tenant_id,
-                            payload={"reason": "stalled_no_progress"},
-                        )
+                    await _mark_run_failed(session, run, reason="stalled_no_progress")
                 continue
 
         if failed_non_superseded and active == 0 and queued and not recovery_pending:
@@ -837,16 +841,9 @@ async def tick(session):
                 if not ok:
                     continue
             else:
-                ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "FAILED", set_finished=True)
+                ok = await _mark_run_failed(session, run, reason="goal_concluded_unresolvable")
                 if not ok:
                     continue
-                await record_event(
-                    session,
-                    project_id=run.project_id,
-                    run_id=run.id,
-                    event_type="RUN_FAILED",
-                    actor_type="SYSTEM",
-                )
         elif failed_non_superseded == 0 and active == 0 and queued == 0:
             locked = await session.scalar(
                 select(Run)

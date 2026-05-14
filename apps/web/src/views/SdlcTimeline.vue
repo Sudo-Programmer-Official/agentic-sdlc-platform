@@ -8,7 +8,35 @@
       </p>
       <div class="mt-6 flex flex-wrap gap-3">
         <el-button :loading="loading" @click="loadPage">Refresh Timeline</el-button>
+        <el-button
+          v-if="selectedRunNeedsOperatorConfirmation"
+          type="primary"
+          :loading="resumeLoading"
+          @click="confirmAndResumeRun"
+        >
+          Confirm & Resume Run
+        </el-button>
+        <el-button
+          v-if="selectedRunNeedsOperatorConfirmation"
+          plain
+          @click="openApprovals"
+        >
+          Open Approvals
+        </el-button>
         <el-button :disabled="!selectedRunId" plain @click="goToMissionControl">Back to Mission Control</el-button>
+      </div>
+      <div
+        v-if="selectedRunNeedsOperatorConfirmation"
+        class="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800"
+      >
+        This run is paused for operator confirmation before patch mutation.
+        Use <strong>Confirm & Resume Run</strong> to continue immediately.
+      </div>
+      <div
+        v-if="actionError"
+        class="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700"
+      >
+        {{ actionError }}
       </div>
     </section>
 
@@ -118,7 +146,7 @@ import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import MetricCard from "../components/MetricCard.vue";
-import { fetchProjectMeta, fetchRunTimeline, listRuns } from "../api/lifecycle";
+import { fetchProjectMeta, fetchRunTimeline, listRuns, resumeRun } from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -127,7 +155,9 @@ const project = ref<any | null>(null);
 const runs = ref<any[]>([]);
 const timeline = ref<any | null>(null);
 const loading = ref(false);
+const resumeLoading = ref(false);
 const error = ref("");
+const actionError = ref("");
 const selectedRunId = ref("");
 
 const stageFlow = ["INTAKE", "PLAN", "RUN", "EVALUATE", "APPROVE", "DELIVER"];
@@ -135,6 +165,16 @@ const stageFlow = ["INTAKE", "PLAN", "RUN", "EVALUATE", "APPROVE", "DELIVER"];
 const projectId = computed(() => (route.params.projectId as string) || "");
 const requestedRunId = computed(() => ((route.params.runId as string) || (route.query.run as string) || ""));
 const selectedRun = computed(() => runs.value.find((run) => run.id === selectedRunId.value) || runs.value[0] || null);
+const selectedRunNeedsOperatorConfirmation = computed(() => {
+  const run = selectedRun.value;
+  if (!run) return false;
+  const status = String(run.status || "").toUpperCase();
+  const reason = String(run?.summary?.operator_confirmation_pause?.reason || "").toLowerCase();
+  const failedError = String(run?.summary?.resume_state?.failed_error || "").toLowerCase();
+  return status === "PAUSED" && (
+    reason === "operator_confirmation_required" || failedError.includes("operator confirmation")
+  );
+});
 
 watch(
   [projectId, requestedRunId],
@@ -193,6 +233,25 @@ async function loadTimeline() {
   } finally {
     loading.value = false;
   }
+}
+
+async function confirmAndResumeRun() {
+  if (!selectedRunId.value) return;
+  resumeLoading.value = true;
+  actionError.value = "";
+  try {
+    await resumeRun(selectedRunId.value, { start_now: true });
+    await loadPage();
+  } catch (err: any) {
+    actionError.value = err?.message || "Failed to resume run.";
+  } finally {
+    resumeLoading.value = false;
+  }
+}
+
+function openApprovals() {
+  if (!projectId.value) return;
+  router.push(`/projects/${projectId.value}/approvals`);
 }
 
 function goToMissionControl() {

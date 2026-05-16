@@ -1,4 +1,5 @@
 import { parseApiResponse } from "./http";
+import { apiFetch } from "./lifecycle";
 
 const DEFAULT_API_BASE = import.meta.env.DEV
   ? "http://localhost:8000/api/v1"
@@ -41,7 +42,7 @@ function buildQuery(params: Record<string, string | boolean | null | undefined>)
 }
 
 export async function triggerKnowledgeManualSync(payload: KnowledgeManualSyncPayload) {
-  const resp = await fetch(`${API_BASE}/knowledge/events/manual-sync`, {
+  const resp = await apiFetch(`${API_BASE}/knowledge/events/manual-sync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -50,7 +51,7 @@ export async function triggerKnowledgeManualSync(payload: KnowledgeManualSyncPay
 }
 
 export async function fetchKnowledgeInbox(filters: KnowledgeInboxFilters) {
-  const resp = await fetch(`${API_BASE}/knowledge/inbox${buildQuery(filters)}`);
+  const resp = await apiFetch(`${API_BASE}/knowledge/inbox${buildQuery(filters)}`);
   return parseApiResponse(resp);
 }
 
@@ -59,17 +60,17 @@ export async function fetchKnowledgeProposals(params: {
   repository_id?: string;
   review_status?: string;
 } = {}) {
-  const resp = await fetch(`${API_BASE}/knowledge/proposals${buildQuery(params)}`);
+  const resp = await apiFetch(`${API_BASE}/knowledge/proposals${buildQuery(params)}`);
   return parseApiResponse(resp);
 }
 
 export async function fetchKnowledgeProposal(projectId: string, proposalId: string) {
-  const resp = await fetch(`${API_BASE}/knowledge/proposals/${proposalId}${buildQuery({ project_id: projectId })}`);
+  const resp = await apiFetch(`${API_BASE}/knowledge/proposals/${proposalId}${buildQuery({ project_id: projectId })}`);
   return parseApiResponse(resp);
 }
 
 export async function approveKnowledgeProposal(projectId: string, proposalId: string, payload: KnowledgeDecisionPayload = {}) {
-  const resp = await fetch(`${API_BASE}/knowledge/proposals/${proposalId}/approve${buildQuery({ project_id: projectId })}`, {
+  const resp = await apiFetch(`${API_BASE}/knowledge/proposals/${proposalId}/approve${buildQuery({ project_id: projectId })}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -78,7 +79,7 @@ export async function approveKnowledgeProposal(projectId: string, proposalId: st
 }
 
 export async function editAndApproveKnowledgeProposal(projectId: string, proposalId: string, payload: KnowledgeEditApprovePayload) {
-  const resp = await fetch(
+  const resp = await apiFetch(
     `${API_BASE}/knowledge/proposals/${proposalId}/edit-and-approve${buildQuery({ project_id: projectId })}`,
     {
     method: "POST",
@@ -90,7 +91,7 @@ export async function editAndApproveKnowledgeProposal(projectId: string, proposa
 }
 
 export async function rejectKnowledgeProposal(projectId: string, proposalId: string, payload: KnowledgeDecisionPayload = {}) {
-  const resp = await fetch(`${API_BASE}/knowledge/proposals/${proposalId}/reject${buildQuery({ project_id: projectId })}`, {
+  const resp = await apiFetch(`${API_BASE}/knowledge/proposals/${proposalId}/reject${buildQuery({ project_id: projectId })}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -99,7 +100,7 @@ export async function rejectKnowledgeProposal(projectId: string, proposalId: str
 }
 
 export async function deferKnowledgeProposal(projectId: string, proposalId: string, payload: KnowledgeDecisionPayload = {}) {
-  const resp = await fetch(`${API_BASE}/knowledge/proposals/${proposalId}/defer${buildQuery({ project_id: projectId })}`, {
+  const resp = await apiFetch(`${API_BASE}/knowledge/proposals/${proposalId}/defer${buildQuery({ project_id: projectId })}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -113,16 +114,16 @@ export async function fetchKnowledgeArtifacts(params: {
   query?: string;
   include_drafts?: boolean;
 } = {}) {
-  const resp = await fetch(`${API_BASE}/knowledge/artifacts${buildQuery(params)}`);
+  const resp = await apiFetch(`${API_BASE}/knowledge/artifacts${buildQuery(params)}`);
   return parseApiResponse(resp);
 }
 
 export async function fetchKnowledgeArtifact(projectId: string, artifactId: string) {
-  const resp = await fetch(`${API_BASE}/knowledge/artifacts/${artifactId}${buildQuery({ project_id: projectId })}`);
+  const resp = await apiFetch(`${API_BASE}/knowledge/artifacts/${artifactId}${buildQuery({ project_id: projectId })}`);
   return parseApiResponse(resp);
 }
 
 export async function fetchKnowledgeEvent(projectId: string, eventId: string) {
-  const resp = await fetch(`${API_BASE}/knowledge/events/${eventId}${buildQuery({ project_id: projectId })}`);
+  const resp = await apiFetch(`${API_BASE}/knowledge/events/${eventId}${buildQuery({ project_id: projectId })}`);
   return parseApiResponse(resp);
 }

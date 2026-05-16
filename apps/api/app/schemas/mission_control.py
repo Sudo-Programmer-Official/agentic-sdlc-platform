@@ -92,10 +92,18 @@ class MissionControlPreviewAndPrs(BaseModel):
     preview_mode: str | None = None
     preview_status: str = "NOT_CONFIGURED"
     preview_url: str | None = None
+    active_preview_url: str | None = None
+    stale_preview_url: str | None = None
+    preview_domain_host: str | None = None
+    preview_domain_url: str | None = None
     frontend_url: str | None = None
     backend_url: str | None = None
+    frontend_port: int | None = None
+    backend_port: int | None = None
     frontend_log_path: str | None = None
     backend_log_path: str | None = None
+    preview_checked_at: datetime | None = None
+    last_health_check_at: datetime | None = None
     preview_expires_at: datetime | None = None
     requires_verification: bool = False
     verification_note: str | None = None
@@ -294,6 +302,15 @@ class MissionControlOverviewResponse(BaseModel):
     system_insights: MissionControlSystemInsights
     violation_insights: MissionControlViolationInsights | None = None
     imported_references: list[MissionControlImportedReference] = Field(default_factory=list)
+    stalled_runs: list["MissionControlStalledRun"] = Field(default_factory=list)
+
+
+class MissionControlStalledRun(BaseModel):
+    run_id: uuid.UUID
+    status: str
+    last_event_at: datetime | None = None
+    stale_seconds: int = 0
+    suggested_action: str = "Inspect run and resume or unblock."
 
 
 class MissionControlTimelineEvent(BaseModel):

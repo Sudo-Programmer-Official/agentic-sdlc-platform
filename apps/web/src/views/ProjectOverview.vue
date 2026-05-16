@@ -89,6 +89,10 @@
           · Packages: {{ architectureSummary?.package_count ?? 0 }}
         </div>
         <div class="text-xs text-slate-500">
+          Derivation confidence: {{ architectureSummary?.derivation_confidence || "LOW" }}
+          · Derived from: {{ architectureSummary?.derived_from?.join(", ") || "—" }}
+        </div>
+        <div class="text-xs text-slate-500">
           Protected zones: {{ architectureSummary?.protected_zone_count ?? 0 }}
           · Validation recipes: {{ architectureSummary?.validation_recipe_count ?? 0 }}
         </div>
@@ -104,13 +108,53 @@
           {{ foundationReadiness?.status || "MISSING" }}
           <span class="text-slate-500">· {{ foundationReadiness?.mode || "new_bootstrap" }}</span>
         </div>
+        <div class="mt-1 text-xs text-slate-700">
+          Production readiness score: <span class="font-semibold">{{ productionReadinessScore }}/100</span>
+        </div>
         <div class="mt-1 text-xs text-slate-600">
           {{ foundationReadiness?.recommended_next_step || "Evaluate repository and architecture prerequisites." }}
         </div>
         <div class="mt-2 text-xs text-slate-500">
           Missing: {{ foundationReadiness?.missing_prerequisites?.join(", ") || "none" }}
         </div>
+        <div v-if="productionReadinessActions.length" class="mt-2 text-xs text-slate-600">
+          Next actions: {{ productionReadinessActions.join(" · ") }}
+        </div>
         <div v-if="foundationReadinessError" class="mt-2 text-xs text-rose-600">{{ foundationReadinessError }}</div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <DeploymentTrustSurfaceCard v-if="deploymentReadinessContract" :contract="deploymentReadinessContract" />
+        <template v-else>
+          <div class="text-xs uppercase tracking-wide text-slate-400">Deployment Trust Surface</div>
+          <div class="mt-2 text-sm font-semibold" :class="deploymentTrustTone">{{ deploymentTrustSummary.tier }}</div>
+          <div class="mt-1 text-xs text-slate-700">
+            Confidence: <span class="font-semibold">{{ deploymentTrustSummary.confidencePct }}%</span>
+            · Rollback confidence: <span class="font-semibold">{{ deploymentTrustSummary.rollbackConfidencePct }}%</span>
+          </div>
+          <div class="mt-1 text-xs text-slate-600">{{ deploymentTrustSummary.evidence }}</div>
+          <div v-if="deploymentTrustSummary.blockers.length" class="mt-2 text-xs text-slate-500">
+            Blockers: {{ deploymentTrustSummary.blockers.join(" · ") }}
+          </div>
+        </template>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Environment Readiness</div>
+          <el-button size="small" plain :disabled="!projectId" @click="goToEnvironmentCenter">Open</el-button>
+        </div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">{{ projectEnvironmentReadiness.scorePct }}% overall</div>
+        <div class="mt-2 grid gap-1 text-xs text-slate-600">
+          <div v-for="env in projectEnvironmentReadiness.environments" :key="env.environment" class="flex items-center justify-between">
+            <span>{{ env.environment }}</span>
+            <span>{{ env.scorePct }}% · user blockers {{ env.userPending }}</span>
+          </div>
+        </div>
+        <div class="mt-2 text-xs text-slate-500">
+          Managed by platform: orchestration, retries, recovery. User-owned: credentials, domains, integrations, approvals.
+        </div>
+        <div v-if="projectEnvironmentReadiness.nextUserActions.length" class="mt-2 text-xs text-slate-600">
+          Next: {{ projectEnvironmentReadiness.nextUserActions.map((item) => item.label).join(" · ") }}
+        </div>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="flex items-center justify-between gap-2">
@@ -448,11 +492,25 @@
               <el-option label="Dummy" value="dummy" />
               <el-option label="Codex" value="codex" />
             </el-select>
-            <el-button size="small" :disabled="projectStatus !== 'RUN' || runs.some(r => r.status === 'RUNNING')" @click="startRun">
-              Start Run
+            <el-tooltip :content="startRunBlockedReason" placement="top" :disabled="!startRunBlockedReason">
+              <span>
+                <el-button
+                  size="small"
+                  :disabled="projectStatus !== 'RUN' || runs.some(r => r.status === 'RUNNING') || Boolean(startRunBlockedReason)"
+                  @click="startRun"
+                >
+                  Start Run
+                </el-button>
+              </span>
+            </el-tooltip>
+            <el-button size="small" plain :disabled="!startRunBlockedReason" @click="openArchitectureDialog">
+              Prepare Architecture
             </el-button>
             <el-button size="small" plain @click="loadRuns">Refresh</el-button>
           </div>
+        </div>
+        <div v-if="startRunBlockedReason" class="text-xs text-amber-700 mt-2">
+          {{ startRunBlockedReason }}
         </div>
         <div v-if="runError" class="text-xs text-rose-600 mt-2">{{ runError }}</div>
         <el-table :data="runs" size="small" class="mt-3" v-loading="runsLoading">
@@ -800,11 +858,11 @@
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div class="text-sm font-semibold text-slate-900">
-                {{ architectureSummary?.repo_layout_label || "Repository" }}
-                <span class="text-slate-500">· {{ architectureSummary?.status || "MISSING" }}</span>
+                {{ modalArchitectureSummary.repo_layout_label || "Repository" }}
+                <span class="text-slate-500">· {{ modalArchitectureSummary.status || "MISSING" }}</span>
               </div>
               <div class="mt-1 text-xs text-slate-600">
-                {{ architectureSummary?.summary || "No architecture profile saved yet." }}
+                {{ modalArchitectureSummary.summary || "No architecture profile saved yet." }}
               </div>
             </div>
             <div class="flex flex-wrap gap-2">
@@ -828,15 +886,17 @@
             </div>
           </div>
           <div class="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
-            <div><strong>Packages:</strong> {{ architectureSummary?.packages?.join(", ") || "—" }}</div>
-            <div><strong>Execution slice:</strong> {{ architectureSummary?.execution_slice?.join(", ") || "—" }}</div>
-            <div><strong>Protected zones:</strong> {{ architectureSummary?.protected_zones?.join(", ") || "—" }}</div>
-            <div><strong>Safe zones:</strong> {{ architectureSummary?.safe_zones?.join(", ") || "—" }}</div>
-            <div><strong>Commands:</strong> {{ architectureSummary?.commands?.join(", ") || "—" }}</div>
-            <div><strong>Validation recipes:</strong> {{ architectureSummary?.validation_recipes?.join(", ") || "—" }}</div>
+            <div><strong>Packages:</strong> {{ modalArchitectureSummary.packages.join(", ") || "—" }}</div>
+            <div><strong>Execution slice:</strong> {{ modalArchitectureSummary.execution_slice.join(", ") || "—" }}</div>
+            <div><strong>Protected zones:</strong> {{ modalArchitectureSummary.protected_zones.join(", ") || "—" }}</div>
+            <div><strong>Safe zones:</strong> {{ modalArchitectureSummary.safe_zones.join(", ") || "—" }}</div>
+            <div><strong>Commands:</strong> {{ modalArchitectureSummary.commands.join(", ") || "—" }}</div>
+            <div><strong>Validation recipes:</strong> {{ modalArchitectureSummary.validation_recipes.join(", ") || "—" }}</div>
+            <div><strong>Confidence:</strong> {{ modalArchitectureSummary.derivation_confidence || "LOW" }}</div>
+            <div><strong>Derived from:</strong> {{ modalArchitectureSummary.derived_from.join(", ") || "—" }}</div>
           </div>
-          <div v-if="architectureSummary?.assumptions_used?.length" class="mt-3 text-xs text-slate-500">
-            <strong>Assumptions:</strong> {{ architectureSummary.assumptions_used.join(" · ") }}
+          <div v-if="modalArchitectureSummary.assumptions_used.length" class="mt-3 text-xs text-slate-500">
+            <strong>Assumptions:</strong> {{ modalArchitectureSummary.assumptions_used.join(" · ") }}
           </div>
         </div>
 
@@ -1060,7 +1120,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
+import DeploymentTrustSurfaceCard from "../components/DeploymentTrustSurfaceCard.vue";
 import StageBadge from "../components/StageBadge.vue";
+import { buildDeploymentTrustSummary, clampPercent } from "../composables/deploymentTrust";
+import { buildEnvironmentReadiness } from "../composables/environmentReadiness";
 import { projectContext, updateProjectContext } from "../state/projectContext";
 import { fetchProjectSummary, fetchPlanHistory, fetchRequirementSummary } from "../api/requirements";
 import {
@@ -1096,6 +1159,7 @@ import {
   fetchGitHubConnectInfo,
   listGitHubInstallationRepositories,
   fetchFoundationReadiness,
+  listDeploymentConnectors,
   listImprovementRequests,
   listStackPresets,
   fetchProjectBlueprint,
@@ -1104,6 +1168,10 @@ import {
   explainProjectMemory,
   fetchProjectMemorySummaries,
   fetchProjectUnderstanding,
+  getProjectEnvironmentChecklists,
+  fetchProjectDeploymentReadiness,
+  getOrCreateActionRequestKey,
+  getActiveTenantId,
 } from "../api/lifecycle";
 
 const route = useRoute();
@@ -1158,6 +1226,9 @@ const latestDelivery = ref<any | null>(null);
 const architectureSummary = ref<any>(createEmptyArchitectureProfileSummary());
 const foundationReadiness = ref<any>(createEmptyFoundationReadiness());
 const foundationReadinessError = ref("");
+const deploymentProviderHints = ref<string[]>([]);
+const deploymentReadinessContract = ref<any | null>(null);
+const environmentChecklistSummary = ref<any | null>(null);
 const projectBlueprint = ref<any | null>(null);
 const latestGenesisRun = ref<any | null>(null);
 const stackPresets = ref<any[]>([]);
@@ -1493,6 +1564,91 @@ const foundationReadinessTone = computed(() => {
   if (status === "PARTIAL") return "text-amber-600";
   return "text-rose-600";
 });
+const productionReadinessScore = computed(() => {
+  const status = String(foundationReadiness.value?.status || "MISSING").toUpperCase();
+  const missing = Array.isArray(foundationReadiness.value?.missing_prerequisites)
+    ? foundationReadiness.value.missing_prerequisites.length
+    : 0;
+  let score = 35;
+  if (status === "READY") score = 86;
+  else if (status === "PARTIAL") score = 62;
+  if (projectRepo.value?.repo_url || projectRepo.value?.repo_full_name) score += 6;
+  if (String(architectureSummary.value?.status || "").toUpperCase() === "ACTIVE") score += 6;
+  score -= missing * 8;
+  return Math.max(0, Math.min(100, Math.round(score)));
+});
+const productionReadinessActions = computed(() => {
+  const missing: string[] = Array.isArray(foundationReadiness.value?.missing_prerequisites)
+    ? foundationReadiness.value.missing_prerequisites.map((item: any) => String(item))
+    : [];
+  if (!missing.length) return [];
+  const actions: string[] = [];
+  for (const item of missing) {
+    const normalized = item.toLowerCase();
+    if (normalized.includes("repo")) actions.push("Connect repository and set default branch");
+    else if (normalized.includes("arch")) actions.push("Create architecture contract and derive safe paths");
+    else if (normalized.includes("requirement")) actions.push("Approve requirements and regenerate task lineage");
+    else if (normalized.includes("preview")) actions.push("Configure preview profile and verify healthchecks");
+    else actions.push(`Resolve ${item.replaceAll("_", " ").toLowerCase()}`);
+  }
+  return Array.from(new Set(actions)).slice(0, 4);
+});
+const deploymentTrustSummary = computed(() => {
+  const risk = deploymentRiskSignals.value;
+  const instability = unstableRequirements.value.length;
+  const hotspotCount = recoveryHotspots.value.reduce((acc, row) => acc + Number(row.count || 0), 0);
+  let confidencePct = 90;
+  if (risk === "Elevated") confidencePct -= 18;
+  if (risk === "High risk") confidencePct -= 34;
+  confidencePct -= Math.min(25, instability * 3);
+  confidencePct -= Math.min(20, hotspotCount * 2);
+  confidencePct = clampPercent(Math.max(15, Math.min(98, Math.round(confidencePct))));
+  const blockers: string[] = [
+    risk !== "Stable" ? `Deployment risk: ${risk}` : "",
+    instability > 0 ? `${instability} unstable requirement signals` : "",
+    hotspotCount > 0 ? `${hotspotCount} recovery hotspot events` : "",
+  ];
+  return buildDeploymentTrustSummary({
+    confidencePct: risk === "High risk" ? Math.min(confidencePct, 55) : confidencePct,
+    blockerSignals: blockers,
+    evidence: `${deploymentRiskSignals.value} deployment risk · ${unstableRequirements.value.length} unstable requirements · ${recoveryHotspots.value.length} hotspot types`,
+  });
+});
+const deploymentTrustTone = computed(() => {
+  if (deploymentTrustSummary.value.tone === "danger") return "text-rose-600";
+  if (deploymentTrustSummary.value.tone === "warning") return "text-amber-600";
+  return "text-emerald-600";
+});
+const projectEnvironmentReadiness = computed(() => {
+  if (environmentChecklistSummary.value) {
+    const summary = environmentChecklistSummary.value;
+    const nextUserActions = Array.isArray(summary.items)
+      ? summary.items.filter((item: any) => item?.owner === "user" && String(item?.status || "").toLowerCase() !== "done").slice(0, 6)
+      : [];
+    const environments = Array.isArray(summary.environments)
+      ? summary.environments.map((env: any) => ({
+          environment: String(env?.environment || ""),
+          scorePct: Number(env?.score_pct || 0),
+          userPending: Number(env?.user_pending || 0),
+        }))
+      : [];
+    return {
+      scorePct: Number(summary.score_pct || 0),
+      environments,
+      nextUserActions: nextUserActions.map((item: any) => ({ label: String(item?.label || item?.item_key || "User action required") })),
+    };
+  }
+  const missing = Array.isArray(foundationReadiness.value?.missing_prerequisites)
+    ? foundationReadiness.value.missing_prerequisites.map((item: any) => String(item))
+    : [];
+  return buildEnvironmentReadiness({
+    hasRepo: Boolean(projectRepo.value?.repo_url || projectRepo.value?.repo_full_name),
+    hasDeploymentConnector: deploymentProviderHints.value.length > 0,
+    deploymentProviders: deploymentProviderHints.value,
+    foundationMissing: missing,
+    previewReady: runs.value.some((run) => String(run?.status || "").toUpperCase() === "COMPLETED"),
+  });
+});
 const checklistRepo = computed(() => Boolean(projectRepo.value?.repo_url || projectRepo.value?.repo_full_name));
 const checklistRequirements = computed(() => {
   const status = String(planMeta.value?.requirements_status || "").toUpperCase();
@@ -1521,6 +1677,64 @@ const journeyPrimaryActionLabel = computed(() => {
   if (!checklistTasks.value) return "Create Task";
   if (!checklistRuns.value) return "Start Run";
   return projectStatus.value === "RUN" ? "Enter Mission Control" : "Move to RUN";
+});
+const architectureRunReady = computed(() => Boolean(architectureSummary.value?.profile_exists && architectureSummary.value?.derived_ready));
+const modalArchitectureSummary = computed(() => {
+  let parsed: any = {};
+  try {
+    parsed = JSON.parse(architectureEditorValue.value || "{}");
+  } catch {
+    parsed = architectureProfile.value?.profile_json || {};
+  }
+  if (!parsed || typeof parsed !== "object") parsed = {};
+  const repoLayout = parsed.repo_layout && typeof parsed.repo_layout === "object" ? parsed.repo_layout : {};
+  const packagesRaw = Array.isArray(repoLayout.packages) ? repoLayout.packages : [];
+  const packages = packagesRaw
+    .map((item: any) => (item && typeof item.name === "string" ? item.name : ""))
+    .filter((item: string) => Boolean(item));
+  const safeZones = Array.isArray(parsed.safe_refactor_zones) ? parsed.safe_refactor_zones.filter((x: any) => typeof x === "string") : [];
+  const protectedZones = Array.isArray(parsed.do_not_touch_zones)
+    ? parsed.do_not_touch_zones
+        .map((item: any) => (typeof item === "string" ? item : typeof item?.path === "string" ? item.path : ""))
+        .filter((item: string) => Boolean(item))
+    : [];
+  const commandsObj = parsed.commands && typeof parsed.commands === "object" ? parsed.commands : {};
+  const commands = Object.keys(commandsObj);
+  const validationRaw = Array.isArray(parsed.validation_recipes) ? parsed.validation_recipes : [];
+  const validationRecipes = validationRaw
+    .map((item: any) => (item && typeof item.name === "string" ? item.name : ""))
+    .filter((item: string) => Boolean(item));
+  const derivedFrom: string[] = [];
+  if (parsed.blueprint_key) derivedFrom.push("blueprint");
+  if (packages.length || commands.length || validationRecipes.length) derivedFrom.push("repo_intelligence");
+  if (Array.isArray(parsed.deployment_surfaces) && parsed.deployment_surfaces.length) derivedFrom.push("deployment_topology");
+  let confidence = "LOW";
+  if (derivedFrom.length >= 3) confidence = "HIGH";
+  else if (derivedFrom.length === 2) confidence = "MEDIUM";
+  const assumptions = Array.isArray(architectureSummary.value?.assumptions_used) ? architectureSummary.value.assumptions_used : [];
+  return {
+    repo_layout_label: String(repoLayout.label || (repoLayout.monorepo ? "Monorepo" : "Repository")),
+    status: String(architectureProfile.value?.status || architectureSummary.value?.status || "MISSING"),
+    summary: String(architectureSummaryText.value || architectureSummary.value?.summary || ""),
+    packages,
+    execution_slice: packages.slice(0, 3),
+    protected_zones: protectedZones,
+    safe_zones: safeZones,
+    commands,
+    validation_recipes: validationRecipes,
+    derivation_confidence: confidence,
+    derived_from: derivedFrom,
+    assumptions_used: assumptions,
+  };
+});
+const startRunBlockedReason = computed(() => {
+  if (!checklistRepo.value) return "Connect a repository before starting runs.";
+  if (!checklistRequirements.value) return "Approve requirements before starting runs.";
+  if (!checklistTasks.value) return "Generate at least one task before starting runs.";
+  if (!architectureRunReady.value) {
+    return "Architecture profile must be derived first (Architecture Contract -> Manage -> Bootstrap -> Derive).";
+  }
+  return "";
 });
 
 function syncArchitectureEditor(profile: any | null) {
@@ -1609,6 +1823,11 @@ function goToRequirements() {
   router.push(`/projects/${projectId.value}/requirements`);
 }
 
+function goToEnvironmentCenter() {
+  if (!projectId.value) return;
+  router.push(`/projects/${projectId.value}/environments`);
+}
+
 function runPrimaryJourneyAction() {
   if (!checklistRepo.value) {
     openConnectRepoDialog();
@@ -1620,6 +1839,11 @@ function runPrimaryJourneyAction() {
   }
   if (!checklistTasks.value) {
     openCreateTaskDialog();
+    return;
+  }
+  if (startRunBlockedReason.value) {
+    runError.value = startRunBlockedReason.value;
+    showArchitectureDialog.value = true;
     return;
   }
   if (!checklistRuns.value) {
@@ -1854,7 +2078,8 @@ async function runTask(task: any) {
   tasksError.value = "";
   runError.value = "";
   try {
-    const createdRun = await createRun(projectId.value, selectedExecutor.value, task.id);
+    const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:task:${projectId.value}:${task.id}`);
+    const createdRun = await createRun(projectId.value, selectedExecutor.value, task.id, null, { request_key: requestKey });
     if (createdRun?.id) {
       runs.value = canonicalizeRuns([createdRun, ...runs.value.filter((run) => run?.id !== createdRun.id)]);
       updateProjectContext({
@@ -1917,7 +2142,8 @@ async function runAllTasksOrdered() {
   try {
     for (const task of queue) {
       runAllProgressLabel.value = `Starting ${started + 1}/${queue.length}: ${task.title || task.id}`;
-      await createRun(projectId.value, selectedExecutor.value, task.id);
+      const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:run_all:${projectId.value}:${task.id}`);
+      await createRun(projectId.value, selectedExecutor.value, task.id, null, { request_key: requestKey });
       started += 1;
     }
     await Promise.all([loadTasks(), loadRuns()]);
@@ -2113,6 +2339,36 @@ async function loadProjectRepo() {
   }
 }
 
+async function loadDeploymentProviderHints() {
+  try {
+    const connectors = await listDeploymentConnectors();
+    const providers = Array.isArray(connectors)
+      ? connectors.map((row: any) => String(row?.provider || "").toLowerCase()).filter(Boolean)
+      : [];
+    deploymentProviderHints.value = Array.from(new Set(providers));
+  } catch {
+    deploymentProviderHints.value = [];
+  }
+}
+
+async function loadDeploymentReadinessContract() {
+  if (!projectId.value) return;
+  try {
+    deploymentReadinessContract.value = await fetchProjectDeploymentReadiness(projectId.value, "PRODUCTION");
+  } catch {
+    deploymentReadinessContract.value = null;
+  }
+}
+
+async function loadEnvironmentChecklistSummary() {
+  if (!projectId.value) return;
+  try {
+    environmentChecklistSummary.value = await getProjectEnvironmentChecklists(projectId.value, false);
+  } catch {
+    environmentChecklistSummary.value = null;
+  }
+}
+
 async function submitConnectRepo() {
   if (!projectId.value) return;
   if (!repoForm.value.repo_url.trim()) {
@@ -2143,6 +2399,7 @@ async function submitConnectRepo() {
       selectedExecutor.value = "codex";
     }
     await loadFoundationReadiness();
+    await loadProjectSummary();
     showConnectRepoDialog.value = false;
     repoMessage.value = "Repository connected.";
   } catch (err: any) {
@@ -2180,6 +2437,9 @@ async function runRepoPreflight() {
       clone: true,
     });
     repoPreflightResult.value = result;
+    if (result?.ok) {
+      await loadProjectSummary();
+    }
     repoMessage.value = result.ok ? "Repository clone preflight passed." : "";
     repoError.value = result.ok ? "" : result.error || "Repository clone preflight failed.";
   } catch (err: any) {
@@ -2468,9 +2728,15 @@ async function loadRuns() {
 
 async function startRun() {
   if (!projectId.value) return;
+  if (startRunBlockedReason.value) {
+    runError.value = startRunBlockedReason.value;
+    ElMessage.warning(startRunBlockedReason.value);
+    return;
+  }
   runError.value = "";
   try {
-    const createdRun = await createRun(projectId.value, selectedExecutor.value);
+    const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:start:${projectId.value}`);
+    const createdRun = await createRun(projectId.value, selectedExecutor.value, null, null, { request_key: requestKey });
     if (createdRun?.id) {
       runs.value = canonicalizeRuns([createdRun, ...runs.value.filter((run) => run?.id !== createdRun.id)]);
       updateProjectContext({
@@ -2486,6 +2752,10 @@ async function startRun() {
     await loadRunEvents();
   } catch (err: any) {
     runError.value = err?.message || "Failed to create run";
+    if (String(runError.value).toLowerCase().includes("architecture profile must be derived")) {
+      ElMessage.warning("Run blocked: complete Bootstrap and Derive in Architecture Contract.");
+      showArchitectureDialog.value = true;
+    }
   }
 }
 
@@ -2685,6 +2955,7 @@ function shortSha(val?: string | null) {
 }
 
 onMounted(async () => {
+  window.addEventListener("agentic:tenant-changed", handleTenantChanged as EventListener);
   if (!projectId.value) return;
   error.value = "";
   await loadProjectSummary();
@@ -2707,6 +2978,9 @@ onMounted(async () => {
   await loadProjectMeta();
   await loadRuns();
   await loadProjectRepo();
+  await loadDeploymentProviderHints();
+  await loadDeploymentReadinessContract();
+  await loadEnvironmentChecklistSummary();
   await loadGitHubConnectInfo();
   await loadWorkItems();
   await loadRunEvents();
@@ -2716,7 +2990,38 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopOverviewPolling();
+  window.removeEventListener("agentic:tenant-changed", handleTenantChanged as EventListener);
 });
+
+function resetOverviewStateForTenantSwitch() {
+  error.value = "";
+  runs.value = [];
+  workItems.value = [];
+  runEvents.value = [];
+  documents.value = [];
+  tasks.value = [];
+  taskSnapshot.value = [];
+  improvementRequests.value = [];
+  requirementSummaryCards.value = [];
+  planHistory.value = [];
+  latestDelivery.value = null;
+  projectRepo.value = null;
+  stopOverviewPolling();
+}
+
+function handleTenantChanged() {
+  resetOverviewStateForTenantSwitch();
+  if (!getActiveTenantId()) {
+    void router.replace({
+      path: "/",
+      query: { tenantRequired: "1", requestedProject: projectId.value || undefined },
+    });
+    return;
+  }
+  if (projectId.value) {
+    void router.replace({ path: `/projects/${projectId.value}` });
+  }
+}
 
 watch(
   () => [route.query.installation_id, route.query.setup_action],

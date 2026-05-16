@@ -66,3 +66,10 @@ design or implementation begins, reducing downstream rework.
 source apps/api/.venv/bin/activate
 python -m pip install -e core -e agent -e apps/api
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --app-dir apps/api
+
+cd apps/api
+alembic upgrade head
+alembic current
+alembic heads
+cd /Users/abhishekkumarjha/Documents/sudo-programmer-official/agentic-sdlc-platform
+tail -f .dev-stack/api.log | grep -E "Internal"

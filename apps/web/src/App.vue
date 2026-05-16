@@ -1,5 +1,8 @@
 <template>
-  <div class="app-shell">
+  <div v-if="isMinimalLayoutRoute" class="app-main">
+    <router-view />
+  </div>
+  <div v-else class="app-shell">
     <aside class="app-sidebar">
       <div class="brand">
         <div class="brand-mark">
@@ -62,6 +65,27 @@
         <div class="topbar-shell">
           <TopBar />
         </div>
+        <div class="context-rail">
+          <div class="context-rail__item">
+            <span class="context-rail__label">Workspace</span>
+            <span class="context-rail__value">{{ workspaceLabel }}</span>
+          </div>
+          <div class="context-rail__sep">→</div>
+          <div class="context-rail__item">
+            <span class="context-rail__label">Project</span>
+            <span class="context-rail__value">{{ projectLabel }}</span>
+          </div>
+          <div class="context-rail__sep">→</div>
+          <div class="context-rail__item">
+            <span class="context-rail__label">Environment</span>
+            <span class="context-rail__value">{{ environmentLabel }}</span>
+          </div>
+          <div class="context-rail__sep">→</div>
+          <div class="context-rail__item">
+            <span class="context-rail__label">Active Run</span>
+            <span class="context-rail__value">{{ activeRunLabel }}</span>
+          </div>
+        </div>
       </header>
       <main class="app-main">
         <router-view />
@@ -118,7 +142,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { listApprovals, listRuns } from "./api/lifecycle";
+import { isApiErrorStatus } from "./api/http";
+import { getActiveTenantId, getActiveWorkspaceId, getActiveWorkspaceMeta, listApprovals, listRuns } from "./api/lifecycle";
 import AiOperatorPanel from "./components/AiOperatorPanel.vue";
 import AppIcon from "./components/AppIcon.vue";
 import TopBar from "./components/TopBar.vue";
@@ -126,7 +151,12 @@ import { projectContext } from "./state/projectContext";
 
 const route = useRoute();
 const router = useRouter();
+const isMinimalLayoutRoute = computed(() => {
+  return String(route.meta?.layout || "") === "minimal";
+});
 const activePath = computed(() => route.path);
+const activeWorkspaceId = ref<string | null>(getActiveWorkspaceId());
+const activeWorkspaceName = ref<string | null>(getActiveWorkspaceMeta()?.name || null);
 
 const projectPath = computed(() => (projectContext.projectId ? `/projects/${projectContext.projectId}` : "/"));
 const operatorPath = computed(() => (projectContext.projectId ? `/projects/${projectContext.projectId}/operator` : "/"));
@@ -150,6 +180,15 @@ const approvalAttentionRequired = ref(false);
 let approvalMonitorTimer: number | null = null;
 let lastAlertSignature = "";
 
+function resetOperatorAttentionState() {
+  operatorApprovalDialogVisible.value = false;
+  operatorApprovalRunId.value = "";
+  operatorDialogKind.value = "operator_confirmation";
+  runIssueDialogVisible.value = false;
+  runIssueRunId.value = "";
+  approvalAttentionRequired.value = false;
+}
+
 const operatorApprovalRunIdShort = computed(() =>
   operatorApprovalRunId.value ? operatorApprovalRunId.value.slice(0, 8) : "—"
 );
@@ -166,6 +205,24 @@ const operatorDialogMessage = computed(() => {
   return `Run ${operatorApprovalRunIdShort.value} is paused for operator confirmation before patch mutation. Open the exact run to confirm and continue.`;
 });
 const runIssueRunIdShort = computed(() => (runIssueRunId.value ? runIssueRunId.value.slice(0, 8) : "—"));
+const workspaceLabel = computed(() => {
+  const name = activeWorkspaceName.value;
+  if (name && name.trim()) return name;
+  const id = activeWorkspaceId.value;
+  if (!id) return "No workspace selected";
+  return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+});
+const projectLabel = computed(() => projectContext.projectName || "No project selected");
+const environmentLabel = computed(() => (import.meta.env.DEV ? "Local" : "Production"));
+const activeRunLabel = computed(() => {
+  if (!projectContext.latestRunId) return "No active run";
+  const shortId = projectContext.latestRunId.slice(0, 8);
+  return `${shortId} (${projectContext.runStatus || "UNKNOWN"})`;
+});
+const refreshWorkspace = () => {
+  activeWorkspaceId.value = getActiveWorkspaceId();
+  activeWorkspaceName.value = getActiveWorkspaceMeta()?.name || null;
+};
 
 const navItems = computed(() => [
   {
@@ -173,8 +230,24 @@ const navItems = computed(() => [
     label: "Workspace",
     hint: "Projects, system state, quick launch",
     icon: "workspace",
-    path: "/",
+    path: "/workspace",
     disabled: false,
+  },
+  {
+    key: "workspace-dashboard",
+    label: "Workspace Dashboard",
+    hint: "Cross-project operational control center",
+    icon: "status",
+    path: "/workspace/dashboard",
+    disabled: !getActiveTenantId(),
+  },
+  {
+    key: "admin-console",
+    label: "Admin Console",
+    hint: "Workspace operations and audit controls",
+    icon: "status",
+    path: "/admin",
+    disabled: !getActiveTenantId(),
   },
   {
     key: "operator",
@@ -297,10 +370,13 @@ function playApprovalChime() {
 }
 
 async function checkOperatorApprovalState() {
+  if (!getActiveTenantId()) {
+    resetOperatorAttentionState();
+    return;
+  }
   const projectId = projectContext.projectId;
   if (!projectId) {
-    approvalAttentionRequired.value = false;
-    runIssueRunId.value = "";
+    resetOperatorAttentionState();
     return;
   }
   try {
@@ -360,7 +436,11 @@ async function checkOperatorApprovalState() {
     } else if (!isStalledOrDegraded) {
       runIssueRunId.value = "";
     }
-  } catch {
+  } catch (error) {
+    if (isApiErrorStatus(error, 401) || isApiErrorStatus(error, 403)) {
+      resetOperatorAttentionState();
+      return;
+    }
     // Keep UX stable during transient API errors.
   }
 }
@@ -415,10 +495,55 @@ watch(
 );
 
 onMounted(() => {
+  window.addEventListener("agentic:tenant-changed", resetOperatorAttentionState as EventListener);
+  window.addEventListener("agentic:workspace-changed", refreshWorkspace as EventListener);
   startApprovalMonitor();
 });
 
 onBeforeUnmount(() => {
   stopApprovalMonitor();
+  window.removeEventListener("agentic:tenant-changed", resetOperatorAttentionState as EventListener);
+  window.removeEventListener("agentic:workspace-changed", refreshWorkspace as EventListener);
 });
 </script>
+
+<style scoped>
+.context-rail {
+  margin: 0 0.75rem 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-2) 92%, transparent),
+    color-mix(in srgb, var(--surface-soft) 88%, transparent)
+  );
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.context-rail__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.context-rail__label {
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.context-rail__value {
+  font-size: 0.82rem;
+  color: var(--text-strong);
+}
+
+.context-rail__sep {
+  font-size: 0.76rem;
+  color: var(--text-soft);
+}
+</style>

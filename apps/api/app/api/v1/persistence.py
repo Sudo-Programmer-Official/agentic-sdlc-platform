@@ -4,16 +4,18 @@ import base64
 import binascii
 import csv
 import io
+import logging
 import uuid
-from datetime import datetime, timezone
-from datetime import timedelta
+from urllib.parse import quote_plus
+from datetime import date, datetime, timezone, timedelta
+from collections import defaultdict
 from types import SimpleNamespace
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, func, and_, exists, case
+from sqlalchemy import select, func, and_, exists, case, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -29,6 +31,9 @@ from app.db.models import (
     Artifact,
     ProjectRepository,
     ProjectPreviewProfile,
+    ProjectDeployment,
+    DeploymentProfile,
+    DeploymentProviderConnector,
     ImprovementRequest,
     RequirementMemory,
     RequirementRelationship,
@@ -36,6 +41,22 @@ from app.db.models import (
     ProjectGenesisRun,
     ProjectTopologySnapshot,
     StackPreset,
+    ActivityLog,
+    Workspace,
+    Tenant,
+    TenantMember,
+    WorkspaceMember,
+    WorkspaceEntitlement,
+    WorkspaceUsageDaily,
+    WorkspaceAnomalySnapshot,
+    EnvironmentChecklist,
+    PlatformConfig,
+    WorkspaceSecret,
+    ProjectEnvironmentVariable,
+    EnvironmentValidationResult,
+    EnvironmentSyncStatus,
+    AdminAuditLog,
+    ImpersonationSession,
 )
 from app.db.session import get_session
 from app.schemas.persistence import (
@@ -134,7 +155,11 @@ from app.services.workspace_supervisor import ensure_run_workspace, destroy_run_
 from app.services.work_item_state import is_dependency_satisfied
 from app.services.requirements_bridge import ensure_legacy_project, load_requirements_plan_state
 from app.services.run_summary_builder import ensure_project_run_summaries
-from app.services.architecture_profile_service import bootstrap_architecture_profile, summarize_architecture_profile
+from app.services.architecture_profile_service import (
+    bootstrap_architecture_profile,
+    derive_architecture_profile,
+    summarize_architecture_profile,
+)
 from app.services.requirement_tracking import build_requirement_summary, build_requirement_timeline
 from app.services.requirement_execution_graph import build_requirement_execution_graph
 from app.services.requirement_memory import compress_requirement_memory
@@ -142,6 +167,15 @@ from app.services.project_contract_service import summarize_project_contract
 from app.services.governance_kpis import build_governance_kpis
 from app.services.impact_analysis_loop import score_impact_prediction
 from app.services.external_reference_ingestion import persist_external_reference
+from app.services.secret_vault import resolve_vault_secret, store_vault_secret
+from app.services.environment_readiness import (
+    checklist_template,
+    complete_timestamp,
+    infer_item_status,
+    normalize_missing_prerequisites,
+    summarize_rows,
+)
+from app.services.deployment_readiness import compute_deployment_readiness
 from app.runtime.execution_contract import coerce_execution_contract, sync_run_execution_contract_state
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
@@ -152,12 +186,80 @@ from app.api.v1.schemas import (
 )
 from app.core.config import get_settings
 from app.api.deps import get_tenant_context, get_tenant_id, ZERO_TENANT
+from app.services.firebase_auth import FirebaseAuthError, verify_firebase_bearer_token
 
 
 # Legacy store prefix (DB-backed) and public projects prefix to align with UI.
 router = APIRouter(prefix="/store", tags=["store"])
 public_router = APIRouter(tags=["projects"])
 settings = get_settings()
+log = logging.getLogger("app.persistence")
+
+ENVIRONMENT_TEMPLATES: dict[str, dict] = {
+    "vue_fastapi": {
+        "name": "Vue + FastAPI",
+        "description": "Vue frontend with FastAPI backend and common service credentials.",
+        "deployment_targets": ["vercel", "render"],
+        "provider_mappings": {"vercel": "frontend", "render": "backend"},
+        "variables": [
+            {"key": "VITE_API_BASE_URL", "required": True, "scope": "frontend"},
+            {"key": "API_BASE_URL", "required": True, "scope": "backend"},
+            {"key": "DATABASE_URL", "required": True, "scope": "backend"},
+            {"key": "JWT_SECRET", "required": True, "scope": "backend"},
+            {"key": "OPENAI_API_KEY", "required": False, "scope": "backend"},
+        ],
+    },
+    "nextjs_supabase": {
+        "name": "Next.js + Supabase",
+        "description": "Next.js app with Supabase auth and database.",
+        "deployment_targets": ["vercel"],
+        "provider_mappings": {"vercel": "fullstack"},
+        "variables": [
+            {"key": "NEXT_PUBLIC_SUPABASE_URL", "required": True, "scope": "frontend"},
+            {"key": "NEXT_PUBLIC_SUPABASE_ANON_KEY", "required": True, "scope": "frontend"},
+            {"key": "SUPABASE_SERVICE_ROLE_KEY", "required": True, "scope": "backend"},
+            {"key": "DATABASE_URL", "required": True, "scope": "backend"},
+            {"key": "NEXTAUTH_SECRET", "required": True, "scope": "backend"},
+        ],
+    },
+    "firebase_saas": {
+        "name": "Firebase SaaS",
+        "description": "Firebase-auth SaaS baseline with database and billing optionals.",
+        "deployment_targets": ["vercel", "render"],
+        "provider_mappings": {"vercel": "frontend", "render": "backend"},
+        "variables": [
+            {"key": "VITE_FIREBASE_API_KEY", "required": True, "scope": "frontend"},
+            {"key": "VITE_FIREBASE_AUTH_DOMAIN", "required": True, "scope": "frontend"},
+            {"key": "FIREBASE_PROJECT_ID", "required": True, "scope": "shared"},
+            {"key": "DATABASE_URL", "required": True, "scope": "backend"},
+            {"key": "STRIPE_SECRET_KEY", "required": False, "scope": "backend"},
+            {"key": "OPENAI_API_KEY", "required": False, "scope": "backend"},
+        ],
+    },
+    "mern": {
+        "name": "MERN",
+        "description": "MongoDB, Express, React, Node deployment baseline.",
+        "deployment_targets": ["render", "vercel"],
+        "provider_mappings": {"vercel": "frontend", "render": "backend"},
+        "variables": [
+            {"key": "MONGODB_URI", "required": True, "scope": "backend"},
+            {"key": "JWT_SECRET", "required": True, "scope": "backend"},
+            {"key": "CORS_ORIGIN", "required": True, "scope": "backend"},
+            {"key": "VITE_API_BASE_URL", "required": True, "scope": "frontend"},
+        ],
+    },
+    "static_marketing_site": {
+        "name": "Static Marketing Site",
+        "description": "Static site with optional analytics and lead capture integrations.",
+        "deployment_targets": ["vercel"],
+        "provider_mappings": {"vercel": "frontend"},
+        "variables": [
+            {"key": "VITE_SITE_URL", "required": True, "scope": "frontend"},
+            {"key": "VITE_ANALYTICS_ID", "required": False, "scope": "frontend"},
+            {"key": "FORM_WEBHOOK_URL", "required": False, "scope": "shared"},
+        ],
+    },
+}
 
 
 class StageUpdate(BaseModel):
@@ -193,6 +295,494 @@ class RunDiscardResponse(BaseModel):
     workspace_deleted: bool
     workspace_root: str | None = None
     detail: str
+
+
+class ProjectDeploymentCreateRequest(BaseModel):
+    provider: str = "vercel"
+    environment: str = "PREVIEW"
+    deployment_strategy: str = "static_frontend"
+    target: str = "user_app"
+    run_id: uuid.UUID | None = None
+    request_key: str | None = None
+    repository_url: str | None = None
+    repository_full_name: str | None = None
+    branch_name: str | None = None
+    created_by: str | None = None
+    env_overrides: dict[str, str] | None = None
+    integration_mode: str | None = None
+
+
+class ProjectDeploymentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    project_id: uuid.UUID
+    run_id: uuid.UUID | None = None
+    provider: str
+    environment: str
+    deployment_strategy: str
+    target: str
+    status: str
+    request_key: str | None = None
+    external_deployment_id: str | None = None
+    deployment_url: str | None = None
+    dashboard_url: str | None = None
+    error_message: str | None = None
+    deployment_confidence_score: float = 0.0
+    rollback_source_deployment_id: uuid.UUID | None = None
+    rollback_reason: str | None = None
+    rollback_trigger: str | None = None
+    promoted_from_environment: str | None = None
+    extra_metadata: dict | None = None
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectDeploymentRetryRequest(BaseModel):
+    force: bool = False
+
+
+class ProjectDeploymentPromoteRequest(BaseModel):
+    target_environment: str
+    reason: str | None = None
+    request_key: str | None = None
+    created_by: str | None = None
+
+
+class ProjectDeploymentRollbackRequest(BaseModel):
+    reason: str | None = None
+    trigger: str = "manual"
+    request_key: str | None = None
+    created_by: str | None = None
+
+
+class ProjectDeploymentPreflightRequest(BaseModel):
+    provider: str
+    environment: str = "PREVIEW"
+    deployment_strategy: str = "static_frontend"
+    repository_url: str | None = None
+    repository_full_name: str | None = None
+    branch_name: str | None = None
+
+
+class DeploymentEventOut(BaseModel):
+    id: uuid.UUID
+    created_at: datetime
+    action_type: str
+    event_type: str | None = None
+    actor: str | None = None
+    extra_metadata: dict | None = None
+
+
+class WorkspaceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    created_at: datetime
+
+
+class WorkspaceSwitchOut(BaseModel):
+    workspace: WorkspaceOut
+    projects: list[ProjectOut] = Field(default_factory=list)
+
+
+class WorkspaceEntitlementOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    workspace_id: uuid.UUID
+    plan: str
+    limits: dict = Field(default_factory=dict)
+    features: dict = Field(default_factory=dict)
+    effective_from: datetime
+    updated_at: datetime
+
+
+class AdminWorkspaceEntitlementPatchRequest(BaseModel):
+    plan: str | None = None
+    limits: dict | None = None
+    features: dict | None = None
+
+
+class WorkspaceUsageDailyOut(BaseModel):
+    usage_date: str
+    runs_count: int = 0
+    deployments_count: int = 0
+    recoveries_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_cost_cents: int = 0
+
+
+class WorkspaceUsageSummaryOut(BaseModel):
+    workspace_id: uuid.UUID
+    days: int
+    totals: WorkspaceUsageDailyOut
+    daily: list[WorkspaceUsageDailyOut] = Field(default_factory=list)
+
+
+class EnvironmentChecklistItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    workspace_id: uuid.UUID | None = None
+    project_id: uuid.UUID
+    environment: str
+    item_key: str
+    label: str
+    owner: str
+    status: str
+    required: bool
+    category: str | None = None
+    note: str | None = None
+    completed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class EnvironmentChecklistEnvironmentSummaryOut(BaseModel):
+    environment: str
+    total: int
+    completed: int
+    platform_total: int
+    platform_completed: int
+    user_pending: int
+    score_pct: int
+
+
+class EnvironmentChecklistSummaryOut(BaseModel):
+    project_id: uuid.UUID
+    workspace_id: uuid.UUID | None = None
+    score_pct: int
+    total: int
+    completed: int
+    environments: list[EnvironmentChecklistEnvironmentSummaryOut] = Field(default_factory=list)
+    items: list[EnvironmentChecklistItemOut] = Field(default_factory=list)
+
+
+class AdminWorkspaceOut(BaseModel):
+    workspace: WorkspaceOut
+    project_count: int = 0
+    run_count_7d: int = 0
+    failed_run_count_7d: int = 0
+
+
+class AdminImpersonationStartRequest(BaseModel):
+    workspace_id: uuid.UUID
+    reason: str | None = None
+    duration_minutes: int = Field(default=30, ge=5, le=240)
+
+
+class AdminImpersonationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    admin_user_id: str
+    target_workspace_id: uuid.UUID
+    reason: str | None = None
+    started_at: datetime
+    expires_at: datetime | None = None
+    ended_at: datetime | None = None
+    is_active: bool
+    ended_by: str | None = None
+    action_count: int
+
+
+class AdminAuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    admin_user_id: str
+    target_workspace_id: uuid.UUID | None = None
+    action: str
+    reason: str | None = None
+    duration_seconds: int | None = None
+    extra_metadata: dict | None = None
+    created_at: datetime
+
+
+class AdminDaemonHealthOut(BaseModel):
+    last_cycle_at: datetime | None = None
+    last_cycle_window_days: int | None = None
+    last_cycle_workspaces_processed: int = 0
+    last_cycle_workspace_failures: int = 0
+    last_error_at: datetime | None = None
+    last_error_workspace_id: uuid.UUID | None = None
+    alert_level: str = "healthy"
+    alert_reasons: list[str] = Field(default_factory=list)
+
+
+class PlatformConfigOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    config_key: str
+    config_scope: str
+    value_type: str
+    vault_ref: str | None = None
+    has_plain_value: bool = False
+    description: str | None = None
+    updated_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlatformConfigUpsertRequest(BaseModel):
+    value_type: str = "string"
+    plain_value: str | None = None
+    vault_ref: str | None = None
+    description: str | None = None
+    reason: str | None = None
+
+
+class PlatformConfigRotateRequest(BaseModel):
+    vault_ref: str
+    reason: str | None = None
+
+
+class ProjectEnvironmentVariableOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    workspace_id: uuid.UUID | None = None
+    project_id: uuid.UUID
+    environment: str
+    var_key: str
+    value_kind: str
+    has_value: bool = False
+    required: bool
+    source: str | None = None
+    validation_regex: str | None = None
+    updated_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectEnvironmentVariableUpsertRequest(BaseModel):
+    value_kind: str = "secret"
+    plain_value: str | None = None
+    vault_ref: str | None = None
+    required: bool = True
+    source: str | None = None
+    validation_regex: str | None = None
+
+
+class EnvironmentSecretWriteRequest(BaseModel):
+    value: str
+
+
+class EnvironmentValidateRequest(BaseModel):
+    checks: list[str] = Field(default_factory=list)
+    reason: str | None = None
+
+
+class EnvironmentSyncRequest(BaseModel):
+    reason: str | None = None
+
+
+class EnvironmentValidationResultOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    environment: str
+    check_key: str
+    status: str
+    message: str | None = None
+    checked_at: datetime
+
+
+class EnvironmentSyncStatusOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    environment: str
+    provider: str
+    status: str
+    message: str | None = None
+    drift_detected: bool
+    last_synced_at: datetime | None = None
+    updated_at: datetime
+
+
+class ProjectEnvironmentProfileOut(BaseModel):
+    environment: str
+    variables_configured: int
+    variables_total: int
+    validation_passed: int
+    validation_total: int
+    sync_healthy: int
+    sync_total: int
+
+
+class ProjectEnvironmentCenterOut(BaseModel):
+    project_id: uuid.UUID
+    workspace_id: uuid.UUID | None = None
+    environments: list[ProjectEnvironmentProfileOut] = Field(default_factory=list)
+
+
+class EnvironmentTemplateVarOut(BaseModel):
+    key: str
+    required: bool = True
+    scope: str = "shared"
+    source: str = "template"
+    validation_regex: str | None = None
+
+
+class EnvironmentTemplateOut(BaseModel):
+    key: str
+    name: str
+    description: str
+    deployment_targets: list[str] = Field(default_factory=list)
+    provider_mappings: dict[str, str] = Field(default_factory=dict)
+    variables: list[EnvironmentTemplateVarOut] = Field(default_factory=list)
+
+
+class EnvironmentTemplateApplyRequest(BaseModel):
+    environment: str
+    include_optional: bool = True
+
+
+class DeploymentReadinessContractOut(BaseModel):
+    project_id: uuid.UUID
+    environment: str
+    score_pct: int
+    safe_to_preview: bool
+    safe_to_production: bool
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+    confidence_score: float = 0.0
+    categories: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
+    evidence: dict = Field(default_factory=dict)
+
+
+class WorkspaceUsageMaterializeOut(BaseModel):
+    workspace_id: uuid.UUID
+    days: int
+    rows_upserted: int = 0
+    totals: WorkspaceUsageDailyOut
+
+
+class WorkspaceAnomalySnapshotOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    workspace_id: uuid.UUID
+    snapshot_date: date
+    window_days: int
+    runs_count: int = 0
+    recoveries_count: int = 0
+    total_tokens: int = 0
+    total_cost_cents: int = 0
+    burn_spike: bool = False
+    failure_spike: bool = False
+    burn_ratio: str | None = None
+    failure_ratio: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FirstLoginBootstrapRequest(BaseModel):
+    tenant_name: str | None = None
+    workspace_name: str | None = None
+    force_new_tenant: bool = False
+
+
+class FirstLoginBootstrapOut(BaseModel):
+    user_id: str
+    tenant_id: uuid.UUID
+    tenant_name: str
+    workspace_id: uuid.UUID
+    workspace_name: str
+    tenant_member_role: str
+    workspace_member_role: str
+    created_tenant: bool = False
+    created_workspace: bool = False
+    created_tenant_member: bool = False
+    created_workspace_member: bool = False
+
+
+class DeploymentIntelligenceOut(BaseModel):
+    project_id: uuid.UUID
+    total_deployments: int = 0
+    success_rate: float = 0.0
+    avg_confidence: float = 0.0
+    top_failure_clusters: list[dict] = Field(default_factory=list)
+    confidence_trend: list[dict] = Field(default_factory=list)
+    recent_manual_degrade_reasons: list[str] = Field(default_factory=list)
+
+
+class DeploymentProfileUpsertRequest(BaseModel):
+    environment: str = "PREVIEW"
+    provider: str = "vercel"
+    deployment_strategy: str = "static_frontend"
+    framework: str | None = None
+    install_command: str | None = None
+    build_command: str | None = None
+    output_dir: str | None = None
+    start_command: str | None = None
+    healthcheck_path: str | None = "/"
+    region: str | None = None
+    runtime_version: str | None = None
+    env_schema: dict | None = None
+    provider_connector_id: uuid.UUID | None = None
+    created_by: str | None = None
+
+
+class DeploymentProfileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    project_id: uuid.UUID
+    environment: str
+    provider: str
+    deployment_strategy: str
+    framework: str | None = None
+    install_command: str | None = None
+    build_command: str | None = None
+    output_dir: str | None = None
+    start_command: str | None = None
+    healthcheck_path: str | None = None
+    region: str | None = None
+    runtime_version: str | None = None
+    env_schema: dict | None = None
+    provider_connector_id: uuid.UUID | None = None
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DeploymentProviderConnectorUpsertRequest(BaseModel):
+    provider: str
+    label: str
+    vault_ref: str
+    scopes: dict | None = None
+    created_by: str | None = None
+
+
+class DeploymentProviderConnectorOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    provider: str
+    label: str
+    vault_ref: str
+    scopes: dict | None = None
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 ALLOWED_TRANSITIONS = {
@@ -319,16 +909,497 @@ def _vision_task_prompt(goal_text: str) -> str:
     return f"User goal: {cleaned_goal}"
 
 
+def _project_scope_filters(ctx) -> list:
+    filters = [Project.tenant_id == ctx.tenant_id]
+    if getattr(ctx, "workspace_id", None):
+        # Backward compatibility: legacy projects without workspace_id remain accessible.
+        filters.append(or_(Project.workspace_id == ctx.workspace_id, Project.workspace_id.is_(None)))
+    return filters
+
+
 def _project_scoped(session: AsyncSession, ctx, project_id: uuid.UUID):
-    return select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id)
+    return select(Project).where(Project.id == project_id, *_project_scope_filters(ctx))
 
 
 def _run_scoped(session: AsyncSession, ctx, run_id: uuid.UUID):
-    return select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id)
+    return (
+        select(Run)
+        .join(Project, Project.id == Run.project_id)
+        .where(Run.id == run_id, Run.tenant_id == ctx.tenant_id, *_project_scope_filters(ctx))
+    )
+
+
+def _default_workspace_limits() -> dict:
+    return {
+        "projects": 5,
+        "monthly_tokens": 500000,
+        "deployments_per_month": 20,
+    }
+
+
+def _default_workspace_features() -> dict:
+    return {
+        "preview_deployments": True,
+        "production_deployments": False,
+        "recovery_memory": True,
+        "workspace_connectors": True,
+    }
+
+
+async def _ensure_workspace_entitlement(session: AsyncSession, ctx, workspace_id: uuid.UUID) -> WorkspaceEntitlement:
+    entitlement = await session.scalar(
+        select(WorkspaceEntitlement).where(
+            WorkspaceEntitlement.tenant_id == ctx.tenant_id,
+            WorkspaceEntitlement.workspace_id == workspace_id,
+        )
+    )
+    if entitlement is not None:
+        return entitlement
+    entitlement = WorkspaceEntitlement(
+        tenant_id=ctx.tenant_id,
+        workspace_id=workspace_id,
+        plan="starter",
+        limits=_default_workspace_limits(),
+        features=_default_workspace_features(),
+    )
+    session.add(entitlement)
+    await session.flush()
+    await session.commit()
+    await session.refresh(entitlement)
+    return entitlement
+
+
+def _is_super_admin(ctx) -> bool:
+    current_settings = get_settings()
+    allowed = [item.strip() for item in (current_settings.super_admin_users or "").split(",") if item.strip()]
+    return bool(ctx.user_id and ctx.user_id in allowed)
+
+
+def _extract_bearer_token_or_401(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "AUTH_TOKEN_MISSING", "message": "Authorization bearer token is required."},
+        )
+    prefix = "bearer "
+    if not authorization.lower().startswith(prefix):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "AUTH_TOKEN_INVALID", "message": "Authorization header must use Bearer token."},
+        )
+    token = authorization[len(prefix) :].strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "AUTH_TOKEN_INVALID", "message": "Authorization bearer token is required."},
+        )
+    return token
+
+
+def _user_id_from_claims(claims: dict) -> str:
+    for key in ("user_id", "uid", "sub", "email"):
+        value = claims.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "system"
+
+
+def _sanitize_entity_name(value: str | None, fallback: str, *, max_len: int = 180) -> str:
+    text = (value or "").strip()
+    if not text:
+        text = fallback
+    text = " ".join(text.split())
+    return text[:max_len] if len(text) > max_len else text
+
+
+def _platform_config_out(row: PlatformConfig) -> PlatformConfigOut:
+    return PlatformConfigOut(
+        id=row.id,
+        config_key=row.config_key,
+        config_scope=row.config_scope,
+        value_type=row.value_type,
+        vault_ref=row.vault_ref,
+        has_plain_value=bool((row.plain_value or "").strip()),
+        description=row.description,
+        updated_by=row.updated_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _project_env_var_out(row: ProjectEnvironmentVariable) -> ProjectEnvironmentVariableOut:
+    has_value = bool((row.vault_ref or "").strip()) or bool((row.plain_value or "").strip())
+    return ProjectEnvironmentVariableOut(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        workspace_id=row.workspace_id,
+        project_id=row.project_id,
+        environment=row.environment,
+        var_key=row.var_key,
+        value_kind=row.value_kind,
+        has_value=has_value,
+        required=row.required,
+        source=row.source,
+        validation_regex=row.validation_regex,
+        updated_by=row.updated_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _entitlement_enforcement_mode() -> tuple[bool, bool]:
+    current = get_settings()
+    return bool(current.workspace_entitlements_enabled), bool(current.workspace_entitlements_enforce)
+
+
+def _as_int_limit(value, default: int) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else default
+    except Exception:
+        return default
+
+
+async def _check_workspace_project_limit(session: AsyncSession, ctx, workspace_id: uuid.UUID) -> None:
+    enabled, enforce = _entitlement_enforcement_mode()
+    if not enabled:
+        return
+    entitlement = await _ensure_workspace_entitlement(session, ctx, workspace_id)
+    project_limit = _as_int_limit((entitlement.limits or {}).get("projects"), 0)
+    if project_limit <= 0:
+        return
+    current_count = await session.scalar(
+        select(func.count(Project.id)).where(
+            Project.tenant_id == ctx.tenant_id,
+            Project.workspace_id == workspace_id,
+        )
+    ) or 0
+    if current_count < project_limit:
+        return
+    message = f"Workspace project limit reached ({current_count}/{project_limit})."
+    if enforce:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+    log.warning("ENTITLEMENT_WARN project_limit workspace_id=%s tenant_id=%s current=%s limit=%s", workspace_id, ctx.tenant_id, current_count, project_limit)
+
+
+async def _check_workspace_deployment_limit(session: AsyncSession, ctx, workspace_id: uuid.UUID) -> None:
+    enabled, enforce = _entitlement_enforcement_mode()
+    if not enabled:
+        return
+    entitlement = await _ensure_workspace_entitlement(session, ctx, workspace_id)
+    deployment_limit = _as_int_limit((entitlement.limits or {}).get("deployments_per_month"), 0)
+    if deployment_limit <= 0:
+        return
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    project_ids = (
+        await session.execute(
+            select(Project.id).where(Project.tenant_id == ctx.tenant_id, Project.workspace_id == workspace_id)
+        )
+    ).scalars().all()
+    if not project_ids:
+        return
+    current_count = await session.scalar(
+        select(func.count(ProjectDeployment.id)).where(
+            ProjectDeployment.tenant_id == ctx.tenant_id,
+            ProjectDeployment.project_id.in_(project_ids),
+            ProjectDeployment.created_at >= month_start,
+        )
+    ) or 0
+    if current_count < deployment_limit:
+        return
+    message = f"Workspace deployment monthly limit reached ({current_count}/{deployment_limit})."
+    if enforce:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+    log.warning("ENTITLEMENT_WARN deployment_limit workspace_id=%s tenant_id=%s current=%s limit=%s", workspace_id, ctx.tenant_id, current_count, deployment_limit)
+
+
+async def _check_workspace_token_limit(session: AsyncSession, ctx, workspace_id: uuid.UUID) -> None:
+    enabled, enforce = _entitlement_enforcement_mode()
+    if not enabled:
+        return
+    entitlement = await _ensure_workspace_entitlement(session, ctx, workspace_id)
+    token_limit = _as_int_limit((entitlement.limits or {}).get("monthly_tokens"), 0)
+    if token_limit <= 0:
+        return
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    project_ids = (
+        await session.execute(
+            select(Project.id).where(Project.tenant_id == ctx.tenant_id, Project.workspace_id == workspace_id)
+        )
+    ).scalars().all()
+    if not project_ids:
+        return
+    run_rows = (
+        await session.execute(
+            select(Run.summary).where(
+                Run.tenant_id == ctx.tenant_id,
+                Run.project_id.in_(project_ids),
+                Run.created_at >= month_start,
+            )
+        )
+    ).scalars().all()
+    consumed = 0
+    for summary in run_rows:
+        if not isinstance(summary, dict):
+            continue
+        usage = summary.get("usage") if isinstance(summary.get("usage"), dict) else {}
+        consumed += int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+    if consumed < token_limit:
+        return
+    message = f"Workspace monthly token limit reached ({consumed}/{token_limit})."
+    if enforce:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+    log.warning("ENTITLEMENT_WARN token_limit workspace_id=%s tenant_id=%s current=%s limit=%s", workspace_id, ctx.tenant_id, consumed, token_limit)
+
+
+async def _load_workspace_usage_summary(
+    *,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    days: int,
+) -> WorkspaceUsageSummaryOut:
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    project_ids = (
+        await session.execute(
+            select(Project.id).where(
+                Project.tenant_id == tenant_id,
+                Project.workspace_id == workspace_id,
+            )
+        )
+    ).scalars().all()
+
+    run_rows = []
+    if project_ids:
+        run_rows = (
+            await session.execute(
+                select(Run.id, Run.created_at, Run.summary)
+                .where(
+                    Run.tenant_id == tenant_id,
+                    Run.project_id.in_(project_ids),
+                    Run.created_at >= since,
+                )
+            )
+        ).all()
+
+    deployment_rows = []
+    if project_ids:
+        deployment_rows = (
+            await session.execute(
+                select(ProjectDeployment.created_at, ProjectDeployment.status)
+                .where(
+                    ProjectDeployment.tenant_id == tenant_id,
+                    ProjectDeployment.project_id.in_(project_ids),
+                    ProjectDeployment.created_at >= since,
+                )
+            )
+        ).all()
+
+    token_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "total_cost_cents": 0})
+    recoveries_by_day: dict[str, int] = defaultdict(int)
+    for row in run_rows:
+        day = row.created_at.date().isoformat()
+        summary = row.summary if isinstance(row.summary, dict) else {}
+        usage = summary.get("usage") if isinstance(summary.get("usage"), dict) else {}
+        token_by_day[day]["input_tokens"] += int(usage.get("input_tokens") or 0)
+        token_by_day[day]["output_tokens"] += int(usage.get("output_tokens") or 0)
+        token_by_day[day]["total_cost_cents"] += int(round(float(usage.get("actual_cost_cents") or 0)))
+        if summary.get("resume_state") or summary.get("last_resume_checkpoint_id") or summary.get("recovery"):
+            recoveries_by_day[day] += 1
+
+    runs_by_day: dict[str, int] = defaultdict(int)
+    for row in run_rows:
+        runs_by_day[row.created_at.date().isoformat()] += 1
+
+    deployments_by_day: dict[str, int] = defaultdict(int)
+    for row in deployment_rows:
+        deployments_by_day[row.created_at.date().isoformat()] += 1
+
+    daily: list[WorkspaceUsageDailyOut] = []
+    totals = WorkspaceUsageDailyOut(usage_date="total")
+    for offset in range(days - 1, -1, -1):
+        day = (datetime.now(timezone.utc) - timedelta(days=offset)).date().isoformat()
+        usage_bucket = token_by_day[day]
+        row = WorkspaceUsageDailyOut(
+            usage_date=day,
+            runs_count=runs_by_day[day],
+            deployments_count=deployments_by_day[day],
+            recoveries_count=recoveries_by_day[day],
+            input_tokens=usage_bucket["input_tokens"],
+            output_tokens=usage_bucket["output_tokens"],
+            total_cost_cents=usage_bucket["total_cost_cents"],
+        )
+        daily.append(row)
+        totals.runs_count += row.runs_count
+        totals.deployments_count += row.deployments_count
+        totals.recoveries_count += row.recoveries_count
+        totals.input_tokens += row.input_tokens
+        totals.output_tokens += row.output_tokens
+        totals.total_cost_cents += row.total_cost_cents
+
+    return WorkspaceUsageSummaryOut(
+        workspace_id=workspace_id,
+        days=days,
+        totals=totals,
+        daily=daily,
+    )
+
+
+async def _seed_environment_checklists_for_project(
+    session: AsyncSession,
+    *,
+    ctx,
+    project: Project,
+) -> list[EnvironmentChecklist]:
+    existing = (
+        await session.execute(
+            select(EnvironmentChecklist).where(
+                EnvironmentChecklist.tenant_id == ctx.tenant_id,
+                EnvironmentChecklist.project_id == project.id,
+            )
+        )
+    ).scalars().all()
+    existing_map = {(row.environment, row.item_key): row for row in existing}
+    has_repo = await session.scalar(
+        select(exists().where(ProjectRepository.tenant_id == ctx.tenant_id, ProjectRepository.project_id == project.id))
+    )
+    has_connector = await session.scalar(
+        select(exists().where(DeploymentProviderConnector.tenant_id == ctx.tenant_id))
+    )
+    preview_ready = await session.scalar(
+        select(exists().where(Run.tenant_id == ctx.tenant_id, Run.project_id == project.id, Run.status == "COMPLETED"))
+    )
+    readiness = await build_foundation_readiness(session, tenant_id=ctx.tenant_id, project_id=project.id)
+    missing = normalize_missing_prerequisites((readiness or {}).get("missing_prerequisites"))
+
+    touched: list[EnvironmentChecklist] = []
+    for template in checklist_template():
+        status_value, note_value = infer_item_status(
+            template,
+            has_repo=bool(has_repo),
+            has_connector=bool(has_connector),
+            preview_ready=bool(preview_ready),
+            foundation_missing=missing,
+        )
+        key = (template.environment, template.item_key)
+        row = existing_map.get(key)
+        if row is None:
+            row = EnvironmentChecklist(
+                tenant_id=ctx.tenant_id,
+                workspace_id=project.workspace_id or ctx.workspace_id,
+                project_id=project.id,
+                environment=template.environment,
+                item_key=template.item_key,
+                label=template.label,
+                owner=template.owner,
+                status=status_value,
+                required=template.required,
+                category=template.category,
+                note=note_value or template.note,
+                completed_at=complete_timestamp(status_value),
+                extra_metadata={"seed_source": "environment_readiness_v1"},
+            )
+            session.add(row)
+        else:
+            row.workspace_id = project.workspace_id or row.workspace_id or ctx.workspace_id
+            row.label = template.label
+            row.owner = template.owner
+            row.required = template.required
+            row.category = template.category
+            row.status = status_value
+            row.note = note_value or template.note
+            row.completed_at = complete_timestamp(status_value)
+        touched.append(row)
+
+    await session.flush()
+    return touched
+
+
+async def _load_environment_checklists(
+    session: AsyncSession,
+    *,
+    ctx,
+    project: Project,
+    reseed: bool = True,
+) -> EnvironmentChecklistSummaryOut:
+    if reseed:
+        await _seed_environment_checklists_for_project(session, ctx=ctx, project=project)
+        await session.commit()
+
+    rows = (
+        await session.execute(
+            select(EnvironmentChecklist)
+            .where(EnvironmentChecklist.tenant_id == ctx.tenant_id, EnvironmentChecklist.project_id == project.id)
+            .order_by(EnvironmentChecklist.environment.asc(), EnvironmentChecklist.owner.asc(), EnvironmentChecklist.item_key.asc())
+        )
+    ).scalars().all()
+    summary = summarize_rows(rows)
+    return EnvironmentChecklistSummaryOut(
+        project_id=project.id,
+        workspace_id=project.workspace_id,
+        score_pct=summary["score_pct"],
+        total=summary["total"],
+        completed=summary["completed"],
+        environments=[EnvironmentChecklistEnvironmentSummaryOut(**env) for env in summary["environments"]],
+        items=[EnvironmentChecklistItemOut.model_validate(row) for row in rows],
+    )
+
+
+def _compute_usage_anomaly_flags(daily: list[WorkspaceUsageDailyOut]) -> tuple[bool, bool, str | None, str | None]:
+    if len(daily) < 4:
+        return False, False, None, None
+    midpoint = max(1, len(daily) // 2)
+    prior = daily[:midpoint]
+    recent = daily[midpoint:]
+    prior_tokens = sum((row.input_tokens or 0) + (row.output_tokens or 0) for row in prior)
+    recent_tokens = sum((row.input_tokens or 0) + (row.output_tokens or 0) for row in recent)
+    prior_runs = max(1, sum(row.runs_count or 0 for row in prior))
+    recent_runs = max(1, sum(row.runs_count or 0 for row in recent))
+    prior_recoveries = sum(row.recoveries_count or 0 for row in prior)
+    recent_recoveries = sum(row.recoveries_count or 0 for row in recent)
+    prior_recovery_rate = prior_recoveries / prior_runs
+    recent_recovery_rate = recent_recoveries / recent_runs
+    burn_ratio_value = (recent_tokens / prior_tokens) if prior_tokens > 0 else (2.0 if recent_tokens > 0 else 1.0)
+    failure_ratio_value = (
+        (recent_recovery_rate / prior_recovery_rate)
+        if prior_recovery_rate > 0
+        else (2.0 if recent_recovery_rate > 0 else 1.0)
+    )
+    burn_spike = recent_tokens > prior_tokens * 1.5 and recent_tokens - prior_tokens > 1000
+    failure_spike = recent_recovery_rate > prior_recovery_rate * 1.5 and recent_recoveries >= 2
+    return burn_spike, failure_spike, f"{burn_ratio_value:.2f}", f"{failure_ratio_value:.2f}"
 
 
 def _wi_scoped(session: AsyncSession, ctx, wi_id: uuid.UUID):
     return select(WorkItem).where(WorkItem.id == wi_id, WorkItem.tenant_id == ctx.tenant_id)
+
+
+async def _find_run_by_request_key(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    request_key: str,
+    source_run_id: uuid.UUID | None = None,
+) -> Run | None:
+    if not request_key:
+        return None
+    rows = (
+        await session.execute(
+            select(Run)
+            .where(Run.tenant_id == tenant_id, Run.project_id == project_id)
+            .order_by(Run.created_at.desc(), Run.id.desc())
+            .limit(200)
+        )
+    ).scalars().all()
+    for row in rows:
+        summary = row.summary if isinstance(row.summary, dict) else {}
+        if str(summary.get("request_key") or "").strip() != request_key:
+            continue
+        if source_run_id is not None and str(summary.get("fork_source_run_id") or "").strip() != str(source_run_id):
+            continue
+        return row
+    return None
 
 
 async def _maybe_finalize_run(session: AsyncSession, run_id: uuid.UUID) -> None:
@@ -455,18 +1526,55 @@ async def create_project(
 ) -> ProjectOut:
     if ctx.enforcement and ctx.tenant_id == ZERO_TENANT:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="system tenant is read-only")
-    async with session.begin():
-        project = Project(name=payload.name, description=payload.description, tenant_id=ctx.tenant_id)
-        session.add(project)
-        await session.flush()
-        await log_activity(
-            session,
-            project_id=project.id,
-            entity_type="project",
-            entity_id=project.id,
-            action_type="project.created",
-            metadata={"name": payload.name},
-        )
+    if ctx.workspace_id:
+        await _check_workspace_project_limit(session, ctx, ctx.workspace_id)
+    project = Project(
+        name=payload.name,
+        description=payload.description,
+        tenant_id=ctx.tenant_id,
+        workspace_id=ctx.workspace_id,
+    )
+    session.add(project)
+    await session.flush()
+    if payload.starter_blueprint_enabled:
+        try:
+            await run_project_genesis(
+                session,
+                tenant_id=ctx.tenant_id,
+                project_id=project.id,
+                blueprint_key=payload.starter_blueprint_key,
+                stack_preset_key=payload.starter_stack_preset_key,
+                deployment_profile=payload.starter_deployment_profile,
+                readiness_enforced=True,
+                created_by=getattr(ctx, "user_id", None),
+            )
+            await bootstrap_architecture_profile(
+                session,
+                tenant_id=ctx.tenant_id,
+                project_id=project.id,
+                refresh_repo_map_requested=False,
+                created_by=getattr(ctx, "user_id", None),
+            )
+            await derive_architecture_profile(
+                session,
+                tenant_id=ctx.tenant_id,
+                project_id=project.id,
+                refresh_repo_map_requested=False,
+                bootstrap_if_missing=True,
+                updated_by=getattr(ctx, "user_id", None),
+            )
+        except ValueError:
+            # Fallback-safe: project creation should still succeed even when starter provisioning fails.
+            pass
+    await log_activity(
+        session,
+        project_id=project.id,
+        entity_type="project",
+        entity_id=project.id,
+        action_type="project.created",
+        metadata={"name": payload.name},
+    )
+    await session.commit()
     await session.refresh(project)
     return _project_out(project)
 
@@ -477,7 +1585,7 @@ async def list_projects(
     ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)
 ) -> List[ProjectOut]:
     result = await session.execute(
-        select(Project).where(Project.tenant_id == ctx.tenant_id).order_by(Project.created_at.desc())
+        select(Project).where(*_project_scope_filters(ctx)).order_by(Project.created_at.desc())
     )
     projects = result.scalars().all()
     return [_project_out(p) for p in projects]
@@ -488,7 +1596,7 @@ async def list_projects(
 async def get_project(
     project_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)
 ) -> ProjectOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(select(Project).where(Project.id == project_id, *_project_scope_filters(ctx)))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return _project_out(project)
@@ -502,7 +1610,7 @@ async def create_vision_run(
     session: AsyncSession = Depends(get_session),
 ) -> VisionRunOut:
     project = await session.scalar(
-        select(Project).where(Project.id == payload.project_id, Project.tenant_id == ctx.tenant_id)
+        _project_scoped(session, ctx, payload.project_id)
     )
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -642,15 +1750,44 @@ async def create_vision_run(
 async def create_run(
     project_id: uuid.UUID,
     payload: RunCreate | None = None,
-    tenant_id: uuid.UUID = Depends(get_tenant_id),
+    ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     executor_name = (payload.executor if payload else "codex").lower()
+    architecture_summary = await summarize_architecture_profile(
+        session,
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+    )
+    architecture_ready = bool(architecture_summary.profile_exists and architecture_summary.derived_ready)
+    if executor_name != "dummy" and not architecture_ready:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Architecture profile must be derived before starting a run. "
+                "Open Project Overview -> Architecture Contract -> Manage, then run Bootstrap and Derive."
+            ),
+        )
+    if project.workspace_id:
+        await _check_workspace_token_limit(session, ctx, project.workspace_id)
     task_id = payload.task_id if payload else None
+    request_key = str(payload.request_key).strip() if payload and payload.request_key else ""
+    if request_key:
+        existing = await _find_run_by_request_key(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            request_key=request_key,
+        )
+        if existing is not None:
+            return _run_out(existing)
     try:
         run = await launch_run_for_project(
             session,
-            tenant_id=tenant_id,
+            tenant_id=ctx.tenant_id,
             project_id=project_id,
             executor_name=executor_name,
             task_id=task_id,
@@ -658,11 +1795,37 @@ async def create_run(
             run_kind=payload.run_kind if payload else None,
             schedule=True,
         )
+        await record_event(
+            session,
+            project_id=project_id,
+            run_id=run.id,
+            event_type="RUN_ACTION_ACCEPTED",
+            actor_type="USER",
+            actor_id=getattr(ctx, "user_id", None),
+            tenant_id=ctx.tenant_id,
+            payload={"action": "start"},
+        )
+        if request_key:
+            summary = dict(run.summary) if isinstance(run.summary, dict) else {}
+            summary["request_key"] = request_key
+            run.summary = summary
+            session.add(run)
+            await session.commit()
+            await session.refresh(run)
         return _run_out(run)
     except ValueError as exc:
         detail = str(exc)
         if detail in {"Project not found", "Task not found"}:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        if request_key:
+            existing = await _find_run_by_request_key(
+                session,
+                tenant_id=ctx.tenant_id,
+                project_id=project_id,
+                request_key=request_key,
+            )
+            if existing is not None:
+                return _run_out(existing)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
 
 
@@ -673,7 +1836,7 @@ async def list_project_stack_presets(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> List[StackPresetOut]:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     presets = await ensure_stack_presets(session, tenant_id=ctx.tenant_id, created_by=getattr(ctx, "user_id", None))
@@ -688,7 +1851,7 @@ async def fetch_project_blueprint(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectBlueprintOut | None:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     blueprint = await get_project_blueprint(session, tenant_id=ctx.tenant_id, project_id=project_id)
@@ -704,7 +1867,7 @@ async def fetch_latest_project_genesis_run(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectGenesisRunOut | None:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     genesis_run = await get_latest_genesis_run(session, tenant_id=ctx.tenant_id, project_id=project_id)
@@ -721,7 +1884,7 @@ async def create_project_blueprint(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectGenesisLaunchOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     try:
@@ -754,7 +1917,7 @@ async def list_runs(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> List[RunOut]:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     result = await session.execute(
@@ -793,7 +1956,7 @@ async def get_run_memory(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RunMemoryResponse:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     try:
@@ -863,7 +2026,7 @@ async def compare_runs_endpoint(
 @router.get("/runs/{run_id}", response_model=RunOut)
 @public_router.get("/runs/{run_id}", response_model=RunOut)
 async def get_run(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)) -> RunOut:
-    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return _run_out(run)
@@ -909,7 +2072,7 @@ async def connect_project_repo(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectRepositoryOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     try:
@@ -959,7 +2122,7 @@ async def preflight_project_repo(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectRepositoryPreflightOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
@@ -1041,12 +2204,478 @@ async def get_foundation_readiness(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> FoundationReadinessOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return FoundationReadinessOut(
         **await build_foundation_readiness(session, tenant_id=ctx.tenant_id, project_id=project_id)
     )
+
+
+@router.get("/projects/{project_id}/environments", response_model=ProjectEnvironmentCenterOut)
+@public_router.get("/projects/{project_id}/environments", response_model=ProjectEnvironmentCenterOut)
+async def get_project_environment_center(
+    project_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectEnvironmentCenterOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    var_rows = (
+        await session.execute(
+            select(ProjectEnvironmentVariable).where(
+                ProjectEnvironmentVariable.tenant_id == ctx.tenant_id,
+                ProjectEnvironmentVariable.project_id == project_id,
+            )
+        )
+    ).scalars().all()
+    validation_rows = (
+        await session.execute(
+            select(EnvironmentValidationResult).where(
+                EnvironmentValidationResult.tenant_id == ctx.tenant_id,
+                EnvironmentValidationResult.project_id == project_id,
+            )
+        )
+    ).scalars().all()
+    sync_rows = (
+        await session.execute(
+            select(EnvironmentSyncStatus).where(
+                EnvironmentSyncStatus.tenant_id == ctx.tenant_id,
+                EnvironmentSyncStatus.project_id == project_id,
+            )
+        )
+    ).scalars().all()
+
+    envs = ("PREVIEW", "STAGING", "PRODUCTION")
+    profiles: list[ProjectEnvironmentProfileOut] = []
+    for env in envs:
+        env_vars = [row for row in var_rows if str(row.environment).upper() == env]
+        configured = sum(1 for row in env_vars if (row.vault_ref and row.vault_ref.strip()) or (row.plain_value and row.plain_value.strip()))
+        validations = [row for row in validation_rows if str(row.environment).upper() == env]
+        validation_passed = sum(1 for row in validations if str(row.status).lower() == "pass")
+        syncs = [row for row in sync_rows if str(row.environment).upper() == env]
+        sync_healthy = sum(1 for row in syncs if str(row.status).lower() in {"healthy", "synced", "pass"} and not bool(row.drift_detected))
+        profiles.append(
+            ProjectEnvironmentProfileOut(
+                environment=env,
+                variables_configured=configured,
+                variables_total=len(env_vars),
+                validation_passed=validation_passed,
+                validation_total=len(validations),
+                sync_healthy=sync_healthy,
+                sync_total=len(syncs),
+            )
+        )
+    return ProjectEnvironmentCenterOut(project_id=project_id, workspace_id=project.workspace_id, environments=profiles)
+
+
+@router.get("/projects/{project_id}/deployment-readiness", response_model=DeploymentReadinessContractOut)
+@public_router.get("/projects/{project_id}/deployment-readiness", response_model=DeploymentReadinessContractOut)
+async def get_project_deployment_readiness(
+    project_id: uuid.UUID,
+    environment: str | None = Query(default=None),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> DeploymentReadinessContractOut:
+    try:
+        payload = await compute_deployment_readiness(
+            session=session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            environment=environment,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return DeploymentReadinessContractOut.model_validate(payload)
+
+
+@router.get("/projects/{project_id}/environments/{environment}/variables", response_model=list[ProjectEnvironmentVariableOut])
+@public_router.get("/projects/{project_id}/environments/{environment}/variables", response_model=list[ProjectEnvironmentVariableOut])
+async def list_project_environment_variables(
+    project_id: uuid.UUID,
+    environment: str,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProjectEnvironmentVariableOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = environment.strip().upper()
+    rows = (
+        await session.execute(
+            select(ProjectEnvironmentVariable).where(
+                ProjectEnvironmentVariable.tenant_id == ctx.tenant_id,
+                ProjectEnvironmentVariable.project_id == project_id,
+                ProjectEnvironmentVariable.environment == env,
+            ).order_by(ProjectEnvironmentVariable.var_key.asc())
+        )
+    ).scalars().all()
+    return [_project_env_var_out(row) for row in rows]
+
+
+@router.get("/projects/{project_id}/environment-templates", response_model=list[EnvironmentTemplateOut])
+@public_router.get("/projects/{project_id}/environment-templates", response_model=list[EnvironmentTemplateOut])
+async def list_project_environment_templates(
+    project_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[EnvironmentTemplateOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    templates: list[EnvironmentTemplateOut] = []
+    for key, data in ENVIRONMENT_TEMPLATES.items():
+        templates.append(
+            EnvironmentTemplateOut(
+                key=key,
+                name=data["name"],
+                description=data["description"],
+                deployment_targets=list(data.get("deployment_targets") or []),
+                provider_mappings=dict(data.get("provider_mappings") or {}),
+                variables=[EnvironmentTemplateVarOut(**row) for row in data.get("variables", [])],
+            )
+        )
+    return templates
+
+
+@router.post("/projects/{project_id}/environment-templates/{template_key}/apply", response_model=list[ProjectEnvironmentVariableOut])
+@public_router.post("/projects/{project_id}/environment-templates/{template_key}/apply", response_model=list[ProjectEnvironmentVariableOut])
+async def apply_project_environment_template(
+    project_id: uuid.UUID,
+    template_key: str,
+    payload: EnvironmentTemplateApplyRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProjectEnvironmentVariableOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    normalized_key = template_key.strip().lower()
+    template = ENVIRONMENT_TEMPLATES.get(normalized_key)
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Environment template not found")
+    env = (payload.environment or "").strip().upper()
+    if env not in {"PREVIEW", "STAGING", "PRODUCTION"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="environment must be PREVIEW/STAGING/PRODUCTION")
+
+    created_or_updated: list[ProjectEnvironmentVariable] = []
+    for item in template.get("variables", []):
+        if not payload.include_optional and not bool(item.get("required")):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        row = await session.scalar(
+            select(ProjectEnvironmentVariable).where(
+                ProjectEnvironmentVariable.tenant_id == ctx.tenant_id,
+                ProjectEnvironmentVariable.project_id == project_id,
+                ProjectEnvironmentVariable.environment == env,
+                ProjectEnvironmentVariable.var_key == key,
+            )
+        )
+        if row is None:
+            row = ProjectEnvironmentVariable(
+                tenant_id=ctx.tenant_id,
+                workspace_id=project.workspace_id or ctx.workspace_id,
+                project_id=project_id,
+                environment=env,
+                var_key=key,
+            )
+        row.value_kind = "secret"
+        if not row.vault_ref:
+            row.vault_ref = f"workspace/{project.workspace_id or ctx.workspace_id}/project/{project_id}/{env}/{key}".lower()
+        row.required = bool(item.get("required"))
+        row.source = "template"
+        row.validation_regex = item.get("validation_regex")
+        row.updated_by = ctx.user_id
+        session.add(row)
+        created_or_updated.append(row)
+
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            target_workspace_id=project.workspace_id,
+            action="project_env.template_apply",
+            extra_metadata={
+                "project_id": str(project_id),
+                "environment": env,
+                "template_key": normalized_key,
+                "include_optional": bool(payload.include_optional),
+                "variable_count": len(created_or_updated),
+            },
+        )
+    )
+    await session.commit()
+    for row in created_or_updated:
+        await session.refresh(row)
+    return [_project_env_var_out(row) for row in created_or_updated]
+
+
+@router.put("/projects/{project_id}/environments/{environment}/variables/{var_key}", response_model=ProjectEnvironmentVariableOut)
+@public_router.put("/projects/{project_id}/environments/{environment}/variables/{var_key}", response_model=ProjectEnvironmentVariableOut)
+async def upsert_project_environment_variable(
+    project_id: uuid.UUID,
+    environment: str,
+    var_key: str,
+    payload: ProjectEnvironmentVariableUpsertRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectEnvironmentVariableOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = environment.strip().upper()
+    key = var_key.strip()
+    if not env or not key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="environment and var_key are required")
+    value_kind = (payload.value_kind or "secret").strip().lower()
+    if value_kind not in {"secret", "plain"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="value_kind must be 'secret' or 'plain'")
+    if value_kind == "secret" and not ((payload.vault_ref or "").strip() or (payload.plain_value or "").strip()):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="secret variables require vault_ref or plain_value")
+    row = await session.scalar(
+        select(ProjectEnvironmentVariable).where(
+            ProjectEnvironmentVariable.tenant_id == ctx.tenant_id,
+            ProjectEnvironmentVariable.project_id == project_id,
+            ProjectEnvironmentVariable.environment == env,
+            ProjectEnvironmentVariable.var_key == key,
+        )
+    )
+    if row is None:
+        row = ProjectEnvironmentVariable(
+            tenant_id=ctx.tenant_id,
+            workspace_id=project.workspace_id or ctx.workspace_id,
+            project_id=project_id,
+            environment=env,
+            var_key=key,
+        )
+    row.value_kind = value_kind
+    inferred_vault_ref = f"workspace/{project.workspace_id or ctx.workspace_id}/project/{project_id}/{env}/{key}".lower()
+    row.vault_ref = (payload.vault_ref or "").strip() or (inferred_vault_ref if value_kind == "secret" else None)
+    if value_kind == "secret":
+        if (payload.plain_value or "").strip():
+            store_vault_secret(row.vault_ref or inferred_vault_ref, payload.plain_value or "")
+        row.plain_value = None
+    else:
+        row.plain_value = payload.plain_value
+    row.required = bool(payload.required)
+    row.source = (payload.source or "").strip() or None
+    row.validation_regex = (payload.validation_regex or "").strip() or None
+    row.updated_by = ctx.user_id
+    session.add(row)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            target_workspace_id=project.workspace_id,
+            action="project_env_var.upsert",
+            extra_metadata={
+                "project_id": str(project_id),
+                "environment": env,
+                "var_key": key,
+                "value_kind": value_kind,
+                "has_vault_ref": bool(row.vault_ref),
+                "has_plain_value": bool((row.plain_value or "").strip()),
+            },
+        )
+    )
+    await session.commit()
+    await session.refresh(row)
+    return _project_env_var_out(row)
+
+
+@router.post("/projects/{project_id}/environments/{environment}/variables/{var_key}/secret", response_model=ProjectEnvironmentVariableOut)
+@public_router.post("/projects/{project_id}/environments/{environment}/variables/{var_key}/secret", response_model=ProjectEnvironmentVariableOut)
+async def write_project_environment_variable_secret(
+    project_id: uuid.UUID,
+    environment: str,
+    var_key: str,
+    payload: EnvironmentSecretWriteRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectEnvironmentVariableOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = environment.strip().upper()
+    key = var_key.strip()
+    row = await session.scalar(
+        select(ProjectEnvironmentVariable).where(
+            ProjectEnvironmentVariable.tenant_id == ctx.tenant_id,
+            ProjectEnvironmentVariable.project_id == project_id,
+            ProjectEnvironmentVariable.environment == env,
+            ProjectEnvironmentVariable.var_key == key,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Environment variable not found")
+    if row.value_kind != "secret":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Secret write is only valid for secret variables")
+    if not row.vault_ref:
+        row.vault_ref = f"workspace/{project.workspace_id or ctx.workspace_id}/project/{project_id}/{env}/{key}".lower()
+    store_vault_secret(row.vault_ref, payload.value)
+    row.plain_value = None
+    row.updated_by = ctx.user_id
+    session.add(row)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            target_workspace_id=project.workspace_id,
+            action="project_env_var.secret_write",
+            extra_metadata={"project_id": str(project_id), "environment": env, "var_key": key, "vault_ref": row.vault_ref},
+        )
+    )
+    await session.commit()
+    await session.refresh(row)
+    return _project_env_var_out(row)
+
+
+@router.post("/projects/{project_id}/environments/{environment}/validate", response_model=list[EnvironmentValidationResultOut])
+@public_router.post("/projects/{project_id}/environments/{environment}/validate", response_model=list[EnvironmentValidationResultOut])
+async def validate_project_environment(
+    project_id: uuid.UUID,
+    environment: str,
+    payload: EnvironmentValidateRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[EnvironmentValidationResultOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = environment.strip().upper()
+    rows = (
+        await session.execute(
+            select(ProjectEnvironmentVariable).where(
+                ProjectEnvironmentVariable.tenant_id == ctx.tenant_id,
+                ProjectEnvironmentVariable.project_id == project_id,
+                ProjectEnvironmentVariable.environment == env,
+            )
+        )
+    ).scalars().all()
+    check_keys = payload.checks or [row.var_key for row in rows if row.required]
+    results: list[EnvironmentValidationResult] = []
+    for check_key in check_keys:
+        ref = str(check_key or "").strip()
+        if not ref:
+            continue
+        matched = next((row for row in rows if row.var_key == ref), None)
+        has_value = bool(matched and (((matched.vault_ref or "").strip()) or ((matched.plain_value or "").strip())))
+        status_value = "pass" if has_value else "fail"
+        result = EnvironmentValidationResult(
+            tenant_id=ctx.tenant_id,
+            workspace_id=project.workspace_id or ctx.workspace_id,
+            project_id=project_id,
+            environment=env,
+            check_key=ref,
+            status=status_value,
+            message=None if has_value else "Missing value for required environment variable.",
+            evidence={"value_kind": matched.value_kind if matched else None},
+        )
+        session.add(result)
+        results.append(result)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            target_workspace_id=project.workspace_id,
+            action="project_env.validate",
+            reason=(payload.reason or "").strip() or None,
+            extra_metadata={"project_id": str(project_id), "environment": env, "checks": check_keys},
+        )
+    )
+    await session.commit()
+    for result in results:
+        await session.refresh(result)
+    return [EnvironmentValidationResultOut.model_validate(result) for result in results]
+
+
+@router.post("/projects/{project_id}/environments/{environment}/sync/{provider}", response_model=EnvironmentSyncStatusOut)
+@public_router.post("/projects/{project_id}/environments/{environment}/sync/{provider}", response_model=EnvironmentSyncStatusOut)
+async def sync_project_environment_to_provider(
+    project_id: uuid.UUID,
+    environment: str,
+    provider: str,
+    payload: EnvironmentSyncRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> EnvironmentSyncStatusOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = environment.strip().upper()
+    normalized_provider = provider.strip().lower()
+    if normalized_provider not in {"vercel", "render", "railway"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported provider")
+    connector = await session.scalar(
+        select(DeploymentProviderConnector).where(
+            DeploymentProviderConnector.tenant_id == ctx.tenant_id,
+            DeploymentProviderConnector.provider == normalized_provider,
+        )
+    )
+    token = resolve_vault_secret(connector.vault_ref) if connector and connector.vault_ref else None
+    if connector is None:
+        sync_status = "failed"
+        sync_message = "No provider connector configured for this workspace/tenant."
+    elif not token:
+        sync_status = "failed"
+        sync_message = "Provider connector secret could not be resolved from vault."
+    else:
+        sync_status = "synced"
+        sync_message = "Sync accepted. Provider push will be orchestrated by deployment runtime."
+
+    row = await session.scalar(
+        select(EnvironmentSyncStatus).where(
+            EnvironmentSyncStatus.tenant_id == ctx.tenant_id,
+            EnvironmentSyncStatus.project_id == project_id,
+            EnvironmentSyncStatus.environment == env,
+            EnvironmentSyncStatus.provider == normalized_provider,
+        )
+    )
+    if row is None:
+        row = EnvironmentSyncStatus(
+            tenant_id=ctx.tenant_id,
+            workspace_id=project.workspace_id or ctx.workspace_id,
+            project_id=project_id,
+            environment=env,
+            provider=normalized_provider,
+        )
+    row.status = sync_status
+    row.message = sync_message
+    row.drift_detected = sync_status != "synced"
+    row.last_synced_at = datetime.now(timezone.utc)
+    row.details = {
+        "requested_by": ctx.user_id,
+        "connector_id": str(connector.id) if connector else None,
+        "connector_vault_ref_present": bool(connector and connector.vault_ref),
+        "provider_token_resolved": bool(token),
+    }
+    session.add(row)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            target_workspace_id=project.workspace_id,
+            action="project_env.sync",
+            reason=(payload.reason or "").strip() or None,
+            extra_metadata={"project_id": str(project_id), "environment": env, "provider": normalized_provider},
+        )
+    )
+    await session.commit()
+    await session.refresh(row)
+    return EnvironmentSyncStatusOut.model_validate(row)
+
+
+@router.get("/projects/{project_id}/environment-checklists", response_model=EnvironmentChecklistSummaryOut)
+@public_router.get("/projects/{project_id}/environment-checklists", response_model=EnvironmentChecklistSummaryOut)
+async def get_project_environment_checklists(
+    project_id: uuid.UUID,
+    reseed: bool = Query(default=True),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> EnvironmentChecklistSummaryOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return await _load_environment_checklists(session, ctx=ctx, project=project, reseed=reseed)
 
 
 @router.get("/projects/{project_id}/governance-kpis", response_model=GovernanceKpisOut)
@@ -1056,7 +2685,7 @@ async def get_governance_kpis(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> GovernanceKpisOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     payload = await build_governance_kpis(session, tenant_id=ctx.tenant_id, project_id=project_id)
@@ -1070,7 +2699,7 @@ async def get_run_impact_score(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RunImpactScoreOut:
-    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
@@ -1104,7 +2733,7 @@ async def save_project_preview_profile(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectPreviewProfileOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     profile = await upsert_project_preview_profile(
@@ -1146,7 +2775,7 @@ async def fetch_project_preview_profile(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectPreviewProfileOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     profile = await get_project_preview_profile(session, tenant_id=ctx.tenant_id, project_id=project_id)
@@ -1174,6 +2803,7 @@ class RunForkRequest(BaseModel):
     branch_name: str | None = None
     start_now: bool = True
     summary_overrides: dict = Field(default_factory=dict)
+    request_key: str | None = None
 
 
 class RunBudgetExtendRequest(BaseModel):
@@ -1260,15 +2890,30 @@ async def fork_existing_run(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
-    source_run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    source_run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not source_run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    request_key = str(payload.request_key or "").strip()
+    if request_key:
+        existing = await _find_run_by_request_key(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=source_run.project_id,
+            request_key=request_key,
+            source_run_id=source_run.id,
+        )
+        if existing is not None:
+            return _run_out(existing)
+    summary_overrides = dict(payload.summary_overrides or {})
+    if request_key:
+        summary_overrides["request_key"] = request_key
+        summary_overrides["fork_source_run_id"] = str(source_run.id)
     forked = await fork_run(
         session,
         source_run=source_run,
         executor=payload.executor,
         branch_name=payload.branch_name,
-        summary_overrides=payload.summary_overrides,
+        summary_overrides=summary_overrides,
         start_now=payload.start_now,
     )
     return _run_out(forked)
@@ -1282,9 +2927,19 @@ async def resume_existing_run(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
-    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_ACTION_REQUESTED",
+        actor_type="USER",
+        actor_id=getattr(ctx, "user_id", None),
+        tenant_id=ctx.tenant_id,
+        payload={"action": "resume"},
+    )
     try:
         await prepare_run_for_resume(
             session,
@@ -1326,6 +2981,16 @@ async def resume_existing_run(
                 actor_id=getattr(ctx, "user_id", None),
                 executor_name=run.executor,
             )
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_RESUMED",
+        actor_type="USER",
+        actor_id=getattr(ctx, "user_id", None),
+        tenant_id=ctx.tenant_id,
+        payload={"action": "resume", "start_now": bool(payload.start_now)},
+    )
 
     return _run_out(run)
 
@@ -1341,7 +3006,7 @@ async def extend_run_budget(
     if payload.additional_tokens <= 0 and payload.additional_cost_cents <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide a positive budget increase.")
     run = await session.scalar(
-        select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id).with_for_update(skip_locked=True)
+        _run_scoped(session, ctx, run_id).with_for_update(skip_locked=True)
     )
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
@@ -1441,7 +3106,7 @@ async def retry_run_branch_push(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RunOut:
-    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     if run.status not in {"COMPLETED", "FAILED"}:
@@ -1506,7 +3171,7 @@ async def unblock_run(
 ) -> RunUnblockResponse:
     from app.runtime.leases import reclaim_expired_work_items, reclaim_orphaned_work_items
 
-    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     if run.status not in {"RUNNING", "QUEUED"}:
@@ -1582,7 +3247,7 @@ async def discard_run_workspace(
     session: AsyncSession = Depends(get_session),
 ) -> RunDiscardResponse:
     run = await session.scalar(
-        select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id).with_for_update(skip_locked=True)
+        _run_scoped(session, ctx, run_id).with_for_update(skip_locked=True)
     )
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
@@ -1672,9 +3337,51 @@ async def create_run_pull_request(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> PullRequestOut:
-    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_ACTION_REQUESTED",
+        actor_type="USER",
+        actor_id=getattr(ctx, "user_id", None),
+        tenant_id=ctx.tenant_id,
+        payload={"action": "create_pr"},
+    )
+    # Idempotency guard: if this run already has a created PR for the requested/current branch,
+    # return that PR payload instead of attempting a duplicate create.
+    existing_summary = run.summary or {}
+    existing_pr_url = str(existing_summary.get("pull_request_url") or "").strip()
+    existing_branch = str(existing_summary.get("pull_request_branch") or run.branch_name or "").strip()
+    requested_branch = str(payload.branch_name or "").strip()
+    if existing_pr_url and (not requested_branch or requested_branch == existing_branch):
+        existing_pr_artifact = await session.scalar(
+            select(Artifact)
+            .where(
+                Artifact.run_id == run.id,
+                Artifact.tenant_id == run.tenant_id,
+                Artifact.project_id == run.project_id,
+                Artifact.type == "pull_request",
+            )
+            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+        )
+        if existing_pr_artifact is not None:
+            metadata = existing_pr_artifact.extra_metadata or {}
+            return PullRequestOut(
+                run_id=run.id,
+                artifact_id=existing_pr_artifact.id,
+                pull_request_url=existing_pr_url,
+                pull_request_number=existing_summary.get("pull_request_number") or metadata.get("number"),
+                branch_name=existing_branch or str(metadata.get("head") or requested_branch or ""),
+                base_branch=str(metadata.get("base") or "main"),
+                commit_sha=str(
+                    existing_summary.get("pull_request_commit_sha")
+                    or metadata.get("commit_sha")
+                    or ""
+                ),
+            )
     artifact = None
     if payload.artifact_id:
         artifact = await session.scalar(
@@ -1694,6 +3401,16 @@ async def create_run_pull_request(
             title=payload.title,
             body=payload.body,
             branch_name=payload.branch_name,
+        )
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            event_type="RUN_ACTION_ACCEPTED",
+            actor_type="USER",
+            actor_id=getattr(ctx, "user_id", None),
+            tenant_id=ctx.tenant_id,
+            payload={"action": "create_pr"},
         )
         return PullRequestOut.model_validate(result)
     except ValueError as exc:
@@ -1798,10 +3515,1630 @@ async def delete_run_preview(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _provider_bootstrap_links(provider: str, repository_url: str | None, project_name: str) -> tuple[str | None, str | None]:
+    normalized = provider.strip().lower()
+    if normalized == "vercel":
+        if repository_url:
+            link = f"https://vercel.com/new/clone?repository-url={quote_plus(repository_url)}"
+            return link, "https://vercel.com/dashboard"
+        return "https://vercel.com/new", "https://vercel.com/dashboard"
+    if normalized == "render":
+        return "https://dashboard.render.com/select-repo", "https://dashboard.render.com"
+    if normalized == "railway":
+        return "https://railway.com/new", "https://railway.com/project"
+    if normalized == "fly":
+        return "https://fly.io/dashboard", "https://fly.io/dashboard"
+    slug = quote_plus(project_name.strip().lower().replace(" ", "-"))
+    return f"https://{normalized}.com/new?project={slug}", None
+
+
+async def _enforce_deployment_readiness_contract(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    environment: str,
+) -> None:
+    readiness = await compute_deployment_readiness(
+        session=session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        environment=environment,
+    )
+    env = str(readiness.get("environment") or environment).upper()
+    safe_to_preview = bool(readiness.get("safe_to_preview"))
+    safe_to_production = bool(readiness.get("safe_to_production"))
+    blockers = [str(item) for item in (readiness.get("blockers") or []) if str(item).strip()]
+    if env == "PRODUCTION" and not safe_to_production:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "DEPLOYMENT_POLICY_BLOCKED",
+                "message": "Production deployment blocked by readiness policy",
+                "blockers": blockers[:8],
+                "allowed_actions": [
+                    "open_environment_center",
+                    "validate_environment",
+                    "sync_environment",
+                    "deploy_preview" if safe_to_preview else "fix_readiness_blockers",
+                ],
+            },
+        )
+    if env != "PRODUCTION" and not safe_to_preview:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "DEPLOYMENT_POLICY_BLOCKED",
+                "message": "Preview/staging deployment blocked by readiness policy",
+                "blockers": blockers[:8],
+                "allowed_actions": [
+                    "open_environment_center",
+                    "validate_environment",
+                    "sync_environment",
+                    "fix_readiness_blockers",
+                ],
+            },
+        )
+
+
+async def _enforce_rollback_safety_policy(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    source: ProjectDeployment,
+) -> None:
+    blockers: list[str] = []
+    rollback_target = await session.scalar(
+        select(ProjectDeployment)
+        .where(
+            ProjectDeployment.tenant_id == tenant_id,
+            ProjectDeployment.project_id == source.project_id,
+            ProjectDeployment.provider == source.provider,
+            ProjectDeployment.environment == source.environment,
+            ProjectDeployment.id != source.id,
+            ProjectDeployment.status == "READY",
+            ProjectDeployment.created_at <= source.created_at,
+        )
+        .order_by(ProjectDeployment.created_at.desc(), ProjectDeployment.id.desc())
+    )
+    if rollback_target is None:
+        blockers.append("No previous healthy deployment found for rollback target")
+    elif not (rollback_target.deployment_url or "").strip():
+        blockers.append("Rollback target has no deployment URL")
+
+    connector = await session.scalar(
+        select(DeploymentProviderConnector).where(
+            DeploymentProviderConnector.tenant_id == tenant_id,
+            DeploymentProviderConnector.provider == source.provider,
+        )
+    )
+    if connector is None:
+        blockers.append(f"{source.provider} connector missing")
+    elif not (connector.vault_ref or "").strip() or not resolve_vault_secret(connector.vault_ref):
+        blockers.append(f"{source.provider} connector secret invalid or unavailable")
+
+    if blockers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "DEPLOYMENT_POLICY_BLOCKED",
+                "message": "Rollback blocked by safety policy",
+                "blockers": blockers,
+                "allowed_actions": [
+                    "open_deployment_governance",
+                    "configure_provider_connector",
+                    "inspect_deployment_history",
+                ],
+            },
+        )
+
+
+@router.post("/projects/{project_id}/deployments", response_model=ProjectDeploymentOut)
+@public_router.post("/projects/{project_id}/deployments", response_model=ProjectDeploymentOut)
+async def create_project_deployment(
+    project_id: uuid.UUID,
+    payload: ProjectDeploymentCreateRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectDeploymentOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if project.workspace_id:
+        await _check_workspace_deployment_limit(session, ctx, project.workspace_id)
+
+    request_key = (payload.request_key or "").strip() or None
+    if request_key:
+        existing = await session.scalar(
+            select(ProjectDeployment).where(
+                ProjectDeployment.tenant_id == ctx.tenant_id,
+                ProjectDeployment.project_id == project_id,
+                ProjectDeployment.request_key == request_key,
+            )
+        )
+        if existing is not None:
+            return ProjectDeploymentOut.model_validate(existing)
+
+    run_id = payload.run_id
+    run: Run | None = None
+    if run_id:
+        run = await session.scalar(
+            select(Run).where(
+                Run.id == run_id,
+                Run.project_id == project_id,
+                Run.tenant_id == ctx.tenant_id,
+            )
+        )
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    environment = (payload.environment or "PREVIEW").strip().upper()
+    if environment not in {"PREVIEW", "STAGING", "PRODUCTION"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="environment must be PREVIEW, STAGING, or PRODUCTION")
+    await _enforce_deployment_readiness_contract(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+        environment=environment,
+    )
+    provider = (payload.provider or "vercel").strip().lower()
+    deployment_strategy = (payload.deployment_strategy or "static_frontend").strip().lower()
+    target = (payload.target or "user_app").strip().lower()
+    repo = (payload.repository_url or "").strip() or None
+    repo_full_name = (payload.repository_full_name or "").strip() or None
+    branch_name = (payload.branch_name or run.branch_name if run else None)
+    profile = await session.scalar(
+        select(DeploymentProfile).where(
+            DeploymentProfile.tenant_id == ctx.tenant_id,
+            DeploymentProfile.project_id == project_id,
+            DeploymentProfile.environment == environment,
+        )
+    )
+    if profile is not None:
+        provider = profile.provider or provider
+        deployment_strategy = profile.deployment_strategy or deployment_strategy
+
+    deployment_url, dashboard_url = _provider_bootstrap_links(provider, repo, project.name)
+    requested_by = (payload.created_by or ctx.user_id or "ui-user").strip()
+    profile_env_schema = profile.env_schema if profile and isinstance(profile.env_schema, dict) else {}
+    connector: DeploymentProviderConnector | None = None
+    if profile and profile.provider_connector_id:
+        connector = await session.scalar(
+            select(DeploymentProviderConnector).where(
+                DeploymentProviderConnector.id == profile.provider_connector_id,
+                DeploymentProviderConnector.tenant_id == ctx.tenant_id,
+            )
+        )
+    integration_mode = (payload.integration_mode or str(profile_env_schema.get("integration_mode") or "bootstrap_link")).strip().lower()
+    bootstrap_message = (
+        "Provider API managed deployment configured."
+        if integration_mode == "managed_api"
+        else "Provider API handoff pending. Open deployment_url to complete one-click import."
+    )
+    deployment = ProjectDeployment(
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+        run_id=run_id,
+        provider=provider,
+        environment=environment,
+        deployment_strategy=deployment_strategy,
+        target=target,
+        status="QUEUED",
+        request_key=request_key,
+        deployment_url=deployment_url,
+        dashboard_url=dashboard_url,
+        created_by=requested_by,
+        extra_metadata={
+            "repository_url": repo,
+            "repository_full_name": repo_full_name,
+            "branch_name": branch_name,
+            "env_keys": sorted((payload.env_overrides or {}).keys()),
+            "integration_mode": integration_mode,
+            "environment": environment,
+            "deployment_strategy": deployment_strategy,
+            "healthcheck_path": profile.healthcheck_path if profile else "/",
+            "vercel_deploy_hook_url": profile_env_schema.get("vercel_deploy_hook_url"),
+            "render_deploy_hook_url": profile_env_schema.get("render_deploy_hook_url"),
+            "provider_connector_id": str(connector.id) if connector else None,
+            "provider_connector_vault_ref": connector.vault_ref if connector else None,
+            "message": bootstrap_message,
+        },
+    )
+    session.add(deployment)
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type="project_deployment",
+        entity_id=deployment.id,
+        action_type="deployment.queued",
+        metadata={
+            "provider": provider,
+            "target": target,
+            "run_id": str(run_id) if run_id else None,
+            "request_key": request_key,
+        },
+    )
+    await session.commit()
+    await session.refresh(deployment)
+    return ProjectDeploymentOut.model_validate(deployment)
+
+
+@router.get("/projects/{project_id}/deployments", response_model=List[ProjectDeploymentOut])
+@public_router.get("/projects/{project_id}/deployments", response_model=List[ProjectDeploymentOut])
+async def list_project_deployments(
+    project_id: uuid.UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[ProjectDeploymentOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    result = await session.execute(
+        select(ProjectDeployment)
+        .where(ProjectDeployment.tenant_id == ctx.tenant_id, ProjectDeployment.project_id == project_id)
+        .order_by(ProjectDeployment.created_at.desc(), ProjectDeployment.id.desc())
+        .limit(limit)
+    )
+    return [ProjectDeploymentOut.model_validate(item) for item in result.scalars().all()]
+
+
+@router.get("/deployments/{deployment_id}", response_model=ProjectDeploymentOut)
+@public_router.get("/deployments/{deployment_id}", response_model=ProjectDeploymentOut)
+async def get_project_deployment(
+    deployment_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectDeploymentOut:
+    deployment = await session.scalar(
+        select(ProjectDeployment).where(
+            ProjectDeployment.id == deployment_id,
+            ProjectDeployment.tenant_id == ctx.tenant_id,
+        )
+    )
+    if deployment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    return ProjectDeploymentOut.model_validate(deployment)
+
+
+@router.post("/deployments/{deployment_id}/retry", response_model=ProjectDeploymentOut)
+@public_router.post("/deployments/{deployment_id}/retry", response_model=ProjectDeploymentOut)
+async def retry_project_deployment(
+    deployment_id: uuid.UUID,
+    payload: ProjectDeploymentRetryRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectDeploymentOut:
+    deployment = await session.scalar(
+        select(ProjectDeployment).where(
+            ProjectDeployment.id == deployment_id,
+            ProjectDeployment.tenant_id == ctx.tenant_id,
+        )
+    )
+    if deployment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    retryable = {"FAILED_VALIDATION", "FAILED_BUILD", "FAILED_DEPLOY", "FAILED_HEALTH_CHECK", "MANUAL_ACTION_REQUIRED"}
+    if deployment.status not in retryable and not payload.force:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Deployment in status {deployment.status} is not retryable without force.",
+        )
+    await _enforce_deployment_readiness_contract(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        project_id=deployment.project_id,
+        environment=deployment.environment,
+    )
+    previous_status = deployment.status
+    deployment.status = "QUEUED"
+    deployment.error_message = None
+    metadata = dict(deployment.extra_metadata or {})
+    metadata["last_retry_at"] = datetime.now(timezone.utc).isoformat()
+    deployment.extra_metadata = metadata
+    await log_activity(
+        session,
+        project_id=deployment.project_id,
+        entity_type="project_deployment",
+        entity_id=deployment.id,
+        action_type="deployment.retried",
+        metadata={
+            "previous_status": previous_status,
+            "force": payload.force,
+        },
+    )
+    await session.commit()
+    await session.refresh(deployment)
+    return ProjectDeploymentOut.model_validate(deployment)
+
+
+@router.get("/deployments/{deployment_id}/events", response_model=List[DeploymentEventOut])
+@public_router.get("/deployments/{deployment_id}/events", response_model=List[DeploymentEventOut])
+async def list_project_deployment_events(
+    deployment_id: uuid.UUID,
+    limit: int = Query(default=60, ge=1, le=300),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[DeploymentEventOut]:
+    deployment = await session.scalar(
+        select(ProjectDeployment).where(
+            ProjectDeployment.id == deployment_id,
+            ProjectDeployment.tenant_id == ctx.tenant_id,
+        )
+    )
+    if deployment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    result = await session.execute(
+        select(ActivityLog)
+        .where(
+            ActivityLog.tenant_id == ctx.tenant_id,
+            ActivityLog.project_id == deployment.project_id,
+            ActivityLog.entity_type == "project_deployment",
+            ActivityLog.entity_id == deployment.id,
+        )
+        .order_by(ActivityLog.created_at.desc())
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+    return [
+        DeploymentEventOut(
+            id=row.id,
+            created_at=row.created_at,
+            action_type=row.action_type,
+            event_type=row.event_type,
+            actor=row.actor,
+            extra_metadata=row.extra_metadata,
+        )
+        for row in rows
+    ]
+
+
+@router.post("/deployments/{deployment_id}/rollback", response_model=ProjectDeploymentOut)
+@public_router.post("/deployments/{deployment_id}/rollback", response_model=ProjectDeploymentOut)
+async def rollback_project_deployment(
+    deployment_id: uuid.UUID,
+    payload: ProjectDeploymentRollbackRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectDeploymentOut:
+    source = await session.scalar(
+        select(ProjectDeployment).where(
+            ProjectDeployment.id == deployment_id,
+            ProjectDeployment.tenant_id == ctx.tenant_id,
+        )
+    )
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    if source.status != "READY":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only READY deployments can be rolled back")
+    await _enforce_rollback_safety_policy(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        source=source,
+    )
+    request_key = (payload.request_key or "").strip() or None
+    if request_key:
+        existing = await session.scalar(
+            select(ProjectDeployment).where(
+                ProjectDeployment.tenant_id == ctx.tenant_id,
+                ProjectDeployment.project_id == source.project_id,
+                ProjectDeployment.request_key == request_key,
+            )
+        )
+        if existing is not None:
+            return ProjectDeploymentOut.model_validate(existing)
+    rollback = ProjectDeployment(
+        tenant_id=source.tenant_id,
+        project_id=source.project_id,
+        run_id=source.run_id,
+        provider=source.provider,
+        environment=source.environment,
+        deployment_strategy=source.deployment_strategy,
+        target=source.target,
+        status="ROLLBACK_PENDING",
+        request_key=request_key,
+        rollback_source_deployment_id=source.id,
+        rollback_reason=(payload.reason or "").strip() or "manual rollback",
+        rollback_trigger=(payload.trigger or "manual").strip().lower(),
+        created_by=(payload.created_by or ctx.user_id or "ui-user"),
+        extra_metadata={
+            "integration_mode": "managed_api",
+            "provider_connector_id": (source.extra_metadata or {}).get("provider_connector_id"),
+            "provider_connector_vault_ref": (source.extra_metadata or {}).get("provider_connector_vault_ref"),
+            "repository_url": (source.extra_metadata or {}).get("repository_url"),
+            "repository_full_name": (source.extra_metadata or {}).get("repository_full_name"),
+            "branch_name": (source.extra_metadata or {}).get("branch_name"),
+            "render_service_id": (source.extra_metadata or {}).get("render_service_id"),
+            "rollback_of_deployment_id": str(source.id),
+        },
+    )
+    session.add(rollback)
+    await log_activity(
+        session,
+        project_id=source.project_id,
+        entity_type="project_deployment",
+        entity_id=rollback.id,
+        action_type="deployment.rollback_requested",
+        event_type="ROLLBACK_PENDING",
+        actor=ctx.user_id,
+        metadata={
+            "source_deployment_id": str(source.id),
+            "reason": rollback.rollback_reason,
+            "trigger": rollback.rollback_trigger,
+        },
+    )
+    await session.commit()
+    await session.refresh(rollback)
+    return ProjectDeploymentOut.model_validate(rollback)
+
+
+@router.post("/deployments/{deployment_id}/promote", response_model=ProjectDeploymentOut)
+@public_router.post("/deployments/{deployment_id}/promote", response_model=ProjectDeploymentOut)
+async def promote_project_deployment(
+    deployment_id: uuid.UUID,
+    payload: ProjectDeploymentPromoteRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectDeploymentOut:
+    source = await session.scalar(
+        select(ProjectDeployment).where(
+            ProjectDeployment.id == deployment_id,
+            ProjectDeployment.tenant_id == ctx.tenant_id,
+        )
+    )
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    if source.status != "READY":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only READY deployments can be promoted")
+    target_environment = (payload.target_environment or "").strip().upper()
+    if target_environment not in {"STAGING", "PRODUCTION"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_environment must be STAGING or PRODUCTION")
+    await _enforce_deployment_readiness_contract(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        project_id=source.project_id,
+        environment=target_environment,
+    )
+    request_key = (payload.request_key or "").strip() or None
+    if request_key:
+        existing = await session.scalar(
+            select(ProjectDeployment).where(
+                ProjectDeployment.tenant_id == ctx.tenant_id,
+                ProjectDeployment.project_id == source.project_id,
+                ProjectDeployment.request_key == request_key,
+            )
+        )
+        if existing is not None:
+            return ProjectDeploymentOut.model_validate(existing)
+    promoted = ProjectDeployment(
+        tenant_id=source.tenant_id,
+        project_id=source.project_id,
+        run_id=source.run_id,
+        provider=source.provider,
+        environment=target_environment,
+        promoted_from_environment=source.environment,
+        deployment_strategy=source.deployment_strategy,
+        target=source.target,
+        status="QUEUED",
+        request_key=request_key,
+        created_by=(payload.created_by or ctx.user_id or "ui-user"),
+        extra_metadata={
+            **dict(source.extra_metadata or {}),
+            "integration_mode": "managed_api",
+            "promotion_source_deployment_id": str(source.id),
+            "promotion_reason": (payload.reason or "").strip() or None,
+        },
+    )
+    session.add(promoted)
+    await log_activity(
+        session,
+        project_id=source.project_id,
+        entity_type="project_deployment",
+        entity_id=promoted.id,
+        action_type="deployment.promoted",
+        event_type="PROMOTION_QUEUED",
+        actor=ctx.user_id,
+        metadata={
+            "source_deployment_id": str(source.id),
+            "from_environment": source.environment,
+            "to_environment": target_environment,
+        },
+    )
+    await session.commit()
+    await session.refresh(promoted)
+    return ProjectDeploymentOut.model_validate(promoted)
+
+
+@router.post("/projects/{project_id}/deployments/preflight")
+@public_router.post("/projects/{project_id}/deployments/preflight")
+async def preflight_project_deployment(
+    project_id: uuid.UUID,
+    payload: ProjectDeploymentPreflightRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    errors: list[str] = []
+    warnings: list[str] = []
+    provider = (payload.provider or "").strip().lower()
+    if provider not in {"vercel", "render"}:
+        errors.append("Unsupported provider")
+    env_name = (payload.environment or "PREVIEW").strip().upper()
+    if env_name not in {"PREVIEW", "STAGING", "PRODUCTION"}:
+        errors.append("Invalid environment")
+    strategy = (payload.deployment_strategy or "static_frontend").strip().lower()
+    if strategy not in {"static_frontend", "fullstack_web", "api_service", "worker_service", "monorepo_split"}:
+        warnings.append("Unknown deployment strategy; default runtime assumptions may be weak.")
+    profile = await session.scalar(
+        select(DeploymentProfile).where(
+            DeploymentProfile.tenant_id == ctx.tenant_id,
+            DeploymentProfile.project_id == project_id,
+            DeploymentProfile.environment == env_name,
+        )
+    )
+    if profile is None:
+        errors.append("No deployment profile found for environment.")
+    else:
+        if not profile.provider_connector_id:
+            errors.append("Deployment profile missing provider connector.")
+        if not (profile.build_command or "").strip():
+            warnings.append("build_command missing in deployment profile.")
+        if not (profile.healthcheck_path or "").strip():
+            warnings.append("healthcheck_path missing in deployment profile.")
+    ok = not errors
+    return {
+        "ok": ok,
+        "errors": errors,
+        "warnings": warnings,
+        "provider": provider,
+        "environment": env_name,
+        "deployment_strategy": strategy,
+    }
+
+
+@router.get("/projects/{project_id}/deployments/intelligence", response_model=DeploymentIntelligenceOut)
+@public_router.get("/projects/{project_id}/deployments/intelligence", response_model=DeploymentIntelligenceOut)
+async def deployment_intelligence(
+    project_id: uuid.UUID,
+    limit: int = Query(default=80, ge=10, le=300),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> DeploymentIntelligenceOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    result = await session.execute(
+        select(ProjectDeployment)
+        .where(ProjectDeployment.tenant_id == ctx.tenant_id, ProjectDeployment.project_id == project_id)
+        .order_by(ProjectDeployment.created_at.desc())
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+    if not rows:
+        return DeploymentIntelligenceOut(project_id=project_id)
+
+    total = len(rows)
+    ready_count = sum(1 for row in rows if str(row.status).upper() == "READY")
+    avg_confidence = sum(float(row.deployment_confidence_score or 0.0) for row in rows) / total
+    success_rate = ready_count / total if total else 0.0
+
+    failures: dict[str, int] = {}
+    manual_reasons: list[str] = []
+    trend: list[dict] = []
+    for row in reversed(rows):
+        status = str(row.status or "").upper()
+        if "FAILED" in status or status == "MANUAL_ACTION_REQUIRED":
+            key = status
+            if row.error_message:
+                lowered = str(row.error_message).lower()
+                if "health" in lowered:
+                    key = "deploy_health_failed"
+                elif "missing" in lowered and "env" in lowered:
+                    key = "deploy_env_missing"
+                elif "provider" in lowered:
+                    key = "deploy_provider_unreachable"
+                elif "timeout" in lowered:
+                    key = "deploy_timeout"
+            failures[key] = failures.get(key, 0) + 1
+        if status == "MANUAL_ACTION_REQUIRED" and row.error_message:
+            manual_reasons.append(str(row.error_message))
+        trend.append({
+            "deployment_id": str(row.id),
+            "status": status,
+            "confidence": float(row.deployment_confidence_score or 0.0),
+            "created_at": row.created_at,
+        })
+
+    top_failure_clusters = [
+        {"cluster": key, "count": count}
+        for key, count in sorted(failures.items(), key=lambda item: item[1], reverse=True)[:5]
+    ]
+
+    return DeploymentIntelligenceOut(
+        project_id=project_id,
+        total_deployments=total,
+        success_rate=success_rate,
+        avg_confidence=avg_confidence,
+        top_failure_clusters=top_failure_clusters,
+        confidence_trend=trend[-30:],
+        recent_manual_degrade_reasons=manual_reasons[:5],
+    )
+
+
+@router.post("/projects/{project_id}/deployment-profile", response_model=DeploymentProfileOut)
+@public_router.post("/projects/{project_id}/deployment-profile", response_model=DeploymentProfileOut)
+async def upsert_deployment_profile(
+    project_id: uuid.UUID,
+    payload: DeploymentProfileUpsertRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> DeploymentProfileOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    environment = (payload.environment or "PREVIEW").strip().upper()
+    profile = await session.scalar(
+        select(DeploymentProfile).where(
+            DeploymentProfile.tenant_id == ctx.tenant_id,
+            DeploymentProfile.project_id == project_id,
+            DeploymentProfile.environment == environment,
+        )
+    )
+    if profile is None:
+        profile = DeploymentProfile(
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            environment=environment,
+            created_by=(payload.created_by or ctx.user_id or "ui-user"),
+        )
+        session.add(profile)
+    if payload.provider_connector_id:
+        connector = await session.scalar(
+            select(DeploymentProviderConnector).where(
+                DeploymentProviderConnector.id == payload.provider_connector_id,
+                DeploymentProviderConnector.tenant_id == ctx.tenant_id,
+            )
+        )
+        if connector is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment connector not found")
+    profile.provider = (payload.provider or profile.provider or "vercel").strip().lower()
+    profile.deployment_strategy = (payload.deployment_strategy or profile.deployment_strategy or "static_frontend").strip().lower()
+    profile.framework = payload.framework
+    profile.install_command = payload.install_command
+    profile.build_command = payload.build_command
+    profile.output_dir = payload.output_dir
+    profile.start_command = payload.start_command
+    profile.healthcheck_path = payload.healthcheck_path
+    profile.region = payload.region
+    profile.runtime_version = payload.runtime_version
+    profile.env_schema = payload.env_schema
+    profile.provider_connector_id = payload.provider_connector_id
+    await session.commit()
+    await session.refresh(profile)
+    return DeploymentProfileOut.model_validate(profile)
+
+
+@router.get("/projects/{project_id}/deployment-profile", response_model=DeploymentProfileOut)
+@public_router.get("/projects/{project_id}/deployment-profile", response_model=DeploymentProfileOut)
+async def get_deployment_profile(
+    project_id: uuid.UUID,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> DeploymentProfileOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env_name = (environment or "PREVIEW").strip().upper()
+    profile = await session.scalar(
+        select(DeploymentProfile).where(
+            DeploymentProfile.tenant_id == ctx.tenant_id,
+            DeploymentProfile.project_id == project_id,
+            DeploymentProfile.environment == env_name,
+        )
+    )
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment profile not found")
+    return DeploymentProfileOut.model_validate(profile)
+
+
+@router.post("/deployment-connectors", response_model=DeploymentProviderConnectorOut)
+@public_router.post("/deployment-connectors", response_model=DeploymentProviderConnectorOut)
+async def upsert_deployment_connector(
+    payload: DeploymentProviderConnectorUpsertRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> DeploymentProviderConnectorOut:
+    provider = (payload.provider or "").strip().lower()
+    label = (payload.label or "").strip()
+    vault_ref = (payload.vault_ref or "").strip()
+    if not provider or not label or not vault_ref:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="provider, label, and vault_ref are required")
+    connector = await session.scalar(
+        select(DeploymentProviderConnector).where(
+            DeploymentProviderConnector.tenant_id == ctx.tenant_id,
+            DeploymentProviderConnector.provider == provider,
+            DeploymentProviderConnector.label == label,
+        )
+    )
+    if connector is None:
+        connector = DeploymentProviderConnector(
+            tenant_id=ctx.tenant_id,
+            provider=provider,
+            label=label,
+            created_by=(payload.created_by or ctx.user_id or "ui-user"),
+        )
+        session.add(connector)
+    connector.vault_ref = vault_ref
+    connector.scopes = payload.scopes
+    await session.commit()
+    await session.refresh(connector)
+    return DeploymentProviderConnectorOut.model_validate(connector)
+
+
+@router.get("/deployment-connectors", response_model=List[DeploymentProviderConnectorOut])
+@public_router.get("/deployment-connectors", response_model=List[DeploymentProviderConnectorOut])
+async def list_deployment_connectors(
+    provider: str | None = None,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[DeploymentProviderConnectorOut]:
+    query = select(DeploymentProviderConnector).where(DeploymentProviderConnector.tenant_id == ctx.tenant_id)
+    if provider:
+        query = query.where(DeploymentProviderConnector.provider == provider.strip().lower())
+    result = await session.execute(query.order_by(DeploymentProviderConnector.created_at.desc()))
+    return [DeploymentProviderConnectorOut.model_validate(item) for item in result.scalars().all()]
+
+
+@public_router.post("/auth/bootstrap-first-login", response_model=FirstLoginBootstrapOut)
+async def bootstrap_first_login(
+    payload: FirstLoginBootstrapRequest,
+    authorization: str | None = Header(None),
+    session: AsyncSession = Depends(get_session),
+) -> FirstLoginBootstrapOut:
+    token = _extract_bearer_token_or_401(authorization)
+    try:
+        claims = verify_firebase_bearer_token(token, project_id=str(settings.firebase_project_id or ""))
+    except FirebaseAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "AUTH_TOKEN_INVALID", "message": str(exc) or "Authentication token is invalid."},
+        ) from exc
+
+    user_id = _user_id_from_claims(claims)
+    email = claims.get("email") if isinstance(claims.get("email"), str) else ""
+    base_name = email.split("@")[0].strip() if email and "@" in email else "Operator"
+    tenant_default_name = f"{base_name or 'Operator'} Workspace"
+    workspace_default_name = "Default Workspace"
+
+    created_tenant = False
+    created_workspace = False
+    created_tenant_member = False
+    created_workspace_member = False
+
+    tenant_member = None
+    if not payload.force_new_tenant:
+        tenant_member = await session.scalar(
+            select(TenantMember).where(TenantMember.user_id == user_id).order_by(TenantMember.created_at.asc())
+        )
+    tenant: Tenant | None = None
+    if tenant_member:
+        tenant = await session.scalar(select(Tenant).where(Tenant.id == tenant_member.tenant_id))
+
+    if tenant is None:
+        tenant = Tenant(name=_sanitize_entity_name(payload.tenant_name, tenant_default_name))
+        session.add(tenant)
+        await session.flush()
+        created_tenant = True
+
+    if tenant_member is None:
+        tenant_member = TenantMember(tenant_id=tenant.id, user_id=user_id, role="OWNER")
+        session.add(tenant_member)
+        await session.flush()
+        created_tenant_member = True
+
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.tenant_id == tenant.id).order_by(Workspace.created_at.asc())
+    )
+    if workspace is None:
+        workspace = Workspace(tenant_id=tenant.id, name=_sanitize_entity_name(payload.workspace_name, workspace_default_name))
+        session.add(workspace)
+        await session.flush()
+        created_workspace = True
+
+    workspace_member = await session.scalar(
+        select(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace.id, WorkspaceMember.user_id == user_id)
+    )
+    if workspace_member is None:
+        workspace_member = WorkspaceMember(workspace_id=workspace.id, user_id=user_id, role="OWNER")
+        session.add(workspace_member)
+        await session.flush()
+        created_workspace_member = True
+
+    await session.commit()
+
+    return FirstLoginBootstrapOut(
+        user_id=user_id,
+        tenant_id=tenant.id,
+        tenant_name=tenant.name,
+        workspace_id=workspace.id,
+        workspace_name=workspace.name,
+        tenant_member_role=tenant_member.role,
+        workspace_member_role=workspace_member.role,
+        created_tenant=created_tenant,
+        created_workspace=created_workspace,
+        created_tenant_member=created_tenant_member,
+        created_workspace_member=created_workspace_member,
+    )
+
+
+@router.get("/workspaces", response_model=List[WorkspaceOut])
+@public_router.get("/workspaces", response_model=List[WorkspaceOut])
+async def list_workspaces(
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[WorkspaceOut]:
+    result = await session.execute(
+        select(Workspace)
+        .where(Workspace.tenant_id == ctx.tenant_id)
+        .order_by(Workspace.created_at.asc())
+    )
+    return [WorkspaceOut.model_validate(item) for item in result.scalars().all()]
+
+
+@router.get("/workspaces/{workspace_id}/switch", response_model=WorkspaceSwitchOut)
+@public_router.get("/workspaces/{workspace_id}/switch", response_model=WorkspaceSwitchOut)
+async def switch_workspace(
+    workspace_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceSwitchOut:
+    workspace = await session.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.tenant_id == ctx.tenant_id,
+        )
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    member = await session.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == ctx.user_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Workspace membership required")
+    projects = (
+        await session.execute(
+            select(Project)
+            .where(Project.tenant_id == ctx.tenant_id, Project.workspace_id == workspace_id)
+            .order_by(Project.created_at.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    return WorkspaceSwitchOut(
+        workspace=WorkspaceOut.model_validate(workspace),
+        projects=[_project_out(project) for project in projects],
+    )
+
+
+@router.get("/workspaces/{workspace_id}/entitlements", response_model=WorkspaceEntitlementOut)
+@public_router.get("/workspaces/{workspace_id}/entitlements", response_model=WorkspaceEntitlementOut)
+async def get_workspace_entitlements(
+    workspace_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceEntitlementOut:
+    workspace = await session.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.tenant_id == ctx.tenant_id,
+        )
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    member = await session.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == ctx.user_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Workspace membership required")
+    entitlement = await _ensure_workspace_entitlement(session, ctx, workspace_id)
+    return WorkspaceEntitlementOut.model_validate(entitlement)
+
+
+@router.get("/workspaces/{workspace_id}/usage", response_model=WorkspaceUsageSummaryOut)
+@public_router.get("/workspaces/{workspace_id}/usage", response_model=WorkspaceUsageSummaryOut)
+async def get_workspace_usage(
+    workspace_id: uuid.UUID,
+    days: int = Query(default=30, ge=1, le=90),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceUsageSummaryOut:
+    workspace = await session.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.tenant_id == ctx.tenant_id,
+        )
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    member = await session.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == ctx.user_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Workspace membership required")
+
+    return await _load_workspace_usage_summary(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        workspace_id=workspace_id,
+        days=days,
+    )
+
+
+@router.post("/workspaces/{workspace_id}/usage/materialize", response_model=WorkspaceUsageMaterializeOut)
+@public_router.post("/workspaces/{workspace_id}/usage/materialize", response_model=WorkspaceUsageMaterializeOut)
+async def materialize_workspace_usage(
+    workspace_id: uuid.UUID,
+    days: int = Query(default=30, ge=1, le=90),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceUsageMaterializeOut:
+    workspace = await session.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.tenant_id == ctx.tenant_id,
+        )
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    member = await session.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == ctx.user_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Workspace membership required")
+    summary = await _load_workspace_usage_summary(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        workspace_id=workspace_id,
+        days=days,
+    )
+    rows_upserted = 0
+    for row in summary.daily:
+        usage_date = datetime.fromisoformat(row.usage_date).date()
+        record = await session.scalar(
+            select(WorkspaceUsageDaily).where(
+                WorkspaceUsageDaily.workspace_id == workspace_id,
+                WorkspaceUsageDaily.tenant_id == ctx.tenant_id,
+                WorkspaceUsageDaily.usage_date == usage_date,
+            )
+        )
+        if record is None:
+            record = WorkspaceUsageDaily(
+                tenant_id=ctx.tenant_id,
+                workspace_id=workspace_id,
+                usage_date=usage_date,
+            )
+            session.add(record)
+        record.runs_count = row.runs_count
+        record.deployments_count = row.deployments_count
+        record.recoveries_count = row.recoveries_count
+        record.input_tokens = row.input_tokens
+        record.output_tokens = row.output_tokens
+        record.total_cost_cents = row.total_cost_cents
+        rows_upserted += 1
+    await session.commit()
+    return WorkspaceUsageMaterializeOut(
+        workspace_id=workspace_id,
+        days=days,
+        rows_upserted=rows_upserted,
+        totals=summary.totals,
+    )
+
+
+@router.get("/workspaces/{workspace_id}/environment-checklists", response_model=list[EnvironmentChecklistSummaryOut])
+@public_router.get("/workspaces/{workspace_id}/environment-checklists", response_model=list[EnvironmentChecklistSummaryOut])
+async def list_workspace_environment_checklists(
+    workspace_id: uuid.UUID,
+    reseed: bool = Query(default=False),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[EnvironmentChecklistSummaryOut]:
+    workspace = await session.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.tenant_id == ctx.tenant_id,
+        )
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    member = await session.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == ctx.user_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Workspace membership required")
+
+    projects = (
+        await session.execute(
+            select(Project)
+            .where(
+                Project.tenant_id == ctx.tenant_id,
+                or_(Project.workspace_id == workspace_id, Project.workspace_id.is_(None)),
+            )
+            .order_by(Project.created_at.desc())
+            .limit(200)
+        )
+    ).scalars().all()
+    payload: list[EnvironmentChecklistSummaryOut] = []
+    for project in projects:
+        payload.append(await _load_environment_checklists(session, ctx=ctx, project=project, reseed=reseed))
+    return payload
+
+
+@router.get("/admin/workspaces", response_model=List[AdminWorkspaceOut])
+@public_router.get("/admin/workspaces", response_model=List[AdminWorkspaceOut])
+async def list_admin_workspaces(
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[AdminWorkspaceOut]:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspaces = (
+        await session.execute(
+            select(Workspace)
+            .where(Workspace.tenant_id == ctx.tenant_id)
+            .order_by(Workspace.created_at.asc())
+        )
+    ).scalars().all()
+    if not workspaces:
+        return []
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    response: list[AdminWorkspaceOut] = []
+    for workspace in workspaces:
+        project_ids = (
+            await session.execute(
+                select(Project.id).where(Project.tenant_id == ctx.tenant_id, Project.workspace_id == workspace.id)
+            )
+        ).scalars().all()
+        if project_ids:
+            run_rows = (
+                await session.execute(
+                    select(Run.status)
+                    .where(Run.tenant_id == ctx.tenant_id, Run.project_id.in_(project_ids), Run.created_at >= week_ago)
+                )
+            ).all()
+        else:
+            run_rows = []
+        run_count_7d = len(run_rows)
+        failed_run_count_7d = sum(1 for row in run_rows if str(row.status).upper() == "FAILED")
+        response.append(
+            AdminWorkspaceOut(
+                workspace=WorkspaceOut.model_validate(workspace),
+                project_count=len(project_ids),
+                run_count_7d=run_count_7d,
+                failed_run_count_7d=failed_run_count_7d,
+            )
+        )
+    return response
+
+
+@router.get("/admin/system-config", response_model=list[PlatformConfigOut])
+@public_router.get("/admin/system-config", response_model=list[PlatformConfigOut])
+async def list_admin_system_config(
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[PlatformConfigOut]:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    rows = (await session.execute(select(PlatformConfig).order_by(PlatformConfig.config_key.asc()))).scalars().all()
+    return [_platform_config_out(row) for row in rows]
+
+
+@router.put("/admin/system-config/{config_key}", response_model=PlatformConfigOut)
+@public_router.put("/admin/system-config/{config_key}", response_model=PlatformConfigOut)
+async def upsert_admin_system_config(
+    config_key: str,
+    payload: PlatformConfigUpsertRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> PlatformConfigOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    key = config_key.strip()
+    if not key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="config_key is required")
+    value_type = (payload.value_type or "string").strip().lower()
+    if value_type not in {"string", "json", "secret_ref", "bool", "number"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported value_type")
+    if value_type == "secret_ref" and not (payload.vault_ref or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="vault_ref is required for secret_ref values")
+
+    row = await session.scalar(select(PlatformConfig).where(PlatformConfig.config_key == key))
+    if row is None:
+        row = PlatformConfig(config_key=key)
+    row.config_scope = "global"
+    row.value_type = value_type
+    if value_type == "secret_ref":
+        row.plain_value = None
+    else:
+        row.plain_value = payload.plain_value
+    row.vault_ref = (payload.vault_ref or "").strip() or None
+    row.description = (payload.description or "").strip() or None
+    row.updated_by = ctx.user_id
+    session.add(row)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            action="platform_config.upsert",
+            reason=(payload.reason or "").strip() or None,
+            extra_metadata={"config_key": key, "value_type": value_type, "has_vault_ref": bool(row.vault_ref)},
+        )
+    )
+    await session.commit()
+    await session.refresh(row)
+    return _platform_config_out(row)
+
+
+@router.post("/admin/system-config/{config_key}/rotate", response_model=PlatformConfigOut)
+@public_router.post("/admin/system-config/{config_key}/rotate", response_model=PlatformConfigOut)
+async def rotate_admin_system_config(
+    config_key: str,
+    payload: PlatformConfigRotateRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> PlatformConfigOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    key = config_key.strip()
+    row = await session.scalar(select(PlatformConfig).where(PlatformConfig.config_key == key))
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="System config not found")
+    row.vault_ref = payload.vault_ref.strip()
+    row.value_type = "secret_ref"
+    row.updated_by = ctx.user_id
+    session.add(row)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            action="platform_config.rotate",
+            reason=(payload.reason or "").strip() or None,
+            extra_metadata={"config_key": key, "vault_ref": row.vault_ref},
+        )
+    )
+    await session.commit()
+    await session.refresh(row)
+    return _platform_config_out(row)
+
+
+@router.get("/admin/workspaces/{workspace_id}", response_model=AdminWorkspaceOut)
+@public_router.get("/admin/workspaces/{workspace_id}", response_model=AdminWorkspaceOut)
+async def get_admin_workspace_detail(
+    workspace_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> AdminWorkspaceOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.id == workspace_id, Workspace.tenant_id == ctx.tenant_id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    project_ids = (
+        await session.execute(
+            select(Project.id).where(Project.tenant_id == ctx.tenant_id, Project.workspace_id == workspace.id)
+        )
+    ).scalars().all()
+    run_rows = []
+    if project_ids:
+        run_rows = (
+            await session.execute(
+                select(Run.status)
+                .where(Run.tenant_id == ctx.tenant_id, Run.project_id.in_(project_ids), Run.created_at >= week_ago)
+            )
+        ).all()
+    return AdminWorkspaceOut(
+        workspace=WorkspaceOut.model_validate(workspace),
+        project_count=len(project_ids),
+        run_count_7d=len(run_rows),
+        failed_run_count_7d=sum(1 for row in run_rows if str(row.status).upper() == "FAILED"),
+    )
+
+
+@router.post("/admin/impersonation/start", response_model=AdminImpersonationOut, status_code=status.HTTP_201_CREATED)
+@public_router.post("/admin/impersonation/start", response_model=AdminImpersonationOut, status_code=status.HTTP_201_CREATED)
+async def start_admin_impersonation(
+    payload: AdminImpersonationStartRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> AdminImpersonationOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.id == payload.workspace_id, Workspace.tenant_id == ctx.tenant_id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=payload.duration_minutes)
+    record = ImpersonationSession(
+        admin_user_id=ctx.user_id,
+        target_workspace_id=payload.workspace_id,
+        reason=(payload.reason or "").strip() or None,
+        expires_at=expires_at,
+        is_active=True,
+    )
+    session.add(record)
+    audit = AdminAuditLog(
+        admin_user_id=ctx.user_id,
+        target_workspace_id=payload.workspace_id,
+        action="impersonation.start",
+        reason=(payload.reason or "").strip() or None,
+        extra_metadata={"duration_minutes": payload.duration_minutes},
+    )
+    session.add(audit)
+    await session.commit()
+    await session.refresh(record)
+    return AdminImpersonationOut.model_validate(record)
+
+
+@router.post("/admin/impersonation/{session_id}/end", response_model=AdminImpersonationOut)
+@public_router.post("/admin/impersonation/{session_id}/end", response_model=AdminImpersonationOut)
+async def end_admin_impersonation(
+    session_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> AdminImpersonationOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    record = await session.scalar(select(ImpersonationSession).where(ImpersonationSession.id == session_id))
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Impersonation session not found")
+    if record.is_active:
+        now = datetime.now(timezone.utc)
+        record.is_active = False
+        record.ended_at = now
+        record.ended_by = ctx.user_id
+        if record.started_at:
+            started_at = record.started_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            duration_seconds = int((now - started_at).total_seconds())
+        else:
+            duration_seconds = None
+    else:
+        duration_seconds = None
+    audit = AdminAuditLog(
+        admin_user_id=ctx.user_id,
+        target_workspace_id=record.target_workspace_id,
+        action="impersonation.end",
+        duration_seconds=duration_seconds,
+        extra_metadata={"impersonation_session_id": str(record.id), "ended_by": ctx.user_id},
+    )
+    session.add(record)
+    session.add(audit)
+    await session.commit()
+    await session.refresh(record)
+    return AdminImpersonationOut.model_validate(record)
+
+
+@router.get("/admin/audit-logs", response_model=List[AdminAuditLogOut])
+@public_router.get("/admin/audit-logs", response_model=List[AdminAuditLogOut])
+async def list_admin_audit_logs(
+    workspace_id: uuid.UUID | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[AdminAuditLogOut]:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    query = select(AdminAuditLog).where(AdminAuditLog.admin_user_id != "")
+    if workspace_id is not None:
+        query = query.where(AdminAuditLog.target_workspace_id == workspace_id)
+    result = await session.execute(query.order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc()).limit(limit))
+    rows = result.scalars().all()
+    return [AdminAuditLogOut.model_validate(row) for row in rows]
+
+
+@router.get("/admin/daemon-health", response_model=AdminDaemonHealthOut)
+@public_router.get("/admin/daemon-health", response_model=AdminDaemonHealthOut)
+async def get_admin_daemon_health(
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> AdminDaemonHealthOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    latest_cycle = await session.scalar(
+        select(AdminAuditLog)
+        .where(
+            AdminAuditLog.action == "workspace_ops.cycle",
+        )
+        .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+        .limit(1)
+    )
+    latest_error = await session.scalar(
+        select(AdminAuditLog)
+        .where(
+            AdminAuditLog.action == "workspace_ops.workspace_error",
+        )
+        .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+        .limit(1)
+    )
+    cycle_meta = latest_cycle.extra_metadata if latest_cycle and isinstance(latest_cycle.extra_metadata, dict) else {}
+    alert_reasons: list[str] = []
+    current_settings = get_settings()
+    if int(cycle_meta.get("workspace_failures") or 0) > 0:
+        alert_reasons.append("latest_cycle_has_workspace_failures")
+    if latest_cycle and latest_cycle.created_at:
+        interval_seconds = max(300, int(current_settings.workspace_ops_daemon_interval_seconds))
+        stale_after_seconds = interval_seconds * 2
+        cycle_at = latest_cycle.created_at
+        if cycle_at.tzinfo is None:
+            cycle_at = cycle_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - cycle_at).total_seconds()
+        if age_seconds > stale_after_seconds:
+            alert_reasons.append("daemon_cycle_stale")
+    elif latest_cycle is None:
+        alert_reasons.append("no_daemon_cycle_recorded")
+    alert_level = "warn" if alert_reasons else "healthy"
+    return AdminDaemonHealthOut(
+        last_cycle_at=latest_cycle.created_at if latest_cycle else None,
+        last_cycle_window_days=int(cycle_meta.get("window_days") or 0) or None,
+        last_cycle_workspaces_processed=int(cycle_meta.get("workspaces_processed") or 0),
+        last_cycle_workspace_failures=int(cycle_meta.get("workspace_failures") or 0),
+        last_error_at=latest_error.created_at if latest_error else None,
+        last_error_workspace_id=latest_error.target_workspace_id if latest_error else None,
+        alert_level=alert_level,
+        alert_reasons=alert_reasons,
+    )
+
+
+@router.get("/admin/workspaces/{workspace_id}/entitlements", response_model=WorkspaceEntitlementOut)
+@public_router.get("/admin/workspaces/{workspace_id}/entitlements", response_model=WorkspaceEntitlementOut)
+async def get_admin_workspace_entitlements(
+    workspace_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceEntitlementOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.id == workspace_id, Workspace.tenant_id == ctx.tenant_id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    entitlement = await _ensure_workspace_entitlement(session, ctx, workspace_id)
+    return WorkspaceEntitlementOut.model_validate(entitlement)
+
+
+@router.patch("/admin/workspaces/{workspace_id}/entitlements", response_model=WorkspaceEntitlementOut)
+@public_router.patch("/admin/workspaces/{workspace_id}/entitlements", response_model=WorkspaceEntitlementOut)
+async def patch_admin_workspace_entitlements(
+    workspace_id: uuid.UUID,
+    payload: AdminWorkspaceEntitlementPatchRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceEntitlementOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.id == workspace_id, Workspace.tenant_id == ctx.tenant_id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    entitlement = await _ensure_workspace_entitlement(session, ctx, workspace_id)
+    if payload.plan is not None:
+        entitlement.plan = payload.plan.strip() or entitlement.plan
+    if payload.limits is not None:
+        entitlement.limits = payload.limits
+    if payload.features is not None:
+        entitlement.features = payload.features
+    session.add(entitlement)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            target_workspace_id=workspace_id,
+            action="entitlement.update",
+            extra_metadata={
+                "plan": entitlement.plan,
+                "limits_keys": sorted(list((entitlement.limits or {}).keys())),
+                "features_keys": sorted(list((entitlement.features or {}).keys())),
+            },
+        )
+    )
+    await session.commit()
+    await session.refresh(entitlement)
+    return WorkspaceEntitlementOut.model_validate(entitlement)
+
+
+@router.get("/admin/workspaces/{workspace_id}/usage", response_model=WorkspaceUsageSummaryOut)
+@public_router.get("/admin/workspaces/{workspace_id}/usage", response_model=WorkspaceUsageSummaryOut)
+async def get_admin_workspace_usage(
+    workspace_id: uuid.UUID,
+    days: int = Query(default=30, ge=1, le=90),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceUsageSummaryOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.id == workspace_id, Workspace.tenant_id == ctx.tenant_id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return await _load_workspace_usage_summary(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        workspace_id=workspace_id,
+        days=days,
+    )
+
+
+@router.post("/admin/workspaces/{workspace_id}/usage/materialize", response_model=WorkspaceUsageMaterializeOut)
+@public_router.post("/admin/workspaces/{workspace_id}/usage/materialize", response_model=WorkspaceUsageMaterializeOut)
+async def materialize_admin_workspace_usage(
+    workspace_id: uuid.UUID,
+    days: int = Query(default=30, ge=1, le=90),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkspaceUsageMaterializeOut:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.id == workspace_id, Workspace.tenant_id == ctx.tenant_id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    summary = await _load_workspace_usage_summary(
+        session=session,
+        tenant_id=ctx.tenant_id,
+        workspace_id=workspace_id,
+        days=days,
+    )
+    rows_upserted = 0
+    for row in summary.daily:
+        usage_date = datetime.fromisoformat(row.usage_date).date()
+        record = await session.scalar(
+            select(WorkspaceUsageDaily).where(
+                WorkspaceUsageDaily.workspace_id == workspace_id,
+                WorkspaceUsageDaily.tenant_id == ctx.tenant_id,
+                WorkspaceUsageDaily.usage_date == usage_date,
+            )
+        )
+        if record is None:
+            record = WorkspaceUsageDaily(
+                tenant_id=ctx.tenant_id,
+                workspace_id=workspace_id,
+                usage_date=usage_date,
+            )
+            session.add(record)
+        record.runs_count = row.runs_count
+        record.deployments_count = row.deployments_count
+        record.recoveries_count = row.recoveries_count
+        record.input_tokens = row.input_tokens
+        record.output_tokens = row.output_tokens
+        record.total_cost_cents = row.total_cost_cents
+        rows_upserted += 1
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            target_workspace_id=workspace_id,
+            action="usage.materialize",
+            extra_metadata={"days": days, "rows_upserted": rows_upserted},
+        )
+    )
+    await session.commit()
+    return WorkspaceUsageMaterializeOut(
+        workspace_id=workspace_id,
+        days=days,
+        rows_upserted=rows_upserted,
+        totals=summary.totals,
+    )
+
+
+@router.post("/admin/anomalies/materialize", response_model=List[WorkspaceAnomalySnapshotOut])
+@public_router.post("/admin/anomalies/materialize", response_model=List[WorkspaceAnomalySnapshotOut])
+async def materialize_workspace_anomalies(
+    days: int = Query(default=30, ge=7, le=90),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[WorkspaceAnomalySnapshotOut]:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    workspaces = (
+        await session.execute(select(Workspace).where(Workspace.tenant_id == ctx.tenant_id).order_by(Workspace.created_at.asc()))
+    ).scalars().all()
+    today = datetime.now(timezone.utc).date()
+    snapshots: list[WorkspaceAnomalySnapshot] = []
+    for workspace in workspaces:
+        summary = await _load_workspace_usage_summary(
+            session=session,
+            tenant_id=ctx.tenant_id,
+            workspace_id=workspace.id,
+            days=days,
+        )
+        burn_spike, failure_spike, burn_ratio, failure_ratio = _compute_usage_anomaly_flags(summary.daily)
+        total_tokens = int(summary.totals.input_tokens or 0) + int(summary.totals.output_tokens or 0)
+        snapshot = await session.scalar(
+            select(WorkspaceAnomalySnapshot).where(
+                WorkspaceAnomalySnapshot.tenant_id == ctx.tenant_id,
+                WorkspaceAnomalySnapshot.workspace_id == workspace.id,
+                WorkspaceAnomalySnapshot.window_days == days,
+                WorkspaceAnomalySnapshot.snapshot_date == today,
+            )
+        )
+        if snapshot is None:
+            snapshot = WorkspaceAnomalySnapshot(
+                tenant_id=ctx.tenant_id,
+                workspace_id=workspace.id,
+                snapshot_date=today,
+                window_days=days,
+            )
+            session.add(snapshot)
+        snapshot.runs_count = int(summary.totals.runs_count or 0)
+        snapshot.recoveries_count = int(summary.totals.recoveries_count or 0)
+        snapshot.total_tokens = total_tokens
+        snapshot.total_cost_cents = int(summary.totals.total_cost_cents or 0)
+        snapshot.burn_spike = burn_spike
+        snapshot.failure_spike = failure_spike
+        snapshot.burn_ratio = burn_ratio
+        snapshot.failure_ratio = failure_ratio
+        snapshots.append(snapshot)
+    session.add(
+        AdminAuditLog(
+            admin_user_id=ctx.user_id,
+            action="anomaly.materialize",
+            extra_metadata={"days": days, "workspace_count": len(workspaces)},
+        )
+    )
+    await session.commit()
+    for row in snapshots:
+        await session.refresh(row)
+    return [WorkspaceAnomalySnapshotOut.model_validate(row) for row in snapshots]
+
+
+@router.get("/admin/anomalies", response_model=List[WorkspaceAnomalySnapshotOut])
+@public_router.get("/admin/anomalies", response_model=List[WorkspaceAnomalySnapshotOut])
+async def list_workspace_anomaly_snapshots(
+    workspace_id: uuid.UUID | None = None,
+    days: int = Query(default=30, ge=7, le=90),
+    limit: int = Query(default=50, ge=1, le=500),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[WorkspaceAnomalySnapshotOut]:
+    if not _is_super_admin(ctx):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    query = select(WorkspaceAnomalySnapshot).where(
+        WorkspaceAnomalySnapshot.tenant_id == ctx.tenant_id,
+        WorkspaceAnomalySnapshot.window_days == days,
+    )
+    if workspace_id is not None:
+        query = query.where(WorkspaceAnomalySnapshot.workspace_id == workspace_id)
+    rows = (
+        await session.execute(
+            query.order_by(WorkspaceAnomalySnapshot.snapshot_date.desc(), WorkspaceAnomalySnapshot.created_at.desc()).limit(limit)
+        )
+    ).scalars().all()
+    return [WorkspaceAnomalySnapshotOut.model_validate(row) for row in rows]
+
+
 @router.get("/runs/{run_id}/events", response_model=List[RunEventOut])
 @public_router.get("/runs/{run_id}/events", response_model=List[RunEventOut])
 async def list_run_events(run_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)) -> List[RunEventOut]:
-    run = await session.scalar(select(Run).where(Run.id == run_id, Run.tenant_id == ctx.tenant_id))
+    run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     result = await session.execute(
@@ -1978,6 +5315,16 @@ async def claim_work_items(
                 run_id=fresh.run_id,
                 work_item_id=fresh.id,
                 event_type="WORK_ITEM_CLAIMED",
+                actor_type="AGENT",
+                actor_id=str(agent_id),
+                payload={"work_item_id": str(fresh.id), "agent_id": str(agent_id)},
+            )
+            await record_event(
+                session,
+                project_id=fresh.project_id,
+                run_id=fresh.run_id,
+                work_item_id=fresh.id,
+                event_type="RUN_WORKER_PICKED",
                 actor_type="AGENT",
                 actor_id=str(agent_id),
                 payload={"work_item_id": str(fresh.id), "agent_id": str(agent_id)},
@@ -2194,7 +5541,7 @@ async def create_document(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> DocumentOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
@@ -2244,7 +5591,7 @@ async def list_documents(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> List[DocumentOut]:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
@@ -2267,7 +5614,7 @@ async def list_tasks(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> List[TaskOut]:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     query = select(Task).where(Task.project_id == project_id, Task.tenant_id == ctx.tenant_id)
@@ -2301,7 +5648,7 @@ async def list_improvement_requests(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> List[ImprovementRequestOut]:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     result = await session.execute(
@@ -2323,7 +5670,7 @@ async def get_requirement_summary(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RequirementSummaryResponse:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     payload = await build_requirement_summary(
@@ -2346,7 +5693,7 @@ async def export_requirement_summary(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ):
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     payload = await build_requirement_summary(
@@ -2439,7 +5786,7 @@ async def get_requirement_timeline(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RequirementTimelineResponse:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     payload = await build_requirement_timeline(
@@ -2464,7 +5811,7 @@ async def get_requirement_execution_graph(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> RequirementExecutionGraphOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     payload = await build_requirement_execution_graph(
@@ -2504,7 +5851,7 @@ async def refresh_requirement_memory(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     memory = await compress_requirement_memory(
@@ -2536,7 +5883,7 @@ async def ingest_external_reference(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> ExternalReferenceOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     try:
@@ -2683,7 +6030,7 @@ async def create_task(
     ctx=Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
 ) -> TaskOut:
-    project = await session.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == ctx.tenant_id))
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 

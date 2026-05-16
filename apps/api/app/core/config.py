@@ -159,6 +159,7 @@ class Settings(BaseSettings):
     external_reference_max_context_chars: int = 2_000
     external_reference_context_top_k: int = 4
     preview_host: str = "127.0.0.1"
+    preview_domain_suffix: str = "preview.prompt2pr.com"
     preview_default_ttl_hours: int = 24
     preview_max_per_project: int = 100
     preview_max_global: int = 20
@@ -171,6 +172,11 @@ class Settings(BaseSettings):
     github_app_slug: str | None = None
     github_allowed_org: str | None = None
     tenancy_enforcement: bool = False
+    workspace_entitlements_enabled: bool = False
+    workspace_entitlements_enforce: bool = False
+    firebase_project_id: str | None = None
+    firebase_auth_enforcement: bool = False
+    super_admin_users: str = ""
     run_migrations_on_startup: bool = False
     alembic_config_path: str | None = None
     requirement_memory_refresh_enabled: bool = True
@@ -180,6 +186,14 @@ class Settings(BaseSettings):
     memory_synthesizer_enabled: bool = True
     memory_synthesizer_interval_seconds: int = 1800
     memory_synthesizer_project_limit: int = 50
+    deployment_runtime_enabled: bool = True
+    deployment_runtime_interval_seconds: int = 20
+    deployment_runtime_batch_size: int = 20
+    deployment_healthcheck_timeout_seconds: int = 8
+    deployment_healthcheck_max_retries: int = 3
+    workspace_ops_daemon_enabled: bool = True
+    workspace_ops_daemon_interval_seconds: int = 86400
+    workspace_ops_window_days: int = 30
     allowed_origins: List[str] = [
         "https://www.prompt2pr.com",
         "https://prompt2pr.com",

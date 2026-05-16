@@ -1,0 +1,69 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#121E36"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(390 180) rotate(38) scale(520 280)">
+      <stop stop-color="#38BDF8" stop-opacity="0.48"/>
+      <stop offset="1" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1210 730) rotate(-24) scale(460 280)">
+      <stop stop-color="#22C55E" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#22C55E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="line" x1="250" y1="450" x2="1360" y2="450" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38BDF8"/>
+      <stop offset="0.5" stop-color="#60A5FA"/>
+      <stop offset="1" stop-color="#22C55E"/>
+    </linearGradient>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="900" rx="34" fill="url(#bg)"/>
+  <rect width="1600" height="900" rx="34" fill="url(#glowA)"/>
+  <rect width="1600" height="900" rx="34" fill="url(#glowB)"/>
+
+  <g opacity="0.2">
+    <path d="M120 710C400 470 760 770 980 530C1130 370 1320 380 1480 450" stroke="#93C5FD" stroke-width="2"/>
+    <path d="M120 760C360 540 690 810 980 610C1180 470 1340 500 1500 590" stroke="#34D399" stroke-width="2"/>
+    <path d="M120 640C370 450 680 650 920 490C1080 380 1280 330 1490 390" stroke="#60A5FA" stroke-width="2"/>
+  </g>
+
+  <path d="M250 450H1360" stroke="url(#line)" stroke-width="4" stroke-linecap="round"/>
+
+  <g filter="url(#soft)" opacity="0.5">
+    <circle cx="250" cy="450" r="22" fill="#38BDF8"/>
+    <circle cx="470" cy="450" r="22" fill="#38BDF8"/>
+    <circle cx="690" cy="450" r="22" fill="#60A5FA"/>
+    <circle cx="910" cy="450" r="22" fill="#60A5FA"/>
+    <circle cx="1130" cy="450" r="22" fill="#22C55E"/>
+    <circle cx="1360" cy="450" r="22" fill="#22C55E"/>
+  </g>
+
+  <g>
+    <circle cx="250" cy="450" r="12" fill="#E0F2FE"/>
+    <circle cx="470" cy="450" r="12" fill="#E0F2FE"/>
+    <circle cx="690" cy="450" r="12" fill="#DBEAFE"/>
+    <circle cx="910" cy="450" r="12" fill="#DBEAFE"/>
+    <circle cx="1130" cy="450" r="12" fill="#DCFCE7"/>
+    <circle cx="1360" cy="450" r="12" fill="#DCFCE7"/>
+  </g>
+
+  <g fill="#C7D2FE" font-family="Inter, -apple-system, Segoe UI, Roboto, sans-serif" font-size="26" font-weight="600" text-anchor="middle">
+    <text x="250" y="400">Intent</text>
+    <text x="470" y="400">Generate</text>
+    <text x="690" y="400">Validate</text>
+    <text x="910" y="400">Recover</text>
+    <text x="1130" y="400">Deploy</text>
+    <text x="1360" y="400">Govern</text>
+  </g>
+
+  <g>
+    <rect x="540" y="560" width="520" height="120" rx="18" fill="rgba(15,23,42,0.56)" stroke="rgba(148,163,184,0.35)"/>
+    <text x="578" y="603" fill="#CBD5E1" font-family="Inter, -apple-system, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="600">Operational Confidence</text>
+    <text x="578" y="638" fill="#E2E8F0" font-family="Inter, -apple-system, Segoe UI, Roboto, sans-serif" font-size="32" font-weight="700">92% Ready · Policy Enforced</text>
+  </g>
+</svg>

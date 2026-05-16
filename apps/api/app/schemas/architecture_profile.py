@@ -83,3 +83,5 @@ class ArchitectureProfileSummaryOut(BaseModel):
     protected_zones_touched: list[str] = Field(default_factory=list)
     safe_zones_touched: list[str] = Field(default_factory=list)
     assumptions_used: list[str] = Field(default_factory=list)
+    derivation_confidence: str = "LOW"
+    derived_from: list[str] = Field(default_factory=list)

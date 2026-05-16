@@ -32,6 +32,8 @@ from app.services.build_info import get_build_history, get_current_build_info
 from app.services.runtime_env_diagnostics import collect_runtime_startup_diagnostics
 from app.services.requirement_refresh_daemon import run_requirement_memory_daemon, shutdown_daemon
 from app.services.memory_synthesizer import run_memory_synthesizer_daemon, shutdown_memory_synthesizer
+from app.services.deployment_runtime import run_deployment_runtime_daemon, shutdown_deployment_runtime
+from app.services.workspace_ops_daemon import run_workspace_ops_daemon, shutdown_workspace_ops
 from app.startup import run_startup_migrations
 
 
@@ -143,6 +145,10 @@ def create_app() -> FastAPI:
         app.state.requirement_refresh_task = None
         app.state.memory_synthesizer_stop_event = None
         app.state.memory_synthesizer_task = None
+        app.state.deployment_runtime_stop_event = None
+        app.state.deployment_runtime_task = None
+        app.state.workspace_ops_stop_event = None
+        app.state.workspace_ops_task = None
         if settings.requirement_memory_refresh_enabled:
             stop_event = asyncio.Event()
             task = asyncio.create_task(run_requirement_memory_daemon(stop_event))
@@ -161,6 +167,25 @@ def create_app() -> FastAPI:
                 "Memory synthesizer daemon enabled interval_seconds=%s",
                 settings.memory_synthesizer_interval_seconds,
             )
+        if settings.deployment_runtime_enabled:
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(run_deployment_runtime_daemon(stop_event))
+            app.state.deployment_runtime_stop_event = stop_event
+            app.state.deployment_runtime_task = task
+            log.info(
+                "Deployment runtime daemon enabled interval_seconds=%s",
+                settings.deployment_runtime_interval_seconds,
+            )
+        if settings.workspace_ops_daemon_enabled:
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(run_workspace_ops_daemon(stop_event))
+            app.state.workspace_ops_stop_event = stop_event
+            app.state.workspace_ops_task = task
+            log.info(
+                "Workspace ops daemon enabled interval_seconds=%s window_days=%s",
+                settings.workspace_ops_daemon_interval_seconds,
+                settings.workspace_ops_window_days,
+            )
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:
@@ -171,6 +196,14 @@ def create_app() -> FastAPI:
         await shutdown_memory_synthesizer(
             getattr(app.state, "memory_synthesizer_task", None),
             getattr(app.state, "memory_synthesizer_stop_event", None),
+        )
+        await shutdown_deployment_runtime(
+            getattr(app.state, "deployment_runtime_task", None),
+            getattr(app.state, "deployment_runtime_stop_event", None),
+        )
+        await shutdown_workspace_ops(
+            getattr(app.state, "workspace_ops_task", None),
+            getattr(app.state, "workspace_ops_stop_event", None),
         )
 
     # Register the DB-backed public surface before the legacy v1 router so

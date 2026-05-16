@@ -548,6 +548,7 @@ import {
   fetchRunTimeline,
   findSimilarRuns,
   forkRun,
+  getOrCreateActionRequestKey,
   hasRunMemorySearchContext,
   launchRunPreview,
   listRuns,
@@ -1027,10 +1028,12 @@ async function submitForkRun() {
   forkLoading.value = true;
   forkError.value = "";
   try {
+    const requestKey = getOrCreateActionRequestKey("fork_run", `operator_dashboard:fork:${source.id}`);
     const forked = await forkRun(source.id, {
       executor: forkExecutor.value || undefined,
       branch_name: forkBranchName.value.trim() || undefined,
       start_now: forkStartNow.value,
+      request_key: requestKey,
       summary_overrides: forkNotes.value.trim()
         ? {
             fork_notes: forkNotes.value.trim(),

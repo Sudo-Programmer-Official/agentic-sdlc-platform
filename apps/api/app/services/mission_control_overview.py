@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, RunSummary, Task, WorkItem
+from app.db.models import Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, RunEvent, RunSummary, Task, WorkItem, Workspace
 from app.schemas.mission_control import (
     MissionControlArtifactRef,
     MissionControlChangeImpact,
@@ -18,6 +18,7 @@ from app.schemas.mission_control import (
     MissionControlOverviewResponse,
     MissionControlPreviewAndPrs,
     MissionControlRunCard,
+    MissionControlStalledRun,
     MissionControlStrategyInsight,
     MissionControlEtaProfile,
     MissionControlSystemInsights,
@@ -27,6 +28,7 @@ from app.schemas.mission_control import (
 )
 from app.services.artifact_diff import parse_unified_diff, resolve_artifact_content
 from app.services.preview_service import preview_profile_available, resolve_preview_profile
+from app.services.preview_domain import build_workspace_project_preview_host
 from app.services.run_memory import find_similar_runs
 from app.services.run_summary_builder import ensure_project_run_summaries
 from app.services.architecture_profile_service import summarize_architecture_profile
@@ -414,6 +416,8 @@ def _build_change_impact(
 
 
 def _build_preview_panel(
+    project: Project,
+    workspace_name: str | None,
     project_repo: ProjectRepository | None,
     preview_profile: ProjectPreviewProfile | None,
     summary: RunSummary | None,
@@ -428,6 +432,18 @@ def _build_preview_panel(
     preview_url = preview_summary.get("preview_url") if isinstance(preview_summary.get("preview_url"), str) else None
     frontend = preview_summary.get("frontend") if isinstance(preview_summary.get("frontend"), dict) else None
     backend = preview_summary.get("backend") if isinstance(preview_summary.get("backend"), dict) else None
+    active_preview_url = (
+        frontend.get("url")
+        if frontend and isinstance(frontend.get("url"), str)
+        else (backend.get("url") if backend and isinstance(backend.get("url"), str) else preview_url)
+    )
+    stale_preview_url = preview_url if preview_url and active_preview_url and preview_url != active_preview_url else None
+    preview_host = build_workspace_project_preview_host(
+        workspace_name=workspace_name or str(project.workspace_id),
+        project_name=project.name or str(project.id),
+        workspace_id=str(project.workspace_id or ""),
+        project_id=str(project.id),
+    )
     preview_status = str(preview_summary.get("status") or "NOT_CONFIGURED")
     if preview_status == "NOT_CONFIGURED" and summary and summary.status in {"QUEUED", "RUNNING"}:
         preview_status = "PENDING"
@@ -442,10 +458,18 @@ def _build_preview_panel(
         preview_mode=str(preview_summary.get("mode") or (effective_profile.mode if effective_profile else "local")),
         preview_status=preview_status,
         preview_url=preview_url,
+        active_preview_url=active_preview_url,
+        stale_preview_url=stale_preview_url,
+        preview_domain_host=preview_host,
+        preview_domain_url=f"https://{preview_host}",
         frontend_url=frontend.get("url") if frontend else None,
         backend_url=backend.get("url") if backend else None,
+        frontend_port=int(frontend.get("port")) if frontend and frontend.get("port") is not None else None,
+        backend_port=int(backend.get("port")) if backend and backend.get("port") is not None else None,
         frontend_log_path=frontend.get("log_path") if frontend else None,
         backend_log_path=backend.get("log_path") if backend else None,
+        preview_checked_at=datetime.fromisoformat(preview_summary["last_checked_at"]) if isinstance(preview_summary.get("last_checked_at"), str) else None,
+        last_health_check_at=datetime.fromisoformat(preview_summary["last_checked_at"]) if isinstance(preview_summary.get("last_checked_at"), str) else None,
         preview_expires_at=datetime.fromisoformat(preview_summary["expires_at"]) if isinstance(preview_summary.get("expires_at"), str) else None,
         requires_verification=bool(preview_summary.get("requires_verification")) or (run is not None and run.status != "COMPLETED"),
         verification_note=(
@@ -743,6 +767,58 @@ async def _build_eta_profiles(
     return profiles
 
 
+async def _build_stalled_runs(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    runs: list[Run],
+    stale_after_seconds: int = 300,
+) -> list[MissionControlStalledRun]:
+    running = [run for run in runs if str(run.status or "").upper() in {"RUNNING", "QUEUED"}]
+    if not running:
+        return []
+    run_ids = [run.id for run in running]
+    events = (
+        await session.execute(
+            select(RunEvent.run_id, RunEvent.ts)
+            .where(
+                RunEvent.tenant_id == tenant_id,
+                RunEvent.project_id == project_id,
+                RunEvent.run_id.in_(run_ids),
+            )
+            .order_by(RunEvent.ts.desc())
+            .limit(400)
+        )
+    ).all()
+    latest_event_by_run: dict[uuid.UUID, datetime] = {}
+    for run_id, ts in events:
+        if run_id not in latest_event_by_run:
+            latest_event_by_run[run_id] = ts
+    now = datetime.utcnow()
+    stalled: list[MissionControlStalledRun] = []
+    for run in running:
+        baseline = run.started_at or run.created_at
+        last_event = latest_event_by_run.get(run.id) or baseline
+        if last_event is None:
+            continue
+        last_event_ts = last_event.replace(tzinfo=None) if getattr(last_event, "tzinfo", None) is not None else last_event
+        stale_seconds = int(max(0.0, (now - last_event_ts).total_seconds()))
+        if stale_seconds < stale_after_seconds:
+            continue
+        stalled.append(
+            MissionControlStalledRun(
+                run_id=run.id,
+                status=run.status,
+                last_event_at=last_event,
+                stale_seconds=stale_seconds,
+                suggested_action="Resume or unblock if paused; inspect run events if still active.",
+            )
+        )
+    stalled.sort(key=lambda item: item.stale_seconds, reverse=True)
+    return stalled[:6]
+
+
 async def build_mission_control_overview(
     session: AsyncSession,
     *,
@@ -754,7 +830,7 @@ async def build_mission_control_overview(
     if project is None:
         raise ValueError("Project not found")
 
-    work_intake = [] if lightweight else await _build_work_intake(session, tenant_id=tenant_id, project_id=project_id)
+    work_intake = await _build_work_intake(session, tenant_id=tenant_id, project_id=project_id)
     summaries, run_by_id, patch_artifacts, _ = await _load_recent_runs_and_artifacts(
         session,
         tenant_id=tenant_id,
@@ -794,10 +870,18 @@ async def build_mission_control_overview(
             ProjectPreviewProfile.tenant_id == tenant_id,
         )
     )
+    workspace_name = None
+    if project.workspace_id:
+        workspace = await session.scalar(
+            select(Workspace).where(Workspace.id == project.workspace_id, Workspace.tenant_id == tenant_id)
+        )
+        workspace_name = workspace.name if workspace else None
     runs = list(run_by_id.values())
     # Preview and delivery controls should follow the latest deliverable run
     # (branch push / patch-bearing / PR-capable context), not the latest noop.
     preview_panel = _build_preview_panel(
+        project,
+        workspace_name,
         project_repo,
         preview_profile,
         delivery_summary,
@@ -816,14 +900,10 @@ async def build_mission_control_overview(
         tenant_id=tenant_id,
         project_id=project_id,
     )
-    imported_references = (
-        []
-        if lightweight
-        else await _load_imported_references(
-            session,
-            tenant_id=tenant_id,
-            project_id=project_id,
-        )
+    imported_references = await _load_imported_references(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
     )
     eta_profiles = (
         []
@@ -850,5 +930,11 @@ async def build_mission_control_overview(
         system_insights=_build_system_insights(summaries),
         violation_insights=_build_violation_insights(summaries, run_by_id),
         imported_references=imported_references,
+        stalled_runs=await _build_stalled_runs(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            runs=runs,
+        ),
     )
     MissionControlImportedReference,

@@ -86,6 +86,22 @@
       </label>
 
       <el-select
+        v-model="selectedWorkspace"
+        class="w-full sm:min-w-[220px] lg:w-[14rem]"
+        placeholder="Workspace"
+        filterable
+        clearable
+        @change="switchWorkspaceSelection"
+      >
+        <el-option
+          v-for="workspace in workspaces"
+          :key="workspace.id"
+          :label="workspaceLabel(workspace)"
+          :value="workspace.id"
+        />
+      </el-select>
+
+      <el-select
         v-model="selectedProject"
         class="w-full sm:min-w-[220px] lg:w-[18rem]"
         placeholder="Switch project"
@@ -146,6 +162,7 @@
             <button v-if="showStop" type="button" class="topbar-chip" @click="pauseRun" :disabled="!canPause || pausing">
               {{ pausing ? "Stopping…" : "Emergency Stop" }}
             </button>
+            <button type="button" class="topbar-chip" @click="logout">Sign out</button>
           </div>
         </el-popover>
       </div>
@@ -160,6 +177,20 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import AppIcon from "./AppIcon.vue";
+import { logoutFirebaseSession } from "../auth/firebaseAuth";
+import {
+  apiFetch,
+  fetchProjects,
+  fetchWorkspaces,
+  getActiveTenantId,
+  getAuthToken,
+  getActiveWorkspaceId,
+  loadRecentProjectsScoped,
+  saveRecentProjectsScoped,
+  setActiveWorkspaceMeta,
+  setActiveWorkspaceId,
+  switchWorkspace,
+} from "../api/lifecycle";
 import { projectContext, updateProjectContext } from "../state/projectContext";
 import { toggleTheme, uiTheme } from "../state/uiTheme";
 
@@ -185,6 +216,7 @@ const networkLatencyMs = ref<number | null>(null);
 let networkMonitorTimer: number | null = null;
 
 type RecentProject = { id: string; name: string };
+type WorkspaceItem = { id: string; name: string };
 type BuildEntry = {
   version?: string | null;
   sha?: string | null;
@@ -198,6 +230,8 @@ type BuildEntry = {
 };
 
 const recentProjects = ref<RecentProject[]>(loadRecentProjects());
+const workspaces = ref<WorkspaceItem[]>([]);
+const selectedWorkspace = ref<string | null>(getActiveWorkspaceId());
 const selectedProject = ref(projectContext.projectId);
 
 const canPause = computed(() => Boolean(projectContext.latestRunId) && projectContext.runStatus === "RUNNING");
@@ -217,6 +251,21 @@ const titleText = computed(() => {
 
 const showStop = computed(() => inMissionControl.value && projectContext.runStatus !== "IDLE");
 const showEnterMc = computed(() => hasProject.value && !inMissionControl.value && hasRun.value);
+const shouldHydrateOperationalData = computed(() => {
+  const isMinimalLayout = String(route.meta?.layout || "") === "minimal";
+  if (isMinimalLayout) return false;
+  const requiresAuth = Boolean(route.meta?.requiresAuth);
+  const isSignedIn = Boolean(getAuthToken());
+  const hasTenant = Boolean(getActiveTenantId());
+  return requiresAuth && isSignedIn && hasTenant;
+});
+const shouldRunTopbarDiagnostics = computed(() => {
+  const isMinimalLayout = String(route.meta?.layout || "") === "minimal";
+  if (isMinimalLayout) return false;
+  const requiresAuth = Boolean(route.meta?.requiresAuth);
+  const isSignedIn = Boolean(getAuthToken());
+  return requiresAuth && isSignedIn;
+});
 
 const notificationItems = computed(() => {
   const items: Array<{ title: string; body: string }> = [];
@@ -320,13 +369,70 @@ function projectLabel(project: RecentProject) {
   return `${project.name} (${project.id.slice(0, 8)})`;
 }
 
+function workspaceLabel(workspace: WorkspaceItem) {
+  return workspace.name;
+}
+
 function switchProject(id: string | number | null) {
   if (!id) return;
   router.push(`/projects/${id}`);
 }
 
+async function switchWorkspaceSelection(id: string | number | null) {
+  if (!id) {
+    setActiveWorkspaceMeta(null);
+    setActiveWorkspaceId(null);
+    selectedWorkspace.value = null;
+    recentProjects.value = [];
+    saveRecentProjects([]);
+    updateProjectContext({
+      projectId: "",
+      projectName: "No project selected",
+      stage: "UNKNOWN",
+      runStatus: "IDLE",
+      latestRunId: "",
+      activeAgents: 0,
+      updatedAt: null,
+      hasActiveRun: false,
+      architectureRefreshNeeded: false,
+      planRefreshNeeded: false,
+      testRefreshNeeded: false,
+    });
+    await hydrateRecentProjectsFromApi();
+    await router.push("/workspace");
+    return;
+  }
+  try {
+    const workspaceId = String(id);
+    await switchWorkspace(workspaceId);
+    const selected = workspaces.value.find((workspace) => workspace.id === workspaceId);
+    setActiveWorkspaceMeta(selected ? { id: selected.id, name: selected.name } : { id: workspaceId, name: "Workspace" });
+    setActiveWorkspaceId(workspaceId);
+    selectedWorkspace.value = workspaceId;
+    recentProjects.value = [];
+    saveRecentProjects([]);
+    updateProjectContext({
+      projectId: "",
+      projectName: "No project selected",
+      stage: "UNKNOWN",
+      runStatus: "IDLE",
+      latestRunId: "",
+      activeAgents: 0,
+      updatedAt: null,
+      hasActiveRun: false,
+      architectureRefreshNeeded: false,
+      planRefreshNeeded: false,
+      testRefreshNeeded: false,
+    });
+    await hydrateRecentProjectsFromApi();
+    await router.push("/");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to switch workspace.";
+  }
+}
+
 function goHome() {
-  router.push("/");
+  router.push("/workspace");
 }
 
 function goToRun() {
@@ -334,12 +440,34 @@ function goToRun() {
   router.push(`/projects/${projectContext.projectId}/run`);
 }
 
+async function logout() {
+  try {
+    await logoutFirebaseSession();
+  } catch {
+    // Continue with local reset and redirect.
+  }
+  updateProjectContext({
+    projectId: "",
+    projectName: "No project selected",
+    stage: "UNKNOWN",
+    runStatus: "IDLE",
+    latestRunId: "",
+    activeAgents: 0,
+    updatedAt: null,
+    hasActiveRun: false,
+    architectureRefreshNeeded: false,
+    planRefreshNeeded: false,
+    testRefreshNeeded: false,
+  });
+  router.replace("/signin");
+}
+
 async function pauseRun() {
   if (!projectContext.latestRunId) return;
   error.value = "";
   pausing.value = true;
   try {
-    const response = await fetch(`${API_BASE}/runs/${projectContext.latestRunId}/pause`, {
+    const response = await apiFetch(`${API_BASE}/runs/${projectContext.latestRunId}/pause`, {
       method: "POST",
     });
     if (!response.ok) {
@@ -387,29 +515,85 @@ function runSearch() {
 
 async function hydrateRecentProjectsFromApi() {
   try {
-    const resp = await fetch(`${API_BASE}/projects`);
-    if (!resp.ok) return;
-    const data: { id: string; name: string }[] = await resp.json();
-    const merged = [...data, ...recentProjects.value]
-      .filter((p) => p && p.id)
-      .reduce<RecentProject[]>((acc, p) => {
-        if (!acc.find((x) => x.id === p.id)) acc.push({ id: p.id, name: p.name || "Project" });
-        return acc;
-      }, []);
-    recentProjects.value = merged.slice(0, 12);
+    const data: { id: string; name: string }[] = await fetchProjects();
+    const normalized = data
+      .filter((project) => project && project.id)
+      .map((project) => ({ id: String(project.id), name: project.name || "Project" }));
+    // Trust backend scope (tenant/workspace) as source of truth when available.
+    recentProjects.value = normalized.slice(0, 12);
     saveRecentProjects(recentProjects.value);
   } catch {
     // ignore fetch errors; local recent list still works
   }
 }
 
+async function hydrateWorkspacesFromApi() {
+  try {
+    const data = await fetchWorkspaces();
+    workspaces.value = Array.isArray(data)
+      ? data.map((item: any) => ({ id: String(item.id), name: item.name || "Workspace" }))
+      : [];
+    const activeWorkspaceId = getActiveWorkspaceId();
+    if (activeWorkspaceId && workspaces.value.some((workspace) => workspace.id === activeWorkspaceId)) {
+      selectedWorkspace.value = activeWorkspaceId;
+      const selected = workspaces.value.find((workspace) => workspace.id === activeWorkspaceId);
+      if (selected) setActiveWorkspaceMeta({ id: selected.id, name: selected.name });
+      return;
+    }
+    if (workspaces.value[0]?.id) {
+      selectedWorkspace.value = workspaces.value[0].id;
+      setActiveWorkspaceMeta({ id: workspaces.value[0].id, name: workspaces.value[0].name });
+      setActiveWorkspaceId(workspaces.value[0].id);
+      await hydrateRecentProjectsFromApi();
+    }
+  } catch {
+    workspaces.value = [];
+  }
+}
+
 onMounted(() => {
-  void hydrateRecentProjectsFromApi();
-  void fetchVersionInfo();
-  startNetworkMonitor();
-  window.addEventListener("online", handleBrowserOnline);
-  window.addEventListener("offline", handleBrowserOffline);
+  if (shouldHydrateOperationalData.value) {
+    void hydrateWorkspacesFromApi();
+    void hydrateRecentProjectsFromApi();
+  }
+  if (shouldRunTopbarDiagnostics.value) {
+    void fetchVersionInfo();
+    startNetworkMonitor();
+    window.addEventListener("online", handleBrowserOnline);
+    window.addEventListener("offline", handleBrowserOffline);
+  }
 });
+
+watch(
+  shouldHydrateOperationalData,
+  (enabled) => {
+    if (!enabled) return;
+    if (!workspaces.value.length) {
+      void hydrateWorkspacesFromApi();
+    }
+    if (!recentProjects.value.length) {
+      void hydrateRecentProjectsFromApi();
+    }
+  },
+  { immediate: false }
+);
+
+watch(
+  shouldRunTopbarDiagnostics,
+  (enabled) => {
+    if (enabled) {
+      void fetchVersionInfo();
+      startNetworkMonitor();
+      window.addEventListener("online", handleBrowserOnline);
+      window.addEventListener("offline", handleBrowserOffline);
+      return;
+    }
+    stopNetworkMonitor();
+    window.removeEventListener("online", handleBrowserOnline);
+    window.removeEventListener("offline", handleBrowserOffline);
+  },
+  { immediate: false }
+);
 
 onBeforeUnmount(() => {
   stopNetworkMonitor();
@@ -419,9 +603,7 @@ onBeforeUnmount(() => {
 
 function loadRecentProjects(): RecentProject[] {
   try {
-    const stored = localStorage.getItem("recentProjects");
-    if (!stored) return [];
-    const parsed = JSON.parse(stored);
+    const parsed = loadRecentProjectsScoped();
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((item) => item?.id);
   } catch {
@@ -431,7 +613,7 @@ function loadRecentProjects(): RecentProject[] {
 
 function saveRecentProjects(projects: RecentProject[]) {
   try {
-    localStorage.setItem("recentProjects", JSON.stringify(projects));
+    saveRecentProjectsScoped(projects);
   } catch {
     // ignore storage errors
   }

@@ -1,16 +1,16 @@
 {
-  "project_id": "0f39d7ad-9d1f-462c-b489-402089305ac9",
-  "version": 2,
+  "project_id": "b072c913-f406-4564-b299-5e0be9f8faef",
+  "version": 3,
   "status": "APPROVED",
-  "created_at": "2026-05-11T18:24:10.676215",
-  "updated_at": "2026-05-11T18:26:51.522741",
-  "approved_at": "2026-05-11T18:26:51.522741",
+  "created_at": "2026-05-15T21:46:03.830537",
+  "updated_at": "2026-05-15T21:46:52.698715",
+  "approved_at": "2026-05-15T21:46:52.698715",
   "approved_by": "ui-user",
   "nodes": [
     {
       "id": "FR-001",
       "type": "FR",
-      "text": "Home section with hero headline and CTA.",
+      "text": "Menu catalog management with categories, items, modifiers, price, and stock toggle.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -19,7 +19,7 @@
     {
       "id": "FR-002",
       "type": "FR",
-      "text": "About section with bio and skills.",
+      "text": "Reservation booking with party size, date/time, and overbooking prevention.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -28,7 +28,7 @@
     {
       "id": "FR-003",
       "type": "FR",
-      "text": "Projects section with at least 4 cards.",
+      "text": "Table state management with available, reserved, occupied, and cleaning states.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -37,7 +37,7 @@
     {
       "id": "FR-004",
       "type": "FR",
-      "text": "Contact section with name/email/message form.",
+      "text": "Dine-in order lifecycle from draft to closed with item notes and modifiers.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -46,7 +46,7 @@
     {
       "id": "FR-005",
       "type": "FR",
-      "text": "Top navigation for desktop and hamburger menu for mobile.",
+      "text": "Kitchen ticket queue with queued, cooking, ready, and picked-up statuses.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -55,7 +55,25 @@
     {
       "id": "FR-006",
       "type": "FR",
-      "text": "Active nav link highlighting based on section in view.",
+      "text": "Billing and checkout with split bills, discounts, and payment capture.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-007",
+      "type": "FR",
+      "text": "Role-based access control and audit trail for sensitive actions.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "FR-008",
+      "type": "FR",
+      "text": "Operations dashboard with sales metrics and CSV export.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -64,7 +82,7 @@
     {
       "id": "QR-001",
       "type": "QR",
-      "text": "Responsive from 320px to 1440px.",
+      "text": "Core API responses should complete within 2 seconds at p95.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -73,7 +91,7 @@
     {
       "id": "QR-002",
       "type": "QR",
-      "text": "Keyboard accessible nav and form controls.",
+      "text": "New kitchen tickets should appear within 3 seconds after order submit.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -82,7 +100,7 @@
     {
       "id": "QR-003",
       "type": "QR",
-      "text": "Lighthouse accessibility >= 90.",
+      "text": "System must prevent data loss for committed orders and payments.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -91,7 +109,25 @@
     {
       "id": "QR-004",
       "type": "QR",
-      "text": "Page load <= 2.5s on local preview.",
+      "text": "All protected actions must require authentication and authorization.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-005",
+      "type": "QR",
+      "text": "Staff should be able to place a dine-in order in 6 interactions or fewer.",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-006",
+      "type": "QR",
+      "text": "System should support at least 30 concurrent staff sessions.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -133,16 +169,16 @@
     },
     {
       "id": "EDGE-005",
-      "from_id": "FR-002",
-      "to_id": "QR-001",
+      "from_id": "FR-001",
+      "to_id": "QR-005",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-006",
-      "from_id": "FR-002",
-      "to_id": "QR-002",
+      "from_id": "FR-001",
+      "to_id": "QR-006",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
@@ -150,7 +186,7 @@
     {
       "id": "EDGE-007",
       "from_id": "FR-002",
-      "to_id": "QR-003",
+      "to_id": "QR-001",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
@@ -158,46 +194,46 @@
     {
       "id": "EDGE-008",
       "from_id": "FR-002",
-      "to_id": "QR-004",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-009",
-      "from_id": "FR-003",
-      "to_id": "QR-001",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-010",
-      "from_id": "FR-003",
       "to_id": "QR-002",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-011",
-      "from_id": "FR-003",
+      "id": "EDGE-009",
+      "from_id": "FR-002",
       "to_id": "QR-003",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-012",
-      "from_id": "FR-003",
+      "id": "EDGE-010",
+      "from_id": "FR-002",
       "to_id": "QR-004",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
+      "id": "EDGE-011",
+      "from_id": "FR-002",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-012",
+      "from_id": "FR-002",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
       "id": "EDGE-013",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-001",
       "relation": "constrains",
       "weight": 0.5,
@@ -205,7 +241,7 @@
     },
     {
       "id": "EDGE-014",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-002",
       "relation": "constrains",
       "weight": 0.5,
@@ -213,7 +249,7 @@
     },
     {
       "id": "EDGE-015",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-003",
       "relation": "constrains",
       "weight": 0.5,
@@ -221,7 +257,7 @@
     },
     {
       "id": "EDGE-016",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-004",
       "relation": "constrains",
       "weight": 0.5,
@@ -229,22 +265,86 @@
     },
     {
       "id": "EDGE-017",
-      "from_id": "FR-005",
-      "to_id": "QR-001",
+      "from_id": "FR-003",
+      "to_id": "QR-005",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-018",
-      "from_id": "FR-005",
-      "to_id": "QR-002",
+      "from_id": "FR-003",
+      "to_id": "QR-006",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-019",
+      "from_id": "FR-004",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-020",
+      "from_id": "FR-004",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-021",
+      "from_id": "FR-004",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-022",
+      "from_id": "FR-004",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-023",
+      "from_id": "FR-004",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-024",
+      "from_id": "FR-004",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-025",
+      "from_id": "FR-005",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-026",
+      "from_id": "FR-005",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-027",
       "from_id": "FR-005",
       "to_id": "QR-003",
       "relation": "constrains",
@@ -252,7 +352,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-020",
+      "id": "EDGE-028",
       "from_id": "FR-005",
       "to_id": "QR-004",
       "relation": "constrains",
@@ -260,7 +360,23 @@
       "rationale": null
     },
     {
-      "id": "EDGE-021",
+      "id": "EDGE-029",
+      "from_id": "FR-005",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-030",
+      "from_id": "FR-005",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-031",
       "from_id": "FR-006",
       "to_id": "QR-001",
       "relation": "constrains",
@@ -268,7 +384,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-022",
+      "id": "EDGE-032",
       "from_id": "FR-006",
       "to_id": "QR-002",
       "relation": "constrains",
@@ -276,7 +392,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-023",
+      "id": "EDGE-033",
       "from_id": "FR-006",
       "to_id": "QR-003",
       "relation": "constrains",
@@ -284,7 +400,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-024",
+      "id": "EDGE-034",
       "from_id": "FR-006",
       "to_id": "QR-004",
       "relation": "constrains",
@@ -292,13 +408,117 @@
       "rationale": null
     },
     {
-      "id": "EDGE-025",
-      "from_id": "FR-001",
+      "id": "EDGE-035",
+      "from_id": "FR-006",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-036",
+      "from_id": "FR-006",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-037",
+      "from_id": "FR-007",
       "to_id": "QR-001",
       "relation": "constrains",
       "weight": 0.5,
-      "rationale": ""
+      "rationale": null
+    },
+    {
+      "id": "EDGE-038",
+      "from_id": "FR-007",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-039",
+      "from_id": "FR-007",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-040",
+      "from_id": "FR-007",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-041",
+      "from_id": "FR-007",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-042",
+      "from_id": "FR-007",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-043",
+      "from_id": "FR-008",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-044",
+      "from_id": "FR-008",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-045",
+      "from_id": "FR-008",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-046",
+      "from_id": "FR-008",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-047",
+      "from_id": "FR-008",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-048",
+      "from_id": "FR-008",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
     }
   ],
-  "sha256": "7e37aa367a82ae48c461be5f5a5d0f942f2a54e8810d2ac87942531d81c338aa"
+  "sha256": "a5236f40ba6047947b198da599d5737bf113c3a9a3fe42d030f6980c4cb22009"
 }

@@ -102,6 +102,24 @@ async def test_create_run_binds_selected_task_and_records_linkage(db_session):
 
 
 @pytest.mark.anyio
+async def test_create_run_blocks_codex_when_architecture_not_derived(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Architecture gate", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/projects/{project.id}/runs",
+            json={"executor": "codex"},
+        )
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert "Architecture profile must be derived before starting a run" in payload["detail"]
+
+
+@pytest.mark.anyio
 async def test_retry_push_endpoint_clears_manual_push_flag(monkeypatch, db_session):
     session, tenant_id = db_session
     project = Project(name="Retry push API", tenant_id=tenant_id)

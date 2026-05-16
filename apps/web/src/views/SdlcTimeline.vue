@@ -142,11 +142,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import MetricCard from "../components/MetricCard.vue";
-import { fetchProjectMeta, fetchRunTimeline, listRuns, resumeRun } from "../api/lifecycle";
+import { fetchProjectMeta, fetchRunTimeline, getActiveTenantId, listRuns, resumeRun } from "../api/lifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -187,6 +187,35 @@ watch(
   },
   { immediate: true }
 );
+
+onMounted(() => {
+  window.addEventListener("agentic:tenant-changed", handleTenantChanged as EventListener);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("agentic:tenant-changed", handleTenantChanged as EventListener);
+});
+
+function resetTimelineState() {
+  project.value = null;
+  runs.value = [];
+  timeline.value = null;
+  selectedRunId.value = "";
+  actionError.value = "";
+  error.value = "";
+}
+
+function handleTenantChanged() {
+  resetTimelineState();
+  if (!getActiveTenantId()) {
+    void router.replace({
+      path: "/",
+      query: { tenantRequired: "1", requestedProject: projectId.value || undefined },
+    });
+  } else if (projectId.value) {
+    void loadPage();
+  }
+}
 
 async function loadPage() {
   if (!projectId.value) return;

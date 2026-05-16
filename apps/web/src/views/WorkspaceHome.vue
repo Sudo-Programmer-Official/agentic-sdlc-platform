@@ -118,6 +118,25 @@
 
     <section class="grid gap-4 xl:grid-cols-[1.1fr,1fr]">
       <div ref="createProjectSection" class="premium-card p-6">
+        <div class="mb-5">
+          <div class="text-sm uppercase tracking-wide text-slate-400">Workspace</div>
+          <div class="mt-1 text-xs text-slate-500">Project list and creation are scoped to the selected workspace.</div>
+          <el-select
+            v-model="selectedWorkspaceId"
+            class="mt-3 w-full"
+            placeholder="Select workspace"
+            filterable
+            clearable
+            @change="handleWorkspaceSwitch"
+          >
+            <el-option
+              v-for="workspace in workspaces"
+              :key="workspace.id"
+              :label="workspace.name"
+              :value="workspace.id"
+            />
+          </el-select>
+        </div>
         <div class="flex items-center justify-between">
           <div>
             <div class="text-sm uppercase tracking-wide text-slate-400">Create Project</div>
@@ -128,6 +147,15 @@
         <div class="mt-5 grid gap-3">
           <el-input ref="projectNameInput" v-model="projectName" placeholder="Project name" />
           <el-input v-model="projectDescription" placeholder="Describe the mission or product area" />
+          <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div class="text-xs uppercase tracking-wide text-slate-400">Starter Blueprint</div>
+            <el-select v-model="starterBlueprintPreset" class="mt-2 w-full">
+              <el-option label="Vue + FastAPI SaaS Platform (Recommended)" value="vue_fastapi_saas" />
+            </el-select>
+            <div class="mt-2 text-xs text-slate-500">
+              Project topology, architecture contract, and initial setup tasks are derived automatically.
+            </div>
+          </div>
           <div class="flex flex-wrap gap-3">
             <el-button type="primary" :loading="loading" @click="createProject">Create Project</el-button>
             <el-button plain @click="seedDemoContent">Use Demo Values</el-button>
@@ -239,6 +267,18 @@ import { ElMessage } from "element-plus";
 
 import AppIcon from "../components/AppIcon.vue";
 import MetricCard from "../components/MetricCard.vue";
+import {
+  createProject as createProjectRequest,
+  fetchProjects,
+  fetchWorkspaces,
+  getActiveTenantId,
+  getActiveWorkspaceId,
+  loadRecentProjectsScoped,
+  saveRecentProjectsScoped,
+  setActiveWorkspaceMeta,
+  setActiveWorkspaceId,
+  switchWorkspace,
+} from "../api/lifecycle";
 import { updateProjectContext } from "../state/projectContext";
 import { uiTheme } from "../state/uiTheme";
 
@@ -258,7 +298,10 @@ const projectDescription = ref("");
 const projectId = ref("");
 const loading = ref(false);
 const error = ref("");
+const starterBlueprintPreset = ref("vue_fastapi_saas");
 const recentProjects = ref<Array<{ id: string; name: string }>>([]);
+const workspaces = ref<Array<{ id: string; name: string }>>([]);
+const selectedWorkspaceId = ref("");
 const environment = ref("production");
 
 const connectedProjects = computed(() => recentProjects.value.length);
@@ -273,9 +316,19 @@ const onboardingProgress = computed(() => (recentProjects.value.length > 0 ? "67
 
 onMounted(() => {
   void hydrateGitHubInstallRedirect();
-  void refreshProjects();
+  const tenantId = getActiveTenantId();
+  if (tenantId) {
+    void refreshProjects();
+    void hydrateWorkspaces();
+  } else {
+    error.value = "Account created successfully. Tenant/workspace provisioning is pending for this user.";
+    recentProjects.value = [];
+    workspaces.value = [];
+    selectedWorkspaceId.value = "";
+  }
   void hydrateEnvironment();
   hydrateMissingProjectNotice();
+  hydrateTenantRequiredNotice();
 });
 
 watch(
@@ -292,16 +345,91 @@ watch(
   }
 );
 
+watch(
+  () => route.query.tenantRequired,
+  () => {
+    hydrateTenantRequiredNotice();
+  }
+);
+
 async function refreshProjects() {
   try {
-    const response = await fetch(`${API_BASE}/projects`);
-    if (!response.ok) return;
-    const data = await response.json();
+    const data = await fetchProjects();
     recentProjects.value = Array.isArray(data)
       ? data.map((item: any) => ({ id: item.id, name: item.name || "Project" })).slice(0, 8)
       : [];
   } catch {
     recentProjects.value = loadRecentProjects();
+  }
+}
+
+async function hydrateWorkspaces() {
+  try {
+    const data = await fetchWorkspaces();
+    workspaces.value = Array.isArray(data)
+      ? data.map((item: any) => ({ id: String(item.id), name: item.name || "Workspace" }))
+      : [];
+    const activeWorkspaceId = getActiveWorkspaceId();
+    if (activeWorkspaceId && workspaces.value.some((workspace) => workspace.id === activeWorkspaceId)) {
+      selectedWorkspaceId.value = activeWorkspaceId;
+      const selected = workspaces.value.find((workspace) => workspace.id === activeWorkspaceId);
+      if (selected) setActiveWorkspaceMeta({ id: selected.id, name: selected.name });
+      return;
+    }
+    if (workspaces.value[0]?.id) {
+      selectedWorkspaceId.value = workspaces.value[0].id;
+      setActiveWorkspaceMeta({ id: workspaces.value[0].id, name: workspaces.value[0].name });
+      setActiveWorkspaceId(workspaces.value[0].id);
+    }
+  } catch {
+    workspaces.value = [];
+    selectedWorkspaceId.value = "";
+  }
+}
+
+async function handleWorkspaceSwitch(workspaceId: string | null) {
+  if (!workspaceId) {
+    setActiveWorkspaceMeta(null);
+    setActiveWorkspaceId(null);
+    selectedWorkspaceId.value = "";
+    updateProjectContext({
+      projectId: "",
+      projectName: "No project selected",
+      stage: "UNKNOWN",
+      runStatus: "IDLE",
+      latestRunId: "",
+      activeAgents: 0,
+      updatedAt: null,
+      hasActiveRun: false,
+      architectureRefreshNeeded: false,
+      planRefreshNeeded: false,
+      testRefreshNeeded: false,
+    });
+    await refreshProjects();
+    return;
+  }
+  try {
+    await switchWorkspace(workspaceId);
+    const selected = workspaces.value.find((workspace) => workspace.id === workspaceId);
+    setActiveWorkspaceMeta(selected ? { id: selected.id, name: selected.name } : { id: workspaceId, name: "Workspace" });
+    setActiveWorkspaceId(workspaceId);
+    selectedWorkspaceId.value = workspaceId;
+    updateProjectContext({
+      projectId: "",
+      projectName: "No project selected",
+      stage: "UNKNOWN",
+      runStatus: "IDLE",
+      latestRunId: "",
+      activeAgents: 0,
+      updatedAt: null,
+      hasActiveRun: false,
+      architectureRefreshNeeded: false,
+      planRefreshNeeded: false,
+      testRefreshNeeded: false,
+    });
+    await refreshProjects();
+  } catch (err: any) {
+    error.value = err?.message || "Failed to switch workspace.";
   }
 }
 
@@ -356,12 +484,27 @@ function hydrateMissingProjectNotice() {
 
   projectId.value = String(rawMissingProject);
   error.value = `Project ${rawMissingProject} was not found in the current backend. Create a new project or open one from Recent Projects.`;
+  const nextQuery = { ...route.query } as Record<string, any>;
+  delete nextQuery.missingProject;
+  void router.replace({ path: route.path, query: nextQuery });
   window.setTimeout(() => {
     projectIdInput.value?.focus?.();
   }, 120);
 }
 
+function hydrateTenantRequiredNotice() {
+  const raw = Array.isArray(route.query.tenantRequired) ? route.query.tenantRequired[0] : route.query.tenantRequired;
+  if (!raw) return;
+  error.value = "Select a tenant before opening project routes. Set active tenant context, then retry.";
+}
+
 async function createProject() {
+  const tenantId = getActiveTenantId();
+  if (!tenantId) {
+    error.value = "Select a tenant before creating a project.";
+    ElMessage.warning(error.value);
+    return;
+  }
   if (!projectName.value.trim()) {
     error.value = "Project name is required.";
     focusCreateProjectForm();
@@ -371,18 +514,14 @@ async function createProject() {
   error.value = "";
   loading.value = true;
   try {
-    const response = await fetch(`${API_BASE}/projects`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: projectName.value,
-        description: projectDescription.value || null,
-      }),
+    const data = await createProjectRequest({
+      name: projectName.value,
+      description: projectDescription.value || null,
+      starter_blueprint_enabled: true,
+      starter_blueprint_key: "fullstack_monorepo",
+      starter_stack_preset_key: starterBlueprintPreset.value === "vue_fastapi_saas" ? "vue_fastapi" : "vue_fastapi",
+      starter_deployment_profile: "local_preview",
     });
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
-    const data = await response.json();
     updateProjectContext({
       projectId: data.id,
       projectName: data.name,
@@ -402,6 +541,11 @@ async function createProject() {
 }
 
 function openProject() {
+  if (!getActiveTenantId()) {
+    error.value = "Select a tenant before opening a project.";
+    ElMessage.warning(error.value);
+    return;
+  }
   if (!projectId.value.trim()) {
     error.value = "Project ID is required.";
     return;
@@ -411,6 +555,11 @@ function openProject() {
 }
 
 function openKnownProject(id: string) {
+  if (!getActiveTenantId()) {
+    error.value = "Select a tenant before opening a project.";
+    ElMessage.warning(error.value);
+    return;
+  }
   router.push(`/projects/${id}`);
 }
 
@@ -442,9 +591,7 @@ function seedDemoContent() {
 
 function loadRecentProjects() {
   try {
-    const stored = localStorage.getItem("recentProjects");
-    if (!stored) return [];
-    const parsed = JSON.parse(stored);
+    const parsed = loadRecentProjectsScoped();
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
@@ -458,7 +605,7 @@ function saveRecentProjects(projects: Array<{ id: string; name: string }>) {
     return acc;
   }, []);
   recentProjects.value = unique.slice(0, 8);
-  localStorage.setItem("recentProjects", JSON.stringify(recentProjects.value));
+  saveRecentProjectsScoped(recentProjects.value);
 }
 </script>
 

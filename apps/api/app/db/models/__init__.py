@@ -16,6 +16,24 @@ from app.db.models.agent import Agent
 from app.db.models.memory import ProjectMemory, RunMemory, WorkItemArtifact
 from app.db.models.project_repository import ProjectRepository
 from app.db.models.project_preview_profile import ProjectPreviewProfile
+from app.db.models.project_deployment import ProjectDeployment
+from app.db.models.deployment_profile import DeploymentProfile
+from app.db.models.deployment_provider_connector import DeploymentProviderConnector
+from app.db.models.workspace import Workspace
+from app.db.models.workspace_member import WorkspaceMember
+from app.db.models.tenant import Tenant
+from app.db.models.tenant_member import TenantMember
+from app.db.models.workspace_entitlement import WorkspaceEntitlement
+from app.db.models.workspace_usage_daily import WorkspaceUsageDaily
+from app.db.models.environment_checklist import EnvironmentChecklist
+from app.db.models.platform_config import PlatformConfig
+from app.db.models.workspace_secret import WorkspaceSecret
+from app.db.models.project_environment_variable import ProjectEnvironmentVariable
+from app.db.models.environment_validation_result import EnvironmentValidationResult
+from app.db.models.environment_sync_status import EnvironmentSyncStatus
+from app.db.models.workspace_anomaly_snapshot import WorkspaceAnomalySnapshot
+from app.db.models.admin_audit_log import AdminAuditLog
+from app.db.models.impersonation_session import ImpersonationSession
 from app.db.models.run_summary import RunSummary
 from app.db.models.recovery_attempt import RecoveryAttempt
 from app.db.models.recovery_memory import RecoveryMemoryProfile
@@ -72,6 +90,24 @@ __all__ = [
     "WorkItemArtifact",
     "ProjectRepository",
     "ProjectPreviewProfile",
+    "ProjectDeployment",
+    "DeploymentProfile",
+    "DeploymentProviderConnector",
+    "Workspace",
+    "WorkspaceMember",
+    "Tenant",
+    "TenantMember",
+    "ImpersonationSession",
+    "AdminAuditLog",
+    "WorkspaceUsageDaily",
+    "EnvironmentChecklist",
+    "PlatformConfig",
+    "WorkspaceSecret",
+    "ProjectEnvironmentVariable",
+    "EnvironmentValidationResult",
+    "EnvironmentSyncStatus",
+    "WorkspaceAnomalySnapshot",
+    "WorkspaceEntitlement",
     "RunSummary",
     "RecoveryAttempt",
     "RecoveryMemoryProfile",

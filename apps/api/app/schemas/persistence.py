@@ -13,6 +13,10 @@ TaskBranchStrategy = Literal["auto", "new", "existing"]
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: Optional[str] = None
+    starter_blueprint_enabled: bool = True
+    starter_blueprint_key: str = "fullstack_monorepo"
+    starter_stack_preset_key: str = "vue_fastapi"
+    starter_deployment_profile: str = "local_preview"
 
 
 class ProjectOut(BaseModel):
@@ -419,6 +423,7 @@ class RunCreate(BaseModel):
     executor: str = "codex"
     task_id: Optional[uuid.UUID] = None
     run_kind: str | None = None
+    request_key: str | None = None
 
 
 class VisionRunScreenshotIn(BaseModel):

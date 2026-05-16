@@ -1,4 +1,5 @@
 import { parseApiResponse } from "./http";
+import { apiFetch } from "./lifecycle";
 
 const DEFAULT_API_BASE = import.meta.env.DEV
   ? "http://localhost:8000/api/v1"
@@ -17,6 +18,6 @@ function buildQuery(params: Record<string, string | null | undefined>) {
 }
 
 export async function fetchAiOpsDashboard(params: { project_id?: string; repository_id?: string } = {}) {
-  const resp = await fetch(`${API_BASE}/ai/ops/dashboard${buildQuery(params)}`);
+  const resp = await apiFetch(`${API_BASE}/ai/ops/dashboard${buildQuery(params)}`);
   return parseApiResponse(resp);
 }

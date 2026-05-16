@@ -14,9 +14,9 @@
               Open Work Intake
             </el-button>
             <el-button
-              v-if="previewsAndPrs?.preview_url"
+              v-if="previewsAndPrs?.active_preview_url || previewsAndPrs?.preview_url"
               plain
-              @click="openExternal(previewsAndPrs.preview_url)"
+              @click="openExternal(previewsAndPrs.active_preview_url || previewsAndPrs.preview_url)"
             >
               Open Preview
             </el-button>
@@ -222,6 +222,20 @@
       :description="overviewError"
       class="shadow-sm"
     />
+    <section v-if="stalledRuns.length" class="premium-card mission-panel p-4">
+      <div class="text-xs font-semibold uppercase tracking-[0.2em] text-amber-700">Stalled Run Detector</div>
+      <div class="mt-2 space-y-2">
+        <div v-for="item in stalledRuns" :key="item.run_id" class="mission-subcard p-3 text-sm">
+          <div class="font-semibold text-slate-900">
+            Run {{ shortRunId(item.run_id) }} · {{ item.status }}
+          </div>
+          <div class="text-xs text-slate-600">
+            Last event: {{ formatTimestamp(item.last_event_at) }} · stale {{ item.stale_seconds }}s
+          </div>
+          <div class="text-xs text-amber-700">{{ item.suggested_action }}</div>
+        </div>
+      </div>
+    </section>
 
     <el-alert
       v-if="improveSuccessMessage"
@@ -1238,11 +1252,20 @@
           <div><strong>Branch:</strong> {{ previewsAndPrs.branch_name || "—" }}</div>
           <div><strong>Preview profile:</strong> {{ previewsAndPrs.profile_configured ? "Configured" : "Not configured" }}</div>
           <div>
+            <strong>Preview source:</strong>
+            <el-tag size="small" effect="light" :type="previewRefreshSuggested ? 'warning' : 'success'">
+              {{ previewRefreshSuggested ? "STALE" : "ACTIVE" }}
+            </el-tag>
+            <span class="ml-2">
+              run {{ shortRunId(previewsAndPrs.run_id || latestCompletedRunId || previewRunId) }}
+            </span>
+          </div>
+          <div>
             <strong>Preview:</strong>
             <span class="ml-1">{{ previewsAndPrs.preview_status }}</span>
             <a
-              v-if="previewsAndPrs.preview_url"
-              :href="previewsAndPrs.preview_url"
+              v-if="previewsAndPrs.active_preview_url || previewsAndPrs.preview_url"
+              :href="previewsAndPrs.active_preview_url || previewsAndPrs.preview_url"
               target="_blank"
               rel="noreferrer"
               class="ml-2 underline"
@@ -1268,7 +1291,7 @@
               </el-button>
             </div>
           </div>
-          <div v-if="previewsAndPrs.preview_url" class="mission-preview-embed">
+          <div v-if="previewsAndPrs.active_preview_url || previewsAndPrs.preview_url" class="mission-preview-embed">
             <div class="mission-preview-embed__top">
               <div class="text-xs uppercase tracking-wide text-slate-400">Live Preview</div>
               <div class="flex items-center gap-2">
@@ -1288,7 +1311,7 @@
                 >
                   Mobile
                 </el-button>
-                <el-button size="small" plain @click="openExternal(previewsAndPrs.preview_url)">
+                <el-button size="small" plain @click="openExternal(previewsAndPrs.active_preview_url || previewsAndPrs.preview_url)">
                   Open in New Tab
                 </el-button>
               </div>
@@ -1296,7 +1319,7 @@
             <div class="mission-preview-embed__viewport" :class="`is-${previewViewport}`">
               <iframe
                 class="mission-preview-embed__frame"
-                :src="previewsAndPrs.preview_url"
+                :src="previewsAndPrs.active_preview_url || previewsAndPrs.preview_url"
                 title="Mission Control preview"
                 loading="lazy"
                 referrerpolicy="no-referrer"
@@ -1304,8 +1327,13 @@
               />
             </div>
           </div>
+          <div><strong>Preview contract host:</strong> {{ previewsAndPrs.preview_domain_host || "—" }}</div>
+          <div v-if="previewsAndPrs.active_preview_url"><strong>Active preview URL:</strong> <a :href="previewsAndPrs.active_preview_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.active_preview_url }}</a></div>
+          <div v-if="previewsAndPrs.stale_preview_url"><strong>Stale preview URL:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.stale_preview_url }}</span></div>
           <div v-if="previewsAndPrs.frontend_url"><strong>Frontend:</strong> <a :href="previewsAndPrs.frontend_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.frontend_url }}</a></div>
           <div v-if="previewsAndPrs.backend_url"><strong>Backend:</strong> <a :href="previewsAndPrs.backend_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.backend_url }}</a></div>
+          <div><strong>Preview port:</strong> {{ previewPortLabel }}</div>
+          <div><strong>Last health check:</strong> {{ previewLastHealthCheckLabel }}</div>
           <div v-if="previewsAndPrs.frontend_log_path"><strong>Frontend log:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.frontend_log_path }}</span></div>
           <div v-if="previewsAndPrs.backend_log_path"><strong>Backend log:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.backend_log_path }}</span></div>
           <div v-if="previewsAndPrs.preview_expires_at"><strong>Expires:</strong> {{ formatTimestamp(previewsAndPrs.preview_expires_at) }}</div>
@@ -1317,6 +1345,12 @@
           </div>
           <div v-if="previewLaunchInfo" class="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700">
             {{ previewLaunchInfo }}
+          </div>
+          <div v-if="deployError" class="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+            {{ deployError }}
+          </div>
+          <div v-if="deployInfo" class="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            {{ deployInfo }}
           </div>
           <div><strong>Patch size:</strong> {{ previewsAndPrs.file_count }} files · +{{ previewsAndPrs.additions }} / -{{ previewsAndPrs.deletions }}</div>
           <div>
@@ -1394,9 +1428,133 @@
             >
               Report Issue / Improve
             </el-button>
+            <el-button
+              plain
+              size="small"
+              type="primary"
+              :loading="deployLoading"
+              :disabled="!previewsAndPrs.pull_request_url && !previewRunId"
+              @click="deployLatestRun('vercel')"
+            >
+              One-Click Deploy (Vercel)
+            </el-button>
+            <el-button
+              plain
+              size="small"
+              :loading="deployLoading"
+              :disabled="!previewsAndPrs.pull_request_url && !previewRunId"
+              @click="deployLatestRun('render')"
+            >
+              One-Click Deploy (Render)
+            </el-button>
+          </div>
+          <div v-if="latestDeployment?.deployment_url" class="text-xs text-slate-600">
+            <strong>Last deployment bootstrap:</strong>
+            <a :href="latestDeployment.deployment_url" target="_blank" rel="noreferrer" class="underline">
+              {{ latestDeployment.deployment_url }}
+            </a>
           </div>
         </div>
       </div>
+    </div>
+
+    <div v-if="project" class="premium-card mission-panel p-6">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm uppercase tracking-wide text-slate-400">Deployment Governance</div>
+          <div class="text-xs text-slate-500">Provider status, confidence, promotion, rollback, and event timeline.</div>
+        </div>
+        <el-button size="small" plain :loading="deploymentOpsLoading" @click="loadDeploymentOps">Refresh</el-button>
+      </div>
+      <div v-if="deploymentOpsError" class="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+        {{ deploymentOpsError }}
+      </div>
+      <div v-if="deploymentPreflight" class="mt-3 rounded-lg border px-3 py-2 text-xs" :class="deploymentPreflight.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-800'">
+        <strong>Preflight:</strong> {{ deploymentPreflight.ok ? "PASS" : "BLOCKED" }}
+        <span v-if="deploymentPreflight.errors?.length"> · {{ deploymentPreflight.errors.join("; ") }}</span>
+      </div>
+      <div v-if="deploymentLatest" class="mt-4 mission-subcard px-3 py-3 text-sm text-slate-700">
+        <div><strong>Provider:</strong> {{ deploymentLatest.provider }} · <strong>Env:</strong> {{ deploymentLatest.environment }} · <strong>Strategy:</strong> {{ deploymentLatest.deployment_strategy }}</div>
+        <div><strong>Status:</strong> {{ deploymentLatest.status }} · <strong>Confidence:</strong> {{ Math.round(Number(deploymentLatest.deployment_confidence_score || 0) * 100) }}%</div>
+        <div v-if="deploymentLatest.deployment_url"><strong>URL:</strong> <a :href="deploymentLatest.deployment_url" target="_blank" rel="noreferrer" class="underline">{{ deploymentLatest.deployment_url }}</a></div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <el-button size="small" plain :loading="deploymentOpsLoading" @click="retryDeploymentNow">Retry Deploy</el-button>
+          <el-button size="small" plain type="warning" :loading="deploymentOpsLoading" @click="rollbackDeploymentNow">Rollback</el-button>
+          <el-button size="small" plain type="primary" :loading="deploymentOpsLoading" @click="promoteDeploymentNow('STAGING')">Promote to STAGING</el-button>
+          <el-button
+            size="small"
+            plain
+            type="success"
+            :disabled="deploymentReadinessContract ? !deploymentReadinessContract.safe_to_production : false"
+            :loading="deploymentOpsLoading"
+            @click="promoteDeploymentNow('PRODUCTION')"
+          >
+            Promote to PRODUCTION
+          </el-button>
+        </div>
+      </div>
+      <div v-if="deploymentIntelligence" class="mt-3 mission-subcard px-3 py-3 text-xs text-slate-700">
+        <div><strong>Deploy Intelligence:</strong> {{ deploymentIntelligence.total_deployments }} deployments · {{ Math.round((deploymentIntelligence.success_rate || 0) * 100) }}% success · {{ Math.round((deploymentIntelligence.avg_confidence || 0) * 100) }}% avg confidence</div>
+        <div v-if="deploymentIntelligence.top_failure_clusters?.length" class="mt-1">
+          <strong>Top failures:</strong>
+          {{ deploymentIntelligence.top_failure_clusters.map((c: any) => `${c.cluster} (${c.count})`).join(', ') }}
+        </div>
+        <div v-if="deploymentIntelligence.recent_manual_degrade_reasons?.length" class="mt-1">
+          <strong>Manual degrade reasons:</strong>
+          {{ deploymentIntelligence.recent_manual_degrade_reasons.join(' | ') }}
+        </div>
+      </div>
+      <DeploymentTrustSurfaceCard v-if="deploymentReadinessContract" class="mt-3" :contract="deploymentReadinessContract" />
+      <div v-else-if="deploymentTrustSurface" class="mt-3 mission-subcard px-3 py-3 text-xs text-slate-700">
+        <div>
+          <strong>Trust Surface:</strong> {{ deploymentTrustSurface.tier }}
+          · confidence {{ deploymentTrustSurface.confidencePct }}%
+          · rollback confidence {{ deploymentTrustSurface.rollbackConfidencePct }}%
+        </div>
+        <div class="mt-1">
+          <strong>Evidence:</strong> {{ deploymentTrustSurface.evidence }}
+        </div>
+        <div v-if="deploymentTrustSurface.blockers.length" class="mt-1">
+          <strong>Blockers:</strong> {{ deploymentTrustSurface.blockers.join(" | ") }}
+        </div>
+      </div>
+      <div class="mt-3 mission-subcard px-3 py-3 text-xs text-slate-700">
+        <div>
+          <strong>Environment Readiness:</strong> {{ missionEnvironmentReadiness.scorePct }}% overall
+        </div>
+        <div class="mt-1 flex flex-wrap gap-2">
+          <span v-for="env in missionEnvironmentReadiness.environments" :key="env.environment" class="topbar-chip">
+            {{ env.environment }} {{ env.scorePct }}% · user blockers {{ env.userPending }}
+          </span>
+        </div>
+        <div v-if="missionEnvironmentReadiness.nextUserActions.length" class="mt-1">
+          <strong>Next user actions:</strong>
+          {{ missionEnvironmentReadiness.nextUserActions.map((item) => item.label).join(" | ") }}
+        </div>
+        <div class="mt-2">
+          <el-button size="small" plain @click="goToEnvironmentCenter">Open Environment Center</el-button>
+        </div>
+      </div>
+      <div class="mt-3 flex flex-wrap gap-2 text-xs">
+        <button type="button" class="topbar-chip" :style="deploymentEventFilter === 'all' ? activeFilterStyle : undefined" @click="deploymentEventFilter = 'all'">All</button>
+        <button type="button" class="topbar-chip" :style="deploymentEventFilter === 'health' ? activeFilterStyle : undefined" @click="deploymentEventFilter = 'health'">Health</button>
+        <button type="button" class="topbar-chip" :style="deploymentEventFilter === 'rollback' ? activeFilterStyle : undefined" @click="deploymentEventFilter = 'rollback'">Rollback</button>
+        <button type="button" class="topbar-chip" :style="deploymentEventFilter === 'promotion' ? activeFilterStyle : undefined" @click="deploymentEventFilter = 'promotion'">Promotion</button>
+        <button type="button" class="topbar-chip" :style="deploymentEventFilter === 'manual' ? activeFilterStyle : undefined" @click="deploymentEventFilter = 'manual'">Manual</button>
+      </div>
+      <div v-if="filteredDeploymentEvents.length" class="mt-4 max-h-52 overflow-auto rounded-lg border border-slate-200">
+        <button
+          v-for="evt in filteredDeploymentEvents"
+          :key="evt.id"
+          type="button"
+          class="block w-full border-b border-slate-100 px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
+          @click="openDeploymentEventDetail(evt)"
+        >
+          <div class="font-medium text-slate-900">{{ evt.event_type || evt.action_type }}</div>
+          <div>{{ formatTimestamp(evt.created_at) }} · {{ evt.action_type }}</div>
+        </button>
+      </div>
+      <div v-else-if="!deploymentOpsLoading" class="mt-4 text-xs text-slate-500">No deployment events yet.</div>
     </div>
 
     <div v-if="project" class="premium-card mission-panel p-6">
@@ -1861,6 +2019,22 @@
         </div>
       </div>
     </div>
+
+    <el-dialog v-model="deploymentEventDialogOpen" title="Deployment Event Detail" width="760px">
+      <div v-if="selectedDeploymentEvent" class="space-y-3 text-sm text-slate-700">
+        <div><strong>Type:</strong> {{ selectedDeploymentEvent.event_type || selectedDeploymentEvent.action_type }}</div>
+        <div><strong>Action:</strong> {{ selectedDeploymentEvent.action_type }}</div>
+        <div><strong>Time:</strong> {{ formatTimestamp(selectedDeploymentEvent.created_at) }}</div>
+        <div><strong>Actor:</strong> {{ selectedDeploymentEvent.actor || "system" }}</div>
+        <div>
+          <strong>Metadata</strong>
+          <pre class="mt-1 max-h-72 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">{{
+            JSON.stringify(selectedDeploymentEvent.extra_metadata || {}, null, 2)
+          }}</pre>
+        </div>
+      </div>
+      <div v-else class="text-sm text-slate-500">No event selected.</div>
+    </el-dialog>
 
     <el-dialog v-model="artifactDialogOpen" title="Explain Artifact" width="720px">
       <div v-if="artifactExplainLoading" class="text-sm text-slate-500">Loading artifact context...</div>
@@ -2555,6 +2729,19 @@
             {{ createPrDiffPreview.files.map((file) => file.path).join(", ") }}
           </div>
         </div>
+        <div v-if="createPrChangeSummary" class="mission-subcard px-3 py-3 text-sm text-slate-700">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Change Summary</div>
+          <div class="mt-2 text-sm font-medium text-slate-800">{{ createPrChangeSummary.title }}</div>
+          <div v-if="createPrChangeSummary.goal" class="mt-1 text-xs text-slate-600">
+            {{ createPrChangeSummary.goal }}
+          </div>
+          <ul class="mt-3 space-y-1 text-xs text-slate-600">
+            <li><strong>Scope:</strong> {{ createPrChangeSummary.scope }}</li>
+            <li><strong>Files touched:</strong> {{ createPrChangeSummary.filesTouched }}</li>
+            <li><strong>Diff:</strong> {{ createPrChangeSummary.diff }}</li>
+            <li><strong>Risk:</strong> {{ createPrChangeSummary.risk }}</li>
+          </ul>
+        </div>
         <div v-if="createPrDiffError" class="text-sm text-rose-600">{{ createPrDiffError }}</div>
         <div v-if="createPrResult?.pull_request_url" class="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
           Pull request created:
@@ -2571,6 +2758,12 @@
           {{ createPrBlockingReason }}
         </div>
         <div v-if="createPrError" class="text-sm text-rose-600">{{ createPrError }}</div>
+        <div
+          v-if="createPrRemediationHint"
+          class="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800"
+        >
+          {{ createPrRemediationHint }}
+        </div>
       </div>
       <template #footer>
         <div class="flex justify-end gap-2">
@@ -2603,6 +2796,7 @@ import AppIcon from "../components/AppIcon.vue";
 import ExecutionTimeline from "../components/ExecutionTimeline.vue";
 import MetricCard from "../components/MetricCard.vue";
 import StageBadge from "../components/StageBadge.vue";
+import DeploymentTrustSurfaceCard from "../components/DeploymentTrustSurfaceCard.vue";
 import OperatorConsole from "../components/operator/OperatorConsole.vue";
 import ExecutionConsolePanel from "../components/workbench/ExecutionConsolePanel.vue";
 import ReviewSurfacePanel from "../components/workbench/ReviewSurfacePanel.vue";
@@ -2616,6 +2810,15 @@ import {
   createVisionRun,
   createRunStrategies,
   createRunPullRequest,
+  createProjectDeployment,
+  listProjectDeployments,
+  listDeploymentEvents,
+  retryProjectDeployment,
+  rollbackProjectDeployment,
+  promoteProjectDeployment,
+  preflightProjectDeployment,
+  fetchProjectDeploymentIntelligence,
+  fetchProjectDeploymentReadiness,
   discardRun,
   deleteRunPreview,
   explainArtifact,
@@ -2626,9 +2829,12 @@ import {
   fetchRunNarrative,
   fetchRunStrategies,
   fetchHealth,
+  getActiveTenantId,
   fetchLifecycleScore,
   fetchProjectMeta,
+  getProjectEnvironmentChecklists,
   fetchRunTimeline,
+  getOrCreateActionRequestKey,
   findSimilarRuns,
   hasRunMemorySearchContext,
   forkRun,
@@ -2644,6 +2850,8 @@ import {
   resumeRun,
   updateRunStatus,
 } from "../api/lifecycle";
+import { buildDeploymentTrustSummary, clampPercent } from "../composables/deploymentTrust";
+import { buildEnvironmentReadiness } from "../composables/environmentReadiness";
 import { updateProjectContext } from "../state/projectContext";
 
 const route = useRoute();
@@ -2704,6 +2912,21 @@ const createPrApprovals = ref<any[]>([]);
 const previewLaunchLoading = ref(false);
 const previewLaunchError = ref("");
 const previewLaunchInfo = ref("");
+const deployLoading = ref(false);
+const deployError = ref("");
+const deployInfo = ref("");
+const latestDeployment = ref<any | null>(null);
+const deploymentRows = ref<any[]>([]);
+const deploymentEvents = ref<any[]>([]);
+const deploymentOpsLoading = ref(false);
+const deploymentOpsError = ref("");
+const deploymentPreflight = ref<any | null>(null);
+const deploymentIntelligence = ref<any | null>(null);
+const deploymentReadinessContract = ref<any | null>(null);
+const environmentChecklistSummary = ref<any | null>(null);
+const deploymentEventDialogOpen = ref(false);
+const selectedDeploymentEvent = ref<any | null>(null);
+const deploymentEventFilter = ref<"all" | "health" | "rollback" | "promotion" | "manual">("all");
 const previewViewport = ref<"desktop" | "mobile">("desktop");
 const forkDialogOpen = ref(false);
 const forkLoading = ref(false);
@@ -2927,6 +3150,7 @@ const similarRunMatches = computed(() =>
 const intakeItems = computed(() => missionOverview.value?.work_intake || []);
 const visionReady = computed(() => Boolean(projectId.value && visionGoalText.value.trim() && visionScreenshots.value.length));
 const recentRunCards = computed(() => missionOverview.value?.recent_runs || []);
+const stalledRuns = computed(() => missionOverview.value?.stalled_runs || []);
 const recentRunCardsEnhanced = computed(() =>
   recentRunCards.value.map((card: any) => {
     const recoveryCount = Number(card?.recovery_count || 0);
@@ -2950,6 +3174,87 @@ const recentRunCardsEnhanced = computed(() =>
 );
 const latestChangeImpact = computed(() => missionOverview.value?.latest_change_impact || null);
 const previewsAndPrs = computed(() => missionOverview.value?.previews_and_prs || null);
+const deploymentLatest = computed(() => deploymentRows.value[0] || latestDeployment.value || null);
+const filteredDeploymentEvents = computed(() => {
+  const mode = deploymentEventFilter.value;
+  if (mode === "all") return deploymentEvents.value;
+  return deploymentEvents.value.filter((evt) => {
+    const type = String(evt?.event_type || "").toUpperCase();
+    const action = String(evt?.action_type || "").toLowerCase();
+    if (mode === "health") {
+      return type.includes("HEALTH") || action.includes("health");
+    }
+    if (mode === "rollback") {
+      return type.includes("ROLLBACK") || action.includes("rollback");
+    }
+    if (mode === "promotion") {
+      return type.includes("PROMOTION") || action.includes("promot");
+    }
+    if (mode === "manual") {
+      return type.includes("MANUAL") || action.includes("degraded") || action.includes("manual");
+    }
+    return true;
+  });
+});
+const deploymentTrustSurface = computed(() => {
+  const confidence = Number(
+    deploymentLatest.value?.deployment_confidence_score ?? deploymentIntelligence.value?.avg_confidence ?? 0
+  );
+  const confidencePct = clampPercent(confidence * 100);
+  const successRate = Number(deploymentIntelligence.value?.success_rate ?? 1);
+  const successPct = clampPercent(successRate * 100);
+  const preflightErrors = Array.isArray(deploymentPreflight.value?.errors) ? deploymentPreflight.value.errors : [];
+  const topFailures = Array.isArray(deploymentIntelligence.value?.top_failure_clusters)
+    ? deploymentIntelligence.value.top_failure_clusters
+    : [];
+  const manualDegrades = Array.isArray(deploymentIntelligence.value?.recent_manual_degrade_reasons)
+    ? deploymentIntelligence.value.recent_manual_degrade_reasons
+    : [];
+  const blockers: string[] = [
+    ...preflightErrors.map((err: any) => String(err)),
+    ...topFailures.slice(0, 2).map((row: any) => `${row?.cluster} (${row?.count})`),
+    ...(preflightErrors.length || topFailures.length ? [] : manualDegrades.slice(0, 2).map((row: any) => String(row))),
+  ];
+  const evidence = `${successPct}% deploy success, ${topFailures.length} failure clusters, ${manualDegrades.length} manual degradations`;
+  return buildDeploymentTrustSummary({
+    confidencePct: deploymentPreflight.value?.ok ? confidencePct : Math.min(confidencePct, 55),
+    successPct,
+    blockerSignals: blockers,
+    evidence,
+  });
+});
+const missionEnvironmentReadiness = computed(() => {
+  if (environmentChecklistSummary.value) {
+    const summary = environmentChecklistSummary.value;
+    const nextUserActions = Array.isArray(summary.items)
+      ? summary.items.filter((item: any) => item?.owner === "user" && String(item?.status || "").toLowerCase() !== "done").slice(0, 6)
+      : [];
+    const environments = Array.isArray(summary.environments)
+      ? summary.environments.map((env: any) => ({
+          environment: String(env?.environment || ""),
+          scorePct: Number(env?.score_pct || 0),
+          userPending: Number(env?.user_pending || 0),
+        }))
+      : [];
+    return {
+      scorePct: Number(summary.score_pct || 0),
+      environments,
+      nextUserActions: nextUserActions.map((item: any) => ({ label: String(item?.label || item?.item_key || "User action required") })),
+    };
+  }
+  const provider = String(deploymentLatest.value?.provider || "").toLowerCase();
+  const hasProvider = provider === "vercel" || provider === "render";
+  const hasRepo = Boolean(previewsAndPrs.value?.repo_full_name || previewsAndPrs.value?.repo_url);
+  const foundationMissing = deploymentPreflight.value?.errors || [];
+  return buildEnvironmentReadiness({
+    hasRepo,
+    hasDeploymentConnector: hasProvider,
+    deploymentProviders: hasProvider ? [provider] : [],
+    foundationMissing,
+    previewReady: String(previewsAndPrs.value?.preview_status || "").toUpperCase() === "READY",
+    deploymentPreflightOk: deploymentPreflight.value?.ok ?? null,
+  });
+});
 const architectureProfile = computed(() => missionOverview.value?.architecture_profile || null);
 const projectContract = computed(() => missionOverview.value?.project_contract || null);
 const projectContractProfileExists = computed(() => Boolean(projectContract.value?.profile_exists));
@@ -2983,12 +3288,65 @@ const previewRefreshSuggested = computed(() => {
   const previewSourceRunId = String(previewsAndPrs.value?.run_id || "");
   return Boolean(previewUrl && latestCompletedRunId.value && previewSourceRunId && previewSourceRunId !== latestCompletedRunId.value);
 });
+const previewPortLabel = computed(() => {
+  const explicitFrontendPort = previewsAndPrs.value?.frontend_port;
+  const explicitBackendPort = previewsAndPrs.value?.backend_port;
+  if (explicitFrontendPort || explicitBackendPort) {
+    const frontendLabel = explicitFrontendPort ? `frontend ${explicitFrontendPort}` : null;
+    const backendLabel = explicitBackendPort ? `backend ${explicitBackendPort}` : null;
+    return [frontendLabel, backendLabel].filter(Boolean).join(" · ");
+  }
+  const frontendPort = extractPort(previewsAndPrs.value?.frontend_url);
+  const backendPort = extractPort(previewsAndPrs.value?.backend_url);
+  if (frontendPort || backendPort) {
+    const frontendLabel = frontendPort ? `frontend ${frontendPort}` : null;
+    const backendLabel = backendPort ? `backend ${backendPort}` : null;
+    return [frontendLabel, backendLabel].filter(Boolean).join(" · ");
+  }
+  return "—";
+});
+const previewLastHealthCheckLabel = computed(() => {
+  const raw =
+    previewsAndPrs.value?.last_health_check_at ||
+    previewsAndPrs.value?.preview_checked_at ||
+    previewsAndPrs.value?.verified_at ||
+    previewsAndPrs.value?.updated_at;
+  return raw ? formatTimestamp(raw) : "—";
+});
 const strategyLearning = computed(() => missionOverview.value?.strategy_learning || []);
 const systemInsights = computed(() => missionOverview.value?.system_insights || null);
 const violationInsights = computed(() => missionOverview.value?.violation_insights || null);
 const importedReferences = computed(() => missionOverview.value?.imported_references || []);
 const latestArtifactApproval = computed(() => createPrApprovals.value[0] || null);
 const latestArtifactApprovalStatus = computed(() => latestArtifactApproval.value?.status || null);
+const createPrChangeSummary = computed(() => {
+  const run = selectedPrRunId.value ? findRunById(selectedPrRunId.value) : latestRun.value;
+  const summary = run?.summary || {};
+  const diffPreview = createPrDiffPreview.value;
+  const fileCount = Number(diffPreview?.file_count || 0);
+  const additions = Number(diffPreview?.additions || 0);
+  const deletions = Number(diffPreview?.deletions || 0);
+  const files = Array.isArray(diffPreview?.files) ? diffPreview.files : [];
+  const taskTitle = String(summary?.task_title || "").trim();
+  const goal = String(summary?.goal || "").trim();
+  const diffSummary = String(summary?.diff_summary || "").trim();
+  if (!taskTitle && !goal && !diffSummary && !fileCount && !files.length) return null;
+  const touchedFiles = files
+    .map((file: any) => String(file?.path || "").trim())
+    .filter(Boolean);
+  const scopeLabel = touchedFiles.length
+    ? touchedFiles.join(", ")
+    : diffSummary || "Patch scoped to selected artifact.";
+  const risk = fileCount <= 1 ? "Low (small focused patch)." : "Medium (multi-file patch; review carefully).";
+  return {
+    title: taskTitle || "Patch update",
+    goal,
+    scope: scopeLabel,
+    filesTouched: fileCount || touchedFiles.length || 0,
+    diff: `+${additions} / -${deletions}`,
+    risk,
+  };
+});
 const createPrBlockingReason = computed(() => {
   if (!selectedPrArtifact.value) return "Select a patch artifact before creating a pull request.";
   if (latestArtifactApprovalStatus.value !== "APPROVED") {
@@ -3006,6 +3364,35 @@ const createPrBlockingReason = computed(() => {
 const createPrReady = computed(
   () => Boolean(selectedPrArtifact.value) && latestArtifactApprovalStatus.value === "APPROVED" && !createPrBlockingReason.value
 );
+const createPrRemediationHint = computed(() => {
+  const message = String(createPrError.value || "").toLowerCase();
+  if (!message) return "";
+  if (message.includes("github app installation is required")) {
+    return "Reconnect this repository using GitHub App strategy, then retry Create PR.";
+  }
+  if (message.includes("git clone auth strategy")) {
+    return "Switch repository auth strategy to GitHub App in Connect Repository, save, and rerun Test Clone.";
+  }
+  if (message.includes("permission") || message.includes("forbidden") || message.includes("403")) {
+    return "GitHub permissions are insufficient. Verify app installation access and repository write scope.";
+  }
+  if (
+    message.includes("dns")
+    || message.includes("network")
+    || message.includes("timed out")
+    || message.includes("connection refused")
+    || message.includes("temporarily unavailable")
+  ) {
+    return "Network/connectivity issue detected. Verify internet stability, then retry Create PR.";
+  }
+  if (message.includes("already exists") || message.includes("422") || message.includes("conflict")) {
+    return "Branch or PR may already exist. Use a new branch name or open the existing PR from GitHub.";
+  }
+  if (message.includes("no repository changes available")) {
+    return "No diff remains to open a PR. Refresh preview/diff and ensure a patch artifact is selected.";
+  }
+  return "Open PR Flow checks: repository connected, patch approved, and GitHub app access still valid.";
+});
 const comparisonHeadlineLines = computed(() => {
   const result = compareResult.value;
   if (!result) return [];
@@ -3493,14 +3880,26 @@ onMounted(() => {
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", syncPolling);
   }
+  window.addEventListener("agentic:tenant-changed", handleTenantChanged as EventListener);
 });
 
 onBeforeUnmount(() => {
   if (typeof document !== "undefined") {
     document.removeEventListener("visibilitychange", syncPolling);
   }
+  window.removeEventListener("agentic:tenant-changed", handleTenantChanged as EventListener);
   stopPolling();
 });
+
+function handleTenantChanged() {
+  resetState();
+  if (!getActiveTenantId()) {
+    void router.replace({
+      path: "/",
+      query: { tenantRequired: "1", requestedProject: projectId.value || undefined },
+    });
+  }
+}
 
 function resetState() {
   stopPolling();
@@ -3594,6 +3993,17 @@ function resetState() {
   projectContractEnforcementLoading.value = false;
   projectContractStrictLoading.value = false;
   projectContractActionError.value = "";
+  latestDeployment.value = null;
+  deploymentRows.value = [];
+  deploymentEvents.value = [];
+  deploymentOpsLoading.value = false;
+  deploymentOpsError.value = "";
+  deploymentPreflight.value = null;
+  deploymentIntelligence.value = null;
+  deploymentReadinessContract.value = null;
+  deploymentEventDialogOpen.value = false;
+  selectedDeploymentEvent.value = null;
+  deploymentEventFilter.value = "all";
   pinnedRunId.value = "";
 }
 
@@ -3669,6 +4079,7 @@ async function loadAll() {
     void loadSimilarRuns();
     void loadMissionOverview();
     void loadMemoryTimeline();
+    void loadDeploymentOps();
     syncContext();
     syncPolling();
   } catch (err: any) {
@@ -3875,6 +4286,7 @@ async function restartPreviewLaunch() {
     }
     await launchRunPreview(previewRunId.value, { reuse_if_healthy: false });
     await refreshPreviewStateUntilSettled();
+    await refreshOverviewSurface();
     const status = String(previewsAndPrs.value?.preview_status || "").toUpperCase();
     previewLaunchInfo.value = status === "READY"
       ? "Preview restarted and healthy."
@@ -3894,7 +4306,7 @@ async function refreshPreviewToLatestRun() {
   previewLaunchInfo.value = `Refreshing preview for run ${shortRunId(latestCompletedRunId.value)}…`;
   try {
     await launchRunPreview(latestCompletedRunId.value, { reuse_if_healthy: false });
-    await loadMissionOverview();
+    await refreshOverviewSurface();
     previewLaunchInfo.value = "Preview switched to latest run.";
   } catch (err: any) {
     previewLaunchError.value = err?.message || "Failed to refresh preview to latest run.";
@@ -3916,7 +4328,7 @@ async function restartPreviewToLatestRun() {
       // stale/missing state should not block restart
     }
     await launchRunPreview(latestCompletedRunId.value, { reuse_if_healthy: false });
-    await loadMissionOverview();
+    await refreshOverviewSurface();
     previewLaunchInfo.value = "Latest run preview restarted.";
   } catch (err: any) {
     previewLaunchError.value = err?.message || "Failed to restart latest run preview.";
@@ -3937,8 +4349,157 @@ async function refreshPreviewStateUntilSettled() {
   }
 }
 
+async function deployLatestRun(provider: "vercel" | "render" = "vercel") {
+  if (!projectId.value) return;
+  deployLoading.value = true;
+  deployError.value = "";
+  deployInfo.value = "";
+  try {
+    const requestKey = getOrCreateActionRequestKey(
+      "create_deployment",
+      `mission_control:deploy:${provider}:${projectId.value}:${previewRunId.value || latestRun.value?.id || "project"}`
+    );
+    const deployment = await createProjectDeployment(projectId.value, {
+      provider,
+      target: "user_app",
+      run_id: previewRunId.value || latestRun.value?.id || null,
+      request_key: requestKey,
+      repository_url: previewsAndPrs.value?.repo_url || undefined,
+      repository_full_name: previewsAndPrs.value?.repo_full_name || undefined,
+      branch_name: previewsAndPrs.value?.branch_name || latestRun.value?.branch_name || undefined,
+      created_by: "ui-user",
+    });
+    latestDeployment.value = deployment;
+    await loadDeploymentOps();
+    const url = String(deployment?.deployment_url || "");
+    deployInfo.value = url
+      ? `Deployment bootstrap created (${provider}). Opening provider import…`
+      : `Deployment record created for ${provider}.`;
+    if (url) {
+      openExternal(url);
+    }
+  } catch (err: any) {
+    deployError.value = err?.message || "Failed to create deployment.";
+  } finally {
+    deployLoading.value = false;
+  }
+}
+
+async function loadDeploymentOps() {
+  if (!projectId.value) return;
+  deploymentOpsLoading.value = true;
+  deploymentOpsError.value = "";
+  try {
+    const rows = await listProjectDeployments(projectId.value, 20);
+    deploymentRows.value = Array.isArray(rows) ? rows : [];
+    const current = deploymentRows.value[0] || null;
+    latestDeployment.value = current;
+    deploymentEvents.value = current?.id ? await listDeploymentEvents(current.id, 80) : [];
+    if (current) {
+      deploymentPreflight.value = await preflightProjectDeployment(projectId.value, {
+        provider: current.provider || "vercel",
+        environment: current.environment || "PREVIEW",
+        deployment_strategy: current.deployment_strategy || "static_frontend",
+        repository_url: current?.extra_metadata?.repository_url || null,
+        repository_full_name: current?.extra_metadata?.repository_full_name || null,
+        branch_name: current?.extra_metadata?.branch_name || null,
+      });
+    } else {
+      deploymentPreflight.value = null;
+    }
+    deploymentIntelligence.value = await fetchProjectDeploymentIntelligence(projectId.value, 80);
+    try {
+      environmentChecklistSummary.value = await getProjectEnvironmentChecklists(projectId.value, false);
+    } catch {
+      environmentChecklistSummary.value = null;
+    }
+    try {
+      deploymentReadinessContract.value = await fetchProjectDeploymentReadiness(projectId.value, "PRODUCTION");
+    } catch {
+      deploymentReadinessContract.value = null;
+    }
+  } catch (err: any) {
+    deploymentOpsError.value = err?.message || "Failed to load deployment governance data.";
+  } finally {
+    deploymentOpsLoading.value = false;
+  }
+}
+
+async function retryDeploymentNow() {
+  const current = deploymentLatest.value;
+  if (!current?.id) return;
+  deploymentOpsLoading.value = true;
+  try {
+    await retryProjectDeployment(current.id, { force: true });
+    await loadDeploymentOps();
+    ElMessage.success("Deployment re-queued.");
+  } catch (err: any) {
+    deploymentOpsError.value = err?.message || "Failed to retry deployment.";
+  } finally {
+    deploymentOpsLoading.value = false;
+  }
+}
+
+async function rollbackDeploymentNow() {
+  const current = deploymentLatest.value;
+  if (!current?.id) return;
+  deploymentOpsLoading.value = true;
+  try {
+    await rollbackProjectDeployment(current.id, {
+      reason: "Operator-triggered rollback from Mission Control",
+      trigger: "manual",
+      request_key: getOrCreateActionRequestKey("rollback_deployment", `mission_control:rollback:${current.id}`),
+      created_by: "ui-user",
+    });
+    await loadDeploymentOps();
+    ElMessage.success("Rollback requested.");
+  } catch (err: any) {
+    deploymentOpsError.value = err?.message || "Failed to request rollback.";
+  } finally {
+    deploymentOpsLoading.value = false;
+  }
+}
+
+async function promoteDeploymentNow(targetEnvironment: "STAGING" | "PRODUCTION") {
+  const current = deploymentLatest.value;
+  if (!current?.id) return;
+  deploymentOpsLoading.value = true;
+  try {
+    await promoteProjectDeployment(current.id, {
+      target_environment: targetEnvironment,
+      reason: `Promoted from Mission Control to ${targetEnvironment}`,
+      request_key: getOrCreateActionRequestKey(
+        "promote_deployment",
+        `mission_control:promote:${current.id}:${targetEnvironment}`
+      ),
+      created_by: "ui-user",
+    });
+    await loadDeploymentOps();
+    ElMessage.success(`Promotion to ${targetEnvironment} queued.`);
+  } catch (err: any) {
+    deploymentOpsError.value = err?.message || `Failed to promote to ${targetEnvironment}.`;
+  } finally {
+    deploymentOpsLoading.value = false;
+  }
+}
+
+function openDeploymentEventDetail(evt: any) {
+  selectedDeploymentEvent.value = evt;
+  deploymentEventDialogOpen.value = true;
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractPort(url?: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.port || null;
+  } catch {
+    return null;
+  }
 }
 
 async function loadRunRuntime() {
@@ -4174,7 +4735,8 @@ async function startRunFromIntake(item: any) {
   overviewError.value = "";
   try {
     const executor = "codex";
-    const createdRun = await createRun(projectId.value, executor);
+    const requestKey = getOrCreateActionRequestKey("start_run", `mission_control:intake:${projectId.value}:${item?.id || "unknown"}`);
+    const createdRun = await createRun(projectId.value, executor, null, null, { request_key: requestKey });
     if (createdRun?.id) {
       runs.value = canonicalizeRuns([createdRun, ...runs.value.filter((run) => run?.id !== createdRun.id)]);
       ElMessage.success(`Run started: ${String(createdRun.id).slice(0, 8)}`);
@@ -4350,10 +4912,12 @@ async function submitForkRun() {
   forkLoading.value = true;
   forkError.value = "";
   try {
+    const requestKey = getOrCreateActionRequestKey("fork_run", `mission_control:fork:${latestRun.value.id}`);
     await forkRun(latestRun.value.id, {
       executor: forkExecutor.value || undefined,
       branch_name: forkBranchName.value.trim() || undefined,
       start_now: forkStartNow.value,
+      request_key: requestKey,
       summary_overrides: forkNotes.value.trim()
         ? {
             fork_notes: forkNotes.value.trim(),
@@ -4542,6 +5106,10 @@ async function refreshStrategyGroup() {
 
 function goToOverview() {
   router.push(`/projects/${projectId.value}`);
+}
+
+function goToEnvironmentCenter() {
+  router.push(`/projects/${projectId.value}/environments`);
 }
 
 function openApprovalsView() {
@@ -4774,11 +5342,16 @@ async function submitCreatePr() {
   createPrLoading.value = true;
   createPrError.value = "";
   try {
+    const requestKey = getOrCreateActionRequestKey(
+      "create_pr",
+      `mission_control:create_pr:${selectedPrRunId.value}:${selectedPrArtifact.value.id}`
+    );
     createPrResult.value = await createRunPullRequest(selectedPrRunId.value, {
       artifact_id: selectedPrArtifact.value.id,
       title: createPrTitle.value.trim() || undefined,
       body: createPrBody.value.trim() || undefined,
       branch_name: createPrBranch.value.trim() || undefined,
+      request_key: requestKey,
     });
     createPrLoading.value = false;
     void refreshOverviewSurface().catch(() => {

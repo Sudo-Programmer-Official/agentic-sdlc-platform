@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Approval, Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, Task, WorkItem
+from app.db.models import Approval, Artifact, Document, Project, ProjectPreviewProfile, ProjectRepository, Run, RunEvent, Task, WorkItem
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -548,7 +548,67 @@ async def test_mission_control_overview_preview_panel_prefers_latest_deliverable
     assert data["previews_and_prs"]["branch_name"] == "run/deliverable"
     assert data["previews_and_prs"]["preview_status"] == "READY"
     assert data["previews_and_prs"]["preview_url"] == "http://127.0.0.1:3100"
+    assert data["previews_and_prs"]["active_preview_url"] == "http://127.0.0.1:3100"
+    assert data["previews_and_prs"]["stale_preview_url"] is None
+    assert data["previews_and_prs"]["frontend_port"] is None
+    assert data["previews_and_prs"]["backend_port"] is None
+    assert data["previews_and_prs"]["last_health_check_at"] is None
+    assert data["previews_and_prs"]["preview_domain_host"] is not None
+    assert data["previews_and_prs"]["preview_domain_url"].startswith("https://")
     assert data["previews_and_prs"]["file_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_mission_control_overview_preview_panel_exposes_active_vs_stale_urls_and_health_fields(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Preview URL split", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    started = datetime.utcnow() - timedelta(minutes=8)
+
+    deliverable_run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/preview-split",
+        workspace_status="SEEDED",
+        started_at=started,
+        finished_at=started + timedelta(seconds=50),
+        summary={
+            "goal": "Refresh preview after restart",
+            "preview": {
+                "status": "READY",
+                "mode": "local",
+                "preview_url": "http://127.0.0.1:3100",
+                "last_checked_at": datetime.utcnow().isoformat(),
+                "frontend": {
+                    "url": "http://127.0.0.1:3200",
+                    "port": 3200,
+                },
+                "backend": {
+                    "url": "http://127.0.0.1:9100",
+                    "port": 9100,
+                },
+            },
+        },
+    )
+    session.add(deliverable_run)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/mission-control/overview")
+
+    assert response.status_code == 200, response.text
+    panel = response.json()["previews_and_prs"]
+    assert panel["run_id"] == str(deliverable_run.id)
+    assert panel["preview_status"] == "READY"
+    assert panel["preview_url"] == "http://127.0.0.1:3100"
+    assert panel["active_preview_url"] == "http://127.0.0.1:3200"
+    assert panel["stale_preview_url"] == "http://127.0.0.1:3100"
+    assert panel["frontend_port"] == 3200
+    assert panel["backend_port"] == 9100
+    assert panel["last_health_check_at"] is not None
 
 
 @pytest.mark.anyio
@@ -600,3 +660,99 @@ async def test_execution_console_surfaces_execution_contract_telemetry(db_sessio
     assert data["summary"]["execution_contract"]["lifecycle_state"] == "PENDING"
     assert data["summary"]["execution_contract"]["validation_steps"] == ["Run tests"]
     assert data["summary"]["execution_contract"]["budget"]["budget_mode"] == "NORMAL"
+
+
+@pytest.mark.anyio
+async def test_mission_control_overview_pr_trust_metadata_and_approval_state(db_session):
+    session, tenant_id = db_session
+    project = Project(name="PR trust", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/pr-trust",
+        workspace_status="SEEDED",
+        started_at=datetime.utcnow() - timedelta(minutes=2),
+        finished_at=datetime.utcnow() - timedelta(minutes=1),
+        summary={"goal": "Prepare approved patch for PR"},
+    )
+    session.add(run)
+    await session.flush()
+
+    patch = (
+        "diff --git a/app/auth.py b/app/auth.py\n"
+        "--- a/app/auth.py\n"
+        "+++ b/app/auth.py\n"
+        "@@ -1 +1 @@\n"
+        "-print('old')\n"
+        "+print('new')\n"
+    )
+    artifact = Artifact(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        run_id=run.id,
+        type="git_diff",
+        uri="artifact://patches/pr-trust.diff",
+        extra_metadata={"content": patch},
+        version=1,
+    )
+    session.add(artifact)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/mission-control/overview?include_heavy=true")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    preview_panel = payload["previews_and_prs"]
+
+    assert preview_panel["run_id"] == str(run.id)
+    assert preview_panel["approval_status"] in {None, "PENDING", "REJECTED", "APPROVED"}
+    assert preview_panel["file_count"] >= 1
+    assert isinstance(preview_panel["additions"], int)
+    assert isinstance(preview_panel["deletions"], int)
+
+
+@pytest.mark.anyio
+async def test_mission_control_overview_includes_stalled_runs(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Stalled detector", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="RUNNING",
+        executor="codex",
+        summary={"goal": "Long running update"},
+        started_at=datetime.utcnow() - timedelta(minutes=20),
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        RunEvent(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            run_id=run.id,
+            event_type="RUN_RUNNING",
+            ts=datetime.utcnow() - timedelta(minutes=12),
+            payload={"status": "RUNNING"},
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/mission-control/overview")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    stalled = payload["stalled_runs"]
+    assert len(stalled) == 1
+    assert stalled[0]["run_id"] == str(run.id)
+    assert stalled[0]["status"] == "RUNNING"
+    assert stalled[0]["stale_seconds"] >= 300

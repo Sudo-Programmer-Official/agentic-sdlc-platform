@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ArchitectureProfile, Project, ProjectPreviewProfile, ProjectRepository, RepoFile
+from app.db.models import ArchitectureProfile, Project, ProjectBlueprint, ProjectPreviewProfile, ProjectRepository, RepoFile
 from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
 from app.services.repo_map import refresh_project_repo_map
 
@@ -24,6 +24,30 @@ _PROTECTED_ZONE_HINTS = (
     ("apps/api/app/db/models", "Persistence models"),
     ("apps/api/alembic", "Database migrations"),
 )
+_FRONTEND_CONFIG_HINTS = ("vite.config.ts", "vite.config.js", "next.config.js", "nuxt.config.ts")
+_DEPLOYMENT_SURFACE_HINTS = ("vercel.json", "render.yaml", "render.yml", "docker-compose.yml", "compose.yml")
+_WORKER_HINTS = ("worker", "workers", "jobs", "queue", "celery", "rq")
+_STARTER_TOPOLOGY_BY_PRESET = {
+    "vue_fastapi": [
+        "apps/web/package.json",
+        "apps/web/vite.config.ts",
+        "apps/api/pyproject.toml",
+        "apps/api/app/main.py",
+        ".gitignore",
+        "README.md",
+    ],
+    "react_node": [
+        "apps/web/package.json",
+        "apps/api/package.json",
+        ".gitignore",
+        "README.md",
+    ],
+    "static_html": [
+        "index.html",
+        ".gitignore",
+        "README.md",
+    ],
+}
 
 
 def _normalize_path(value: str) -> str:
@@ -251,6 +275,160 @@ def _build_package_inventory(
     return packages
 
 
+def _extract_scope_from_manifest_path(path: str) -> str:
+    normalized = _normalize_path(path)
+    parent = str(PurePosixPath(normalized).parent)
+    return "." if parent == "." else parent
+
+
+def _manifest_index(repo_paths: list[str]) -> dict[str, list[str]]:
+    index: dict[str, list[str]] = defaultdict(list)
+    for path in repo_paths:
+        lower = path.lower()
+        if lower.endswith("package.json"):
+            index["package_json"].append(path)
+        elif lower.endswith("requirements.txt"):
+            index["requirements_txt"].append(path)
+        elif lower.endswith("pyproject.toml"):
+            index["pyproject_toml"].append(path)
+        elif any(lower.endswith(hint) for hint in _FRONTEND_CONFIG_HINTS):
+            index["frontend_config"].append(path)
+        elif any(lower.endswith(hint) for hint in _DEPLOYMENT_SURFACE_HINTS):
+            index["deployment_surface"].append(path)
+        elif PurePosixPath(lower).name.startswith("dockerfile"):
+            index["dockerfile"].append(path)
+    return {key: _unique_strings(values) for key, values in index.items()}
+
+
+def _infer_stack(repo_paths: list[str], manifests: dict[str, list[str]]) -> dict[str, Any]:
+    repo_set = {path.lower() for path in repo_paths}
+    runtime: list[str] = []
+    frontend: list[str] = []
+    backend: list[str] = []
+    if manifests.get("package_json"):
+        runtime.append("node")
+    if manifests.get("pyproject_toml") or manifests.get("requirements_txt"):
+        runtime.append("python")
+    if manifests.get("frontend_config") or "index.html" in repo_set:
+        frontend.append("vite")
+    if any("next.config.js" in path.lower() for path in repo_paths):
+        frontend.append("nextjs")
+    if any("nuxt.config.ts" in path.lower() for path in repo_paths):
+        frontend.append("nuxt")
+    if any(path.lower().endswith("requirements.txt") for path in repo_paths) or any(
+        path.lower().endswith("pyproject.toml") for path in repo_paths
+    ):
+        backend.append("python_service")
+    if any("/app/main.py" in path.lower() for path in repo_paths):
+        backend.append("fastapi_like")
+    if any(path.lower().endswith("vercel.json") for path in repo_paths):
+        backend.append("vercel_runtime")
+    return {
+        "runtime": _unique_strings(runtime),
+        "frontend_frameworks": _unique_strings(frontend),
+        "backend_frameworks": _unique_strings(backend),
+        "confidence": "inferred" if (runtime or frontend or backend) else "minimal",
+    }
+
+
+def _infer_deployment_surfaces(
+    *,
+    blueprint: dict[str, Any] | None,
+    repo_paths: list[str],
+    packages: list[dict[str, Any]],
+    preview: ProjectPreviewProfile | None,
+) -> list[dict[str, Any]]:
+    surfaces: list[dict[str, Any]] = []
+    repo_set = set(repo_paths)
+    if "vercel.json" in repo_set:
+        surfaces.append({"name": "vercel", "provider": "vercel", "paths": ["vercel.json"], "kind": "frontend"})
+    for render_path in ("render.yaml", "render.yml"):
+        if render_path in repo_set:
+            surfaces.append({"name": "render", "provider": "render", "paths": [render_path], "kind": "app"})
+    if any(PurePosixPath(path.lower()).name.startswith("dockerfile") for path in repo_paths):
+        docker_paths = [path for path in repo_paths if PurePosixPath(path.lower()).name.startswith("dockerfile")]
+        surfaces.append({"name": "docker", "provider": "container", "paths": _unique_strings(docker_paths), "kind": "container"})
+    if "docker-compose.yml" in repo_set or "compose.yml" in repo_set:
+        compose_path = "docker-compose.yml" if "docker-compose.yml" in repo_set else "compose.yml"
+        surfaces.append({"name": "compose", "provider": "container", "paths": [compose_path], "kind": "compose"})
+    if preview and preview.enabled:
+        paths: list[str] = []
+        if preview.frontend_root:
+            paths.append(preview.frontend_root)
+        if preview.backend_root:
+            paths.append(preview.backend_root)
+        if preview.compose_file:
+            paths.append(preview.compose_file)
+        surfaces.append({"name": "preview", "provider": "local", "paths": _unique_strings(paths), "kind": "preview"})
+    if isinstance(blueprint, dict):
+        deployment = blueprint.get("deployment_blueprint")
+        if isinstance(deployment, dict):
+            profile = deployment.get("profile")
+            if isinstance(profile, str) and profile.strip():
+                surfaces.append(
+                    {
+                        "name": f"blueprint_{profile.strip()}",
+                        "provider": "blueprint",
+                        "paths": ["."] if not packages else [packages[0]["name"]],
+                        "kind": "deployment_profile",
+                    }
+                )
+    if not surfaces and packages:
+        surfaces.append({"name": "repository", "provider": "unknown", "paths": [packages[0]["name"]], "kind": "generic"})
+    return surfaces
+
+
+def _build_blueprint_payload(blueprint: ProjectBlueprint | None) -> dict[str, Any] | None:
+    if blueprint is None:
+        return None
+    metadata = blueprint.metadata_json if isinstance(blueprint.metadata_json, dict) else {}
+    stack = metadata.get("stack") if isinstance(metadata.get("stack"), dict) else {}
+    environment = metadata.get("environment") if isinstance(metadata.get("environment"), dict) else {}
+    governance = metadata.get("governance") if isinstance(metadata.get("governance"), dict) else {}
+    architecture_payload = {
+        "style": blueprint.architecture,
+        "stack_preset_key": blueprint.stack_preset_key,
+        "generated_modules": blueprint.generated_modules if isinstance(blueprint.generated_modules, list) else [],
+    }
+    deployment_payload = {
+        "profile": blueprint.deployment_profile,
+        "generated_contracts": blueprint.generated_contracts if isinstance(blueprint.generated_contracts, list) else [],
+    }
+    if stack:
+        architecture_payload["stack"] = stack
+    if environment:
+        deployment_payload["environment_strategy"] = environment
+    if governance:
+        deployment_payload["governance"] = governance
+    return {
+        "blueprint_key": blueprint.blueprint_key,
+        "stack_preset_key": blueprint.stack_preset_key,
+        "architecture_blueprint": architecture_payload,
+        "deployment_blueprint": deployment_payload,
+        "environment_blueprint": environment or {},
+        "governance_blueprint": governance or {"readiness_enforced": bool(blueprint.readiness_enforced)},
+    }
+
+
+def _starter_topology_paths_from_blueprint(blueprint_payload: dict[str, Any] | None) -> list[str]:
+    if not isinstance(blueprint_payload, dict):
+        return []
+    preset_key = blueprint_payload.get("stack_preset_key")
+    starter = _STARTER_TOPOLOGY_BY_PRESET.get(str(preset_key or "").strip().lower(), [])
+    architecture = blueprint_payload.get("architecture_blueprint")
+    generated_modules = architecture.get("generated_modules") if isinstance(architecture, dict) else []
+    seeded = list(starter)
+    if isinstance(generated_modules, list):
+        for module in generated_modules:
+            if not isinstance(module, str) or not module.strip():
+                continue
+            module_path = _normalize_path(module)
+            if module_path and module_path != ".":
+                # Seed directory-shaping placeholders to allow package slice derivation even before real code lands.
+                seeded.append(f"{module_path}/.seed")
+    return _unique_strings(seeded)
+
+
 def _set_command(
     commands: dict[str, dict[str, Any]],
     *,
@@ -337,6 +515,17 @@ def _infer_commands(
             label="API tests",
             kind="test",
             paths=["apps/api"],
+        )
+    worker_packages = [package for package in packages if package.get("kind") == "worker"]
+    for worker in worker_packages[:2]:
+        slug = worker["name"].replace("/", "_")
+        _set_command(
+            commands,
+            key=f"{slug}_worker_tests",
+            command=f"python3 -m pytest -q {worker['name']}",
+            label=f"{worker['name']} worker tests",
+            kind="test",
+            paths=[worker["name"]],
         )
     if "package.json" in repo_set and "frontend_build" not in commands:
         _set_command(
@@ -438,6 +627,16 @@ def _infer_validation_recipes(
                 "commands": [name for name in commands if "frontend" in name or "static" in name][:3],
             }
         )
+    if not recipes and commands:
+        recipes.append(
+            {
+                "name": "repo_validation",
+                "label": "Repository validation",
+                "kind": "repository",
+                "paths": ["."],
+                "commands": list(commands.keys())[:4],
+            }
+        )
     return recipes
 
 
@@ -459,6 +658,10 @@ def _infer_safe_zones(
             safe_zones.append(f"{name}/app")
             safe_zones.append(f"{name}/app/services")
             safe_zones.append(f"{name}/tests")
+        elif kind == "worker":
+            safe_zones.append(f"{name}/workers")
+            safe_zones.append(f"{name}/jobs")
+            safe_zones.append(f"{name}/tests")
     if preview and preview.frontend_root:
         safe_zones.append(f"{preview.frontend_root}/src")
     if "index.html" in repo_paths:
@@ -471,7 +674,28 @@ def _infer_protected_zones(repo_paths: list[str]) -> list[dict[str, str]]:
     for prefix, reason in _PROTECTED_ZONE_HINTS:
         if any(_path_matches_prefix(path, prefix) for path in repo_paths):
             zones.append({"path": prefix, "reason": reason})
+    for path in repo_paths:
+        lower = path.lower()
+        if lower.endswith((".env", ".env.local", ".env.production")):
+            zones.append({"path": path, "reason": "Environment configuration"})
+        if PurePosixPath(lower).name.startswith("dockerfile"):
+            zones.append({"path": path, "reason": "Container build definition"})
     return zones
+
+
+def _upgrade_package_kinds(packages: list[dict[str, Any]], repo_paths: list[str]) -> list[dict[str, Any]]:
+    upgraded: list[dict[str, Any]] = []
+    for package in packages:
+        package_copy = dict(package)
+        name = str(package_copy.get("name") or "")
+        kind = str(package_copy.get("kind") or "package")
+        if kind in {"backend", "service", "package"}:
+            namespaced_paths = [path.lower() for path in repo_paths if _path_matches_prefix(path, name)]
+            if any(any(hint in path for hint in _WORKER_HINTS) for path in namespaced_paths):
+                package_copy["kind"] = "worker"
+                package_copy["owned_by"] = "platform-runtime"
+        upgraded.append(package_copy)
+    return upgraded
 
 
 def _infer_boundaries(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -504,15 +728,25 @@ def _infer_boundaries(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _build_bootstrap_profile(
     *,
     project: Project,
+    blueprint: dict[str, Any] | None,
     repo: ProjectRepository | None,
     preview: ProjectPreviewProfile | None,
     repo_paths: list[str],
 ) -> tuple[dict[str, Any], str]:
-    packages = _build_package_inventory(repo_paths, preview)
+    manifests = _manifest_index(repo_paths)
+    stack = _infer_stack(repo_paths, manifests)
+    packages = _upgrade_package_kinds(_build_package_inventory(repo_paths, preview), repo_paths)
     commands = _infer_commands(preview=preview, repo_paths=repo_paths, packages=packages)
     validation_recipes = _infer_validation_recipes(commands=commands, packages=packages, preview=preview)
     safe_zones = _infer_safe_zones(packages=packages, preview=preview, repo_paths=repo_paths)
     protected_zones = _infer_protected_zones(repo_paths)
+    deployment_surfaces = _infer_deployment_surfaces(
+        blueprint=blueprint, repo_paths=repo_paths, packages=packages, preview=preview
+    )
+    package_slices = [
+        {"name": package["name"], "kind": package.get("kind"), "execution_zone": package.get("kind"), "paths": [package["name"]]}
+        for package in packages
+    ]
     repo_layout = {
         "monorepo": len(packages) > 1 and any("/" in package["name"] for package in packages),
         "label": "Monorepo" if len(packages) > 1 else "Repository",
@@ -541,8 +775,12 @@ def _build_bootstrap_profile(
         ],
         "commands": commands,
         "validation_recipes": validation_recipes,
+        "deployment_surfaces": deployment_surfaces,
         "safe_refactor_zones": safe_zones,
         "do_not_touch_zones": protected_zones,
+        "stack_profile": stack,
+        "detected_manifests": manifests,
+        "package_slices": package_slices,
         "conventions": {
             "branch_strategy": "run_branch_then_pr",
             "bounded_slice_required": True,
@@ -561,6 +799,16 @@ def _build_bootstrap_profile(
             "backend_root": preview.backend_root if preview else None,
         },
     }
+    if isinstance(blueprint, dict):
+        profile_json.update(
+            {
+                "blueprint_key": blueprint.get("blueprint_key"),
+                "architecture_blueprint": blueprint.get("architecture_blueprint") or {},
+                "deployment_blueprint": blueprint.get("deployment_blueprint") or {},
+                "environment_blueprint": blueprint.get("environment_blueprint") or {},
+                "governance_blueprint": blueprint.get("governance_blueprint") or {},
+            }
+        )
     summary = (
         f"{project.name} uses "
         f"{'a monorepo' if repo_layout['monorepo'] else 'a repository'} contract with "
@@ -620,12 +868,41 @@ def _derive_profile_json(
                 name = item.get("name")
                 if isinstance(name, str) and name.strip():
                     integration_surface_index[name.strip()] = item
+    deployment_surface_index = {}
+    deployment_surfaces = profile_json.get("deployment_surfaces")
+    if isinstance(deployment_surfaces, list):
+        for item in deployment_surfaces:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if isinstance(name, str) and name.strip():
+                deployment_surface_index[name.strip()] = {
+                    "provider": item.get("provider"),
+                    "kind": item.get("kind"),
+                    "paths": _coerce_zone_list(item.get("paths")),
+                }
+
+    package_slices = profile_json.get("package_slices")
+    package_slice_index: dict[str, dict[str, Any]] = {}
+    if isinstance(package_slices, list):
+        for item in package_slices:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if isinstance(name, str) and name.strip():
+                package_slice_index[name.strip()] = {
+                    "kind": item.get("kind"),
+                    "execution_zone": item.get("execution_zone"),
+                    "paths": _coerce_zone_list(item.get("paths")),
+                }
 
     return {
         "path_boundary_index": path_boundary_index,
         "module_ownership_index": module_ownership_index,
         "validation_recipe_index": validation_recipe_index,
         "integration_surface_index": integration_surface_index,
+        "deployment_surface_index": deployment_surface_index,
+        "package_slice_index": package_slice_index,
         "safe_zone_index": {path: {"editable": True} for path in safe_zones},
         "protected_zone_index": protected_zone_index,
         "command_index": commands,
@@ -702,6 +979,18 @@ def _build_summary(
     commands = list(_coerce_command_index(profile_json.get("commands")).keys())
     validation_recipes = [item["name"] for item in _coerce_validation_recipes(profile_json.get("validation_recipes"))]
     repo_layout = profile_json.get("repo_layout") if isinstance(profile_json.get("repo_layout"), dict) else {}
+    derived_from: list[str] = []
+    if profile_json.get("blueprint_key"):
+        derived_from.append("blueprint")
+    if packages or commands or validation_recipes:
+        derived_from.append("repo_intelligence")
+    if profile_json.get("deployment_surfaces"):
+        derived_from.append("deployment_topology")
+    confidence = "LOW"
+    if len(derived_from) >= 3:
+        confidence = "HIGH"
+    elif len(derived_from) == 2:
+        confidence = "MEDIUM"
     return ArchitectureProfileSummaryOut(
         profile_exists=profile_exists,
         profile_id=profile_id,
@@ -730,6 +1019,8 @@ def _build_summary(
         protected_zones_touched=_zone_hits(touched, protected_zones),
         safe_zones_touched=_zone_hits(touched, safe_zones),
         assumptions_used=_assumptions_from_profile(profile_json, repo_full_name, repo_default_branch),
+        derivation_confidence=confidence,
+        derived_from=derived_from,
     )
 
 
@@ -778,6 +1069,12 @@ async def _collect_repo_hints(
             ProjectPreviewProfile.tenant_id == tenant_id,
         )
     )
+    blueprint = await session.scalar(
+        select(ProjectBlueprint).where(
+            ProjectBlueprint.project_id == project_id,
+            ProjectBlueprint.tenant_id == tenant_id,
+        )
+    )
     repo_rows = (
         await session.execute(
             select(RepoFile.path).where(RepoFile.project_id == project_id, RepoFile.tenant_id == tenant_id)
@@ -792,10 +1089,20 @@ async def _collect_repo_hints(
                 repo_paths.append(file.path)
         except ValueError as exc:
             repo_map_message = str(exc)
+    blueprint_payload = _build_blueprint_payload(blueprint)
+    starter_topology_paths = _starter_topology_paths_from_blueprint(blueprint_payload)
+    if starter_topology_paths:
+        # Additive-only logical seeding: enrich derivation inputs when repo is sparse.
+        # This does not write files to the real repository.
+        for path in starter_topology_paths:
+            if path not in repo_paths:
+                repo_paths.append(path)
     repo_paths = _unique_strings(repo_paths)
     return {
         "repo": repo,
         "preview": preview,
+        "blueprint": blueprint,
+        "blueprint_payload": blueprint_payload,
         "repo_paths": repo_paths,
         "repo_map_message": repo_map_message,
     }
@@ -947,6 +1254,7 @@ async def bootstrap_architecture_profile(
     )
     bootstrap_json, bootstrap_summary = _build_bootstrap_profile(
         project=project,
+        blueprint=repo_hints["blueprint_payload"],
         repo=repo_hints["repo"],
         preview=repo_hints["preview"],
         repo_paths=repo_hints["repo_paths"],
@@ -1059,6 +1367,7 @@ async def summarize_architecture_profile(
     repo_hints = await _collect_repo_hints(session, tenant_id=tenant_id, project_id=project_id)
     bootstrap_json, bootstrap_summary = _build_bootstrap_profile(
         project=project,
+        blueprint=repo_hints["blueprint_payload"],
         repo=repo_hints["repo"],
         preview=repo_hints["preview"],
         repo_paths=repo_hints["repo_paths"],

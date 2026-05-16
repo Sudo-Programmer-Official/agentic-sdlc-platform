@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.db.base import Base
-from app.db.models import Project, ProjectPreviewProfile, ProjectRepository, RepoFile
+from app.db.models import Project, ProjectBlueprint, ProjectPreviewProfile, ProjectRepository, RepoFile
 from app.db.models.tenant import Tenant  # noqa: F401
 from app.db.models.tenant_member import TenantMember  # noqa: F401
 from app.db.session import get_session
@@ -141,6 +141,8 @@ async def test_architecture_profile_bootstrap_and_summary_endpoints(db_session):
         assert summary["package_count"] >= 2
         assert "frontend_build" in summary["commands"]
         assert "apps/api/app/db/models" in summary["protected_zones"]
+        assert "repo_intelligence" in summary["derived_from"]
+        assert summary["derivation_confidence"] in {"MEDIUM", "HIGH"}
 
         project_summary_response = await client.get(f"/api/v1/projects/{project.id}/summary")
         assert project_summary_response.status_code == 200, project_summary_response.text
@@ -192,3 +194,76 @@ async def test_architecture_profile_patch_merges_sections_and_rederives(db_sessi
         assert patched["summary"] == "Manual contract for bounded frontend execution."
         assert patched["derived_json"]["safe_zone_index"]["apps/web/src/views"]["editable"] is True
         assert patched["derived_json"]["protected_zone_index"]["apps/web/src/admin"]["approval_required"] is True
+
+
+@pytest.mark.anyio
+async def test_architecture_profile_bootstrap_includes_blueprint_sections_when_present(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Blueprint aware architecture", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectBlueprint(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            blueprint_key="fullstack_monorepo",
+            stack_preset_key="vue_fastapi",
+            deployment_profile="local_preview",
+            architecture="fullstack_monorepo",
+            status="ACTIVE",
+            readiness_enforced=True,
+            generated_modules=["apps/web", "apps/api"],
+            generated_contracts=["contracts/project_contract.json"],
+            metadata_json={
+                "stack": {"frontend": "vue", "backend": "fastapi", "database": "postgres"},
+                "environment": {"logical": ["PREVIEW", "STAGING", "PRODUCTION"], "runtime": {"STAGING": "local_docker"}},
+                "governance": {"level": "governed", "bounded_execution": True},
+            },
+            created_by="ui-user",
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        bootstrap_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/bootstrap",
+            json={"created_by": "ui-user"},
+        )
+        assert bootstrap_response.status_code == 200, bootstrap_response.text
+        payload = bootstrap_response.json()
+        assert payload["profile_json"]["blueprint_key"] == "fullstack_monorepo"
+        assert payload["profile_json"]["architecture_blueprint"]["style"] == "fullstack_monorepo"
+        assert payload["profile_json"]["deployment_blueprint"]["profile"] == "local_preview"
+        assert payload["profile_json"]["environment_blueprint"]["logical"] == ["PREVIEW", "STAGING", "PRODUCTION"]
+        assert payload["profile_json"]["governance_blueprint"]["level"] == "governed"
+
+
+@pytest.mark.anyio
+async def test_create_project_auto_provisions_starter_blueprint_and_architecture(db_session):
+    _session, _tenant_id = db_session
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/v1/projects",
+            json={
+                "name": "Auto starter project",
+                "description": "auto provision check",
+            },
+        )
+        assert create_response.status_code == 201, create_response.text
+        project_id = create_response.json()["id"]
+
+        blueprint_response = await client.get(f"/api/v1/projects/{project_id}/blueprint")
+        assert blueprint_response.status_code == 200, blueprint_response.text
+        blueprint = blueprint_response.json()
+        assert blueprint is not None
+        assert blueprint["blueprint_key"] == "fullstack_monorepo"
+        assert blueprint["stack_preset_key"] == "vue_fastapi"
+
+        summary_response = await client.get(f"/api/v1/projects/{project_id}/architecture-profile/summary")
+        assert summary_response.status_code == 200, summary_response.text
+        summary = summary_response.json()
+        assert summary["profile_exists"] is True
+        assert summary["derived_ready"] is True
+        assert summary["package_count"] >= 2
+        assert summary["command_coverage_count"] >= 1
+        assert summary["validation_recipe_count"] >= 1

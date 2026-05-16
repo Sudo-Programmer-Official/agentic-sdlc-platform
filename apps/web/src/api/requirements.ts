@@ -1,4 +1,5 @@
 import { isApiErrorStatus, parseApiResponse } from "./http";
+import { apiFetch } from "./lifecycle";
 
 const DEFAULT_API_BASE = import.meta.env.DEV
   ? "http://localhost:8000/api/v1"
@@ -22,7 +23,7 @@ export function createEmptyRequirementsGraph(projectId = "") {
 }
 
 export async function fetchGraph(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/requirements-graph`);
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/requirements-graph`);
   try {
     return await parseApiResponse(resp);
   } catch (err) {
@@ -32,7 +33,7 @@ export async function fetchGraph(projectId: string) {
 }
 
 export async function updateGraph(projectId: string, payload: any) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/requirements-graph`, {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/requirements-graph`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -41,7 +42,7 @@ export async function updateGraph(projectId: string, payload: any) {
 }
 
 export async function approveGraph(projectId: string, approvedBy = "ui-user") {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/requirements-graph/approve`, {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/requirements-graph/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ approved_by: approvedBy })
@@ -50,7 +51,7 @@ export async function approveGraph(projectId: string, approvedBy = "ui-user") {
 }
 
 export async function ingestPrd(projectId: string, text: string, source = "typed", format = "markdown") {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/prd`, {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/prd`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, source, format })
@@ -59,12 +60,12 @@ export async function ingestPrd(projectId: string, text: string, source = "typed
 }
 
 export async function fetchProjectSummary(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/summary`);
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/summary`);
   return parseApiResponse(resp);
 }
 
 export async function fetchPlanHistory(projectId: string) {
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/plan/history`);
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/plan/history`);
   return parseApiResponse(resp);
 }
 
@@ -73,7 +74,7 @@ export async function fetchRequirementSummary(projectId: string, limit = 50, off
     limit: String(limit),
     offset: String(offset),
   });
-  const resp = await fetch(`${API_BASE}/projects/${projectId}/requirements/summary?${params.toString()}`, {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/requirements/summary?${params.toString()}`, {
     cache: "no-store",
   });
   return parseApiResponse(resp);
@@ -90,7 +91,7 @@ export async function fetchRequirementTimeline(projectId: string, requirementId:
     offset: String(offset),
   });
   const encodedRequirement = encodeURIComponent(requirementId);
-  const resp = await fetch(
+  const resp = await apiFetch(
     `${API_BASE}/projects/${projectId}/requirements/${encodedRequirement}/timeline?${params.toString()}`
   );
   return parseApiResponse(resp);

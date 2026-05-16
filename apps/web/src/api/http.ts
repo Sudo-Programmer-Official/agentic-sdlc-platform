@@ -35,6 +35,12 @@ export async function parseApiResponse(resp: Response) {
   let message = "Request failed";
   if (typeof detail === "string" && detail) {
     message = detail;
+  } else if (detail && typeof detail === "object") {
+    if (typeof detail.message === "string" && detail.message) {
+      message = detail.message;
+    } else if (typeof detail.user_message === "string" && detail.user_message) {
+      message = detail.user_message;
+    }
   } else if (Array.isArray(detail) && detail.length) {
     message = detail.map((item) => item?.msg || JSON.stringify(item)).join(", ");
   } else if (typeof error === "string" && error) {

@@ -1,16 +1,16 @@
 {
-  "project_id": "b072c913-f406-4564-b299-5e0be9f8faef",
+  "project_id": "65825fd4-e9b0-4c51-9b21-d6706012916c",
   "version": 3,
   "status": "APPROVED",
-  "created_at": "2026-05-15T21:46:03.830537",
-  "updated_at": "2026-05-15T21:46:52.698715",
-  "approved_at": "2026-05-15T21:46:52.698715",
+  "created_at": "2026-05-17T17:02:23.130775",
+  "updated_at": "2026-05-17T17:02:43.190030",
+  "approved_at": "2026-05-17T17:02:43.190030",
   "approved_by": "ui-user",
   "nodes": [
     {
       "id": "FR-001",
       "type": "FR",
-      "text": "Menu catalog management with categories, items, modifiers, price, and stock toggle.",
+      "text": "Build hero section with clear value proposition, trust strip, and two CTAs (Book a Demo, Get ROI Estimate).",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -19,7 +19,7 @@
     {
       "id": "FR-002",
       "type": "FR",
-      "text": "Reservation booking with party size, date/time, and overbooking prevention.",
+      "text": "Add problem/solution section with 3 pains and 3 outcome statements.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -28,7 +28,7 @@
     {
       "id": "FR-003",
       "type": "FR",
-      "text": "Table state management with available, reserved, occupied, and cleaning states.",
+      "text": "Add capabilities grid with 6 cards (lead qualification, outreach sequencing, meeting prep, CRM updates, follow-up automation, reporting summaries).",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -37,7 +37,7 @@
     {
       "id": "FR-004",
       "type": "FR",
-      "text": "Dine-in order lifecycle from draft to closed with item notes and modifiers.",
+      "text": "Add \u201cHow it Works\u201d 3-step section (Connect tools, Configure goals, Execute with approvals).",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -46,7 +46,7 @@
     {
       "id": "FR-005",
       "type": "FR",
-      "text": "Kitchen ticket queue with queued, cooking, ready, and picked-up statuses.",
+      "text": "Build interactive ROI calculator with inputs (team size, leads/month, hours saved/rep) and outputs (monthly hours saved, monthly cost savings).",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -55,7 +55,7 @@
     {
       "id": "FR-006",
       "type": "FR",
-      "text": "Billing and checkout with split bills, discounts, and payment capture.",
+      "text": "Add proof section with 2 testimonials and 1 mini case-study metrics block.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -64,7 +64,7 @@
     {
       "id": "FR-007",
       "type": "FR",
-      "text": "Role-based access control and audit trail for sensitive actions.",
+      "text": "Add security/governance section (approval gates, audit logs, RBAC, data boundaries).",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -73,7 +73,7 @@
     {
       "id": "FR-008",
       "type": "FR",
-      "text": "Operations dashboard with sales metrics and CSV export.",
+      "text": "Add pricing teaser (Starter/Growth/Enterprise) and final CTA section with lead form.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -82,7 +82,7 @@
     {
       "id": "QR-001",
       "type": "QR",
-      "text": "Core API responses should complete within 2 seconds at p95.",
+      "text": "Responsive on mobile/tablet/desktop with no horizontal scroll.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -91,16 +91,16 @@
     {
       "id": "QR-002",
       "type": "QR",
-      "text": "New kitchen tickets should appear within 3 seconds after order submit.",
+      "text": "Lighthouse Performance >= 90.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
-      "quality_type": null,
+      "quality_type": "performance",
       "tags": []
     },
     {
       "id": "QR-003",
       "type": "QR",
-      "text": "System must prevent data loss for committed orders and payments.",
+      "text": "Lighthouse Accessibility >= 90.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -109,7 +109,7 @@
     {
       "id": "QR-004",
       "type": "QR",
-      "text": "All protected actions must require authentication and authorization.",
+      "text": "SEO essentials (title, meta description, OG tags, semantic headings).",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -118,7 +118,7 @@
     {
       "id": "QR-005",
       "type": "QR",
-      "text": "Staff should be able to place a dine-in order in 6 interactions or fewer.",
+      "text": "No inline styles and no ad-hoc colors outside design tokens/allowed colors.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -127,7 +127,7 @@
     {
       "id": "QR-006",
       "type": "QR",
-      "text": "System should support at least 30 concurrent staff sessions.",
+      "text": "Include tests for ROI calculator and form validation.",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -520,5 +520,5 @@
       "rationale": null
     }
   ],
-  "sha256": "a5236f40ba6047947b198da599d5737bf113c3a9a3fe42d030f6980c4cb22009"
+  "sha256": "d1d526b4c57d703c4962ae6111d0db7ef9ee7d13627642aae8aa9b531d69b3d7"
 }

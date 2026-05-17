@@ -1113,10 +1113,16 @@
       </div>
       <div class="mb-3 flex flex-wrap gap-2 text-xs">
         <el-tag effect="light" type="info">Total {{ filteredTasks.length }} / {{ sortedTasks.length }}</el-tag>
-        <el-tag effect="light" type="warning">Queued {{ taskStatusCounts.queued }}</el-tag>
-        <el-tag effect="light" type="primary">In Progress {{ taskStatusCounts.inProgress }}</el-tag>
-        <el-tag effect="light" type="success">Done {{ taskStatusCounts.done }}</el-tag>
-        <el-tag effect="light" type="danger">Blocked/Failed {{ taskStatusCounts.failed }}</el-tag>
+        <el-tag effect="light" type="warning">Queued {{ taskStatusCountsGlobal.queued }}</el-tag>
+        <el-tag effect="light" type="primary">In Progress {{ taskStatusCountsGlobal.inProgress }}</el-tag>
+        <el-tag effect="light" type="success">Done {{ taskStatusCountsGlobal.done }}</el-tag>
+        <el-tag effect="light" type="info">Visible Done {{ taskStatusCounts.done }}</el-tag>
+        <el-tag effect="light" type="danger">Blocked/Failed {{ taskStatusCountsGlobal.failed }}</el-tag>
+        <el-tag effect="light" type="info">Selected {{ selectedTaskIds.length }}</el-tag>
+        <el-tag effect="light" type="success">Batch Runnable {{ selectedRunnableTasks.length }}</el-tag>
+        <el-tag v-if="batchExecutionTotal > 0" effect="light" type="primary">Current Step {{ batchExecutionStepLabel }}</el-tag>
+        <el-tag v-if="batchExecutionTotal > 0" effect="light" type="warning">Batch Remaining {{ batchExecutionRemaining }}</el-tag>
+        <el-tag v-if="batchExecutionNextTitle" effect="light" type="info">Auto-picked next: {{ batchExecutionNextTitle }}</el-tag>
       </div>
       <div class="mb-3 flex flex-wrap items-center gap-2 text-xs">
         <span class="text-slate-500">Attempt filter:</span>
@@ -1130,9 +1136,32 @@
         >
           {{ option.label }}
         </el-tag>
+        <el-switch
+          v-model="showCompletedTasks"
+          size="small"
+          inline-prompt
+          active-text="Show completed"
+          inactive-text="Hide completed"
+        />
+        <span class="ml-3 text-slate-500">Execution mode:</span>
+        <el-radio-group v-model="selectedExecutionMode" size="small">
+          <el-radio-button label="smart">Smart</el-radio-button>
+          <el-radio-button label="manual">My Order</el-radio-button>
+        </el-radio-group>
+        <el-tag v-if="shouldPollOverview()" effect="light" type="warning">
+          Live polling active
+        </el-tag>
       </div>
       <div v-if="runAllProgressLabel" class="mb-2 text-xs text-slate-500">{{ runAllProgressLabel }}</div>
-      <el-table :data="filteredTasks" size="small" row-key="id" @selection-change="onTaskSelectionChange">
+      <el-table
+        ref="tasksTableRef"
+        :data="filteredTasks"
+        size="small"
+        row-key="id"
+        :reserve-selection="true"
+        @selection-change="onTaskSelectionChange"
+        @select="onTaskSelectChange"
+      >
         <el-table-column type="selection" width="46" :selectable="canSelectTaskForOrderedRun" />
         <el-table-column label="#" width="56">
           <template #default="scope">
@@ -1172,6 +1201,11 @@
         <el-table-column label="Status" width="140">
           <template #default="scope">
             <span>{{ taskEffectiveStatus(scope.row) }}</span>
+            <div class="mt-1">
+              <el-tag v-if="taskCompletionBadgeLabel(scope.row)" size="small" effect="light" :type="taskCompletionBadgeType(scope.row)">
+                {{ taskCompletionBadgeLabel(scope.row) }}
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="Branch" width="200">
@@ -1312,9 +1346,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 
 import DeploymentTrustSurfaceCard from "../components/DeploymentTrustSurfaceCard.vue";
 import StageBadge from "../components/StageBadge.vue";
@@ -1763,6 +1797,14 @@ const selectedTaskIds = ref<string[]>([]);
 const runUnblockLoading = ref<Record<string, boolean>>({});
 const runResumeLoading = ref<Record<string, boolean>>({});
 const attemptFilter = ref<"all" | "initial" | "retry" | "noop">("all");
+const showCompletedTasks = ref(true);
+const selectedExecutionMode = ref<"smart" | "manual">("smart");
+const selectedTaskOrder = ref<string[]>([]);
+const tasksTableRef = ref<any>(null);
+const taskSelectionSyncing = ref(false);
+const batchExecutionTotal = ref(0);
+const batchExecutionStarted = ref(0);
+const batchExecutionNextTitle = ref("");
 let overviewPollHandle: ReturnType<typeof setTimeout> | null = null;
 let overviewPollInFlight = false;
 const selectedExecutor = ref("codex");
@@ -1859,8 +1901,12 @@ const attemptFilterOptions = [
 ];
 const filteredTasks = computed(() => {
   const mode = attemptFilter.value;
-  if (mode === "all") return sortedTasks.value;
-  return sortedTasks.value.filter((task) => {
+  const completionFiltered = sortedTasks.value.filter((task) => {
+    if (showCompletedTasks.value) return true;
+    return !["DONE", "COMPLETED", "CLOSED"].includes(taskEffectiveStatus(task));
+  });
+  if (mode === "all") return completionFiltered;
+  return completionFiltered.filter((task) => {
     const label = taskAttemptTypeLabel(task).toUpperCase();
     if (mode === "initial") return label === "INITIAL";
     if (mode === "retry") return label !== "INITIAL" && label !== "NO_OP";
@@ -1868,8 +1914,20 @@ const filteredTasks = computed(() => {
     return true;
   });
 });
+const filteredTaskIdSignature = computed(() => {
+  const ids = filteredTasks.value
+    .map((task) => String(task?.id || ""))
+    .filter((value) => !!value)
+    .sort();
+  return ids.join("|");
+});
 const runnableTasks = computed(() => filteredTasks.value.filter((task) => canRunTask(task)));
 const selectedRunnableTasks = computed(() => {
+  const byId = new Map(filteredTasks.value.map((task) => [String(task?.id || ""), task]));
+  const orderedSelected = selectedTaskOrder.value
+    .map((id) => byId.get(String(id)))
+    .filter((task): task is any => !!task && canRunTask(task));
+  if (orderedSelected.length) return orderedSelected;
   const selected = new Set(selectedTaskIds.value);
   return filteredTasks.value.filter((task) => selected.has(String(task?.id || "")) && canRunTask(task));
 });
@@ -1884,6 +1942,19 @@ const taskStatusCounts = computed(() => {
     failed: count(["FAILED", "BLOCKED", "CANCELED"]),
   };
 });
+const taskStatusCountsGlobal = computed(() => {
+  const rows = sortedTasks.value;
+  const statusOf = (row: any) => taskEffectiveStatus(row);
+  const count = (statuses: string[]) => rows.filter((row) => statuses.includes(statusOf(row))).length;
+  return {
+    queued: count(["PENDING", "QUEUED"]),
+    inProgress: count(["RUNNING", "IN_PROGRESS", "CLAIMED"]),
+    done: count(["DONE", "COMPLETED", "CLOSED"]),
+    failed: count(["FAILED", "BLOCKED", "CANCELED"]),
+  };
+});
+const batchExecutionRemaining = computed(() => Math.max(0, batchExecutionTotal.value - batchExecutionStarted.value));
+const batchExecutionStepLabel = computed(() => `${Math.min(batchExecutionStarted.value + 1, Math.max(batchExecutionTotal.value, 1))}/${batchExecutionTotal.value}`);
 const requirementsNeedingReview = computed(
   () => requirementSummaryCards.value.filter((card) => String(card?.status || "").toUpperCase() === "NEEDS_REVIEW").length
 );
@@ -1905,6 +1976,10 @@ const requirementsTokensFromRuns = computed(() =>
     return sum + (Number.isFinite(tokens) ? tokens : 0);
   }, 0)
 );
+
+watch([filteredTaskIdSignature, showCompletedTasks], () => {
+  void restoreTaskSelection();
+});
 const totalRequirementAiSpendCents = computed(() =>
   Math.max(requirementsSpendCentsFromSummary.value, requirementsSpendCentsFromRuns.value)
 );
@@ -2350,6 +2425,9 @@ function planSelectedTasksByDependencies(selectedTasks: any[], allTasks: any[]) 
   const queue = [...selectedTasks]
     .filter((row) => (indegree.get(taskId(row)) || 0) === 0)
     .sort((a, b) => {
+      const aPriority = taskExecutionPriority(a);
+      const bPriority = taskExecutionPriority(b);
+      if (aPriority !== bPriority) return aPriority - bPriority;
       const aStage = stageRank[String(a?.stage || "").toUpperCase()] ?? 9;
       const bStage = stageRank[String(b?.stage || "").toUpperCase()] ?? 9;
       if (aStage !== bStage) return aStage - bStage;
@@ -2369,13 +2447,70 @@ function planSelectedTasksByDependencies(selectedTasks: any[], allTasks: any[]) 
       indegree.set(childId, nextIn);
       if (nextIn === 0) {
         const child = selectedById.get(childId);
-        if (child) queue.push(child);
+        if (child) {
+          queue.push(child);
+          queue.sort((a, b) => {
+            const aPriority = taskExecutionPriority(a);
+            const bPriority = taskExecutionPriority(b);
+            if (aPriority !== bPriority) return aPriority - bPriority;
+            const aStage = stageRank[String(a?.stage || "").toUpperCase()] ?? 9;
+            const bStage = stageRank[String(b?.stage || "").toUpperCase()] ?? 9;
+            if (aStage !== bStage) return aStage - bStage;
+            const aCreated = Date.parse(String(a?.created_at || "")) || 0;
+            const bCreated = Date.parse(String(b?.created_at || "")) || 0;
+            return aCreated - bCreated;
+          });
+        }
       }
     }
   }
 
   const unresolvedCycle = ordered.length !== selectedTasks.length;
   return { ordered, missingById, unresolvedCycle };
+}
+
+function taskExecutionPriority(task: any): number {
+  const title = String(task?.title || "").trim().toLowerCase();
+  if (title.startsWith("initialize monorepo")) return 0;
+  if (title.includes("deterministic monorepo baseline")) return 1;
+  if (title.startsWith("initialize frontend")) return 2;
+  if (title.startsWith("initialize backend")) return 3;
+  if (title.startsWith("initialize contracts")) return 4;
+  if (title.startsWith("initialize requirements")) return 5;
+  if (title.startsWith("initialize ci")) return 6;
+  if (title.startsWith("initialize deployment profile")) return 7;
+  if (title.startsWith("initialize telemetry")) return 8;
+  if (title.startsWith("validate foundation")) return 9;
+  if (title.includes("foundation readiness")) return 10;
+  if (title.includes("lineage in mission control")) return 11;
+  return 100;
+}
+
+function planSmartSelectedTasks(selectedTasks: any[], allTasks: any[]) {
+  const allById = new Map(allTasks.map((row) => [taskId(row), row]));
+  const selectedById = new Map(selectedTasks.map((row) => [taskId(row), row]));
+  const autoIncluded: any[] = [];
+
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const task of [...selectedById.values()]) {
+      const deps = inferTaskDependencyIds(task, allTasks);
+      for (const depId of deps) {
+        if (selectedById.has(depId)) continue;
+        const depTask = allById.get(depId);
+        if (!depTask) continue;
+        if (!canRunTask(depTask)) continue;
+        selectedById.set(depId, depTask);
+        autoIncluded.push(depTask);
+        expanded = true;
+      }
+    }
+  }
+
+  const expandedSelection = [...selectedById.values()];
+  const plan = planSelectedTasksByDependencies(expandedSelection, allTasks);
+  return { ...plan, autoIncluded };
 }
 
 function taskLinkedRunLabel(task: any) {
@@ -2555,10 +2690,30 @@ async function loadTasks() {
   tasksError.value = "";
   if (!projectId.value) return;
   try {
-    tasks.value = await listTasks(projectId.value, { active_only: true, latest_per_title: true });
+    tasks.value = await listTasks(projectId.value, { latest_per_title: true, include_deleted: false });
     taskSnapshot.value = await listTasks(projectId.value, { latest_per_title: true, include_deleted: false });
+    await restoreTaskSelection();
   } catch (err: any) {
     tasksError.value = err?.message || "Failed to load tasks";
+  }
+}
+
+async function restoreTaskSelection() {
+  await nextTick();
+  const table = tasksTableRef.value;
+  if (!table) return;
+  const idSet = new Set(selectedTaskIds.value.map((id) => String(id)));
+  taskSelectionSyncing.value = true;
+  try {
+    table.clearSelection?.();
+    for (const task of filteredTasks.value) {
+      const id = String(task?.id || "");
+      if (idSet.has(id)) {
+        table.toggleRowSelection?.(task, true);
+      }
+    }
+  } finally {
+    taskSelectionSyncing.value = false;
   }
 }
 
@@ -2753,6 +2908,26 @@ function taskEffectiveStatus(task: any) {
   return taskStatus || "PENDING";
 }
 
+function taskCompletionBadgeLabel(task: any) {
+  const linkedRunId = task?.run_id || task?.latest_run_id;
+  if (!linkedRunId) return "";
+  const linkedRun = runs.value.find((row: any) => row?.id === linkedRunId);
+  const quality = String(linkedRun?.summary?.terminal_quality || "").trim().toUpperCase();
+  if (quality) return quality;
+  const status = String(linkedRun?.status || task?.latest_run_status || "").trim().toUpperCase();
+  if (status === "COMPLETED") return "COMPLETED";
+  if (status === "FAILED") return "FAILED";
+  return "";
+}
+
+function taskCompletionBadgeType(task: any): "success" | "warning" | "danger" | "info" {
+  const badge = taskCompletionBadgeLabel(task);
+  if (badge === "COMPLETED_CLEAN" || badge === "COMPLETED" || badge === "COMPLETED_WITH_RECOVERY") return "success";
+  if (badge === "DEGRADED_COMPLETION") return "warning";
+  if (badge === "FAILED") return "danger";
+  return "info";
+}
+
 async function runAllTasksOrdered() {
   if (!projectId.value || runAllLoading.value) return;
   const queue = runnableTasks.value;
@@ -2761,16 +2936,21 @@ async function runAllTasksOrdered() {
     return;
   }
   runAllLoading.value = true;
+  batchExecutionTotal.value = queue.length;
+  batchExecutionStarted.value = 0;
+  batchExecutionNextTitle.value = queue[0]?.title || queue[0]?.id || "";
   runAllProgressLabel.value = `Starting 0/${queue.length} tasks…`;
   tasksError.value = "";
   runError.value = "";
   let started = 0;
   try {
     for (const task of queue) {
+      batchExecutionNextTitle.value = task?.title || task?.id || "";
       runAllProgressLabel.value = `Starting ${started + 1}/${queue.length}: ${task.title || task.id}`;
       const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:run_all:${projectId.value}:${task.id}`);
       await createRun(projectId.value, selectedExecutor.value, task.id, null, { request_key: requestKey });
       started += 1;
+      batchExecutionStarted.value = started;
     }
     await Promise.all([loadTasks(), loadRuns()]);
     ElMessage.success(`Queued ${started} task run${started === 1 ? "" : "s"} in order.`);
@@ -2782,6 +2962,9 @@ async function runAllTasksOrdered() {
   } finally {
     runAllLoading.value = false;
     runAllProgressLabel.value = "";
+    batchExecutionTotal.value = 0;
+    batchExecutionStarted.value = 0;
+    batchExecutionNextTitle.value = "";
   }
 }
 
@@ -2790,9 +2973,54 @@ function canSelectTaskForOrderedRun(row: any) {
 }
 
 function onTaskSelectionChange(rows: any[]) {
-  selectedTaskIds.value = rows
+  if (taskSelectionSyncing.value) return;
+  const currentIds = rows
     .map((row) => String(row?.id || ""))
-    .filter((value) => !!value && canRunTask(sortedTasks.value.find((task) => String(task?.id || "") === value)));
+    .filter((value) => !!value);
+  selectedTaskIds.value = currentIds;
+  const selectedSet = new Set(currentIds);
+  selectedTaskOrder.value = selectedTaskOrder.value.filter((id) => selectedSet.has(id));
+  for (const id of currentIds) {
+    if (!selectedTaskOrder.value.includes(id)) selectedTaskOrder.value.push(id);
+  }
+}
+
+function onTaskSelectChange(selection: any[], row: any) {
+  if (taskSelectionSyncing.value) return;
+  const id = String(row?.id || "");
+  if (!id) return;
+  const selectedSet = new Set(selection.map((item) => String(item?.id || "")));
+  if (selectedSet.has(id)) {
+    selectedTaskOrder.value = selectedTaskOrder.value.filter((value) => value !== id);
+    selectedTaskOrder.value.push(id);
+  } else {
+    selectedTaskOrder.value = selectedTaskOrder.value.filter((value) => value !== id);
+  }
+}
+
+function manualSelectionDependencyWarnings(queue: any[], allTasks: any[]) {
+  const selectedIds = new Set(queue.map((task) => taskId(task)));
+  const positions = new Map(queue.map((task, index) => [taskId(task), index]));
+  const warnings: string[] = [];
+  for (const task of queue) {
+    const title = String(task?.title || task?.id || "task");
+    const deps = [...inferTaskDependencyIds(task, allTasks)];
+    for (const depId of deps) {
+      const dep = allTasks.find((row) => taskId(row) === depId);
+      const depTitle = String(dep?.title || depId);
+      if (!dep) continue;
+      if (selectedIds.has(depId)) {
+        if ((positions.get(depId) ?? -1) > (positions.get(taskId(task)) ?? -1)) {
+          warnings.push(`${title} depends on ${depTitle}, but ${depTitle} is selected later.`);
+        }
+        continue;
+      }
+      if (canRunTask(dep)) {
+        warnings.push(`${title} depends on ${depTitle}, which is not in your manual selection.`);
+      }
+    }
+  }
+  return [...new Set(warnings)];
 }
 
 function hasActiveRuns(rows: any[]) {
@@ -2834,37 +3062,77 @@ async function runSelectedTasksOrdered() {
     ElMessage.info("Select at least one runnable task.");
     return;
   }
-  const plan = planSelectedTasksByDependencies(queue, sortedTasks.value);
-  if (plan.unresolvedCycle) {
-    tasksError.value = "Selected tasks contain a dependency cycle or ambiguous dependency metadata.";
-    ElMessage.error(tasksError.value);
-    return;
+  let executionQueue: any[] = [];
+  if (selectedExecutionMode.value === "smart") {
+    const plan = planSmartSelectedTasks(queue, sortedTasks.value);
+    if (plan.unresolvedCycle) {
+      tasksError.value = "Selected tasks contain a dependency cycle or ambiguous dependency metadata.";
+      ElMessage.error(tasksError.value);
+      return;
+    }
+    const unresolvedMissing = [...plan.missingById.entries()].filter(([_, depIds]) =>
+      depIds.some((depId) => {
+        const depTask = sortedTasks.value.find((row) => taskId(row) === depId);
+        return Boolean(depTask) && canRunTask(depTask);
+      })
+    );
+    if (unresolvedMissing.length) {
+      const first = unresolvedMissing[0];
+      const task = queue.find((row) => taskId(row) === first[0]);
+      const missingTitles = first[1]
+        .map((depId) => sortedTasks.value.find((row) => taskId(row) === depId))
+        .filter(Boolean)
+        .map((row: any) => row.title || depId);
+      tasksError.value = `Missing prerequisite selection for "${task?.title || first[0]}": ${missingTitles.join(", ")}`;
+      ElMessage.error(tasksError.value);
+      return;
+    }
+    executionQueue = plan.ordered;
+    if (plan.autoIncluded.length) {
+      ElMessage.info(
+        `Smart ordering included ${plan.autoIncluded.length} prerequisite task${plan.autoIncluded.length === 1 ? "" : "s"} automatically.`
+      );
+    }
+  } else {
+    executionQueue = queue;
+    const warnings = manualSelectionDependencyWarnings(executionQueue, sortedTasks.value);
+    if (warnings.length) {
+      const preview = warnings.slice(0, 3).join("\n• ");
+      try {
+        await ElMessageBox.confirm(
+          `Dependency warnings detected:\n• ${preview}${warnings.length > 3 ? `\n• ...and ${warnings.length - 3} more` : ""}\n\nRun anyway in your selected order?`,
+          "Manual Order Warning",
+          {
+            confirmButtonText: "Run Anyway",
+            cancelButtonText: "Use Smart Order",
+            type: "warning",
+          }
+        );
+      } catch {
+        selectedExecutionMode.value = "smart";
+        ElMessage.info("Switched to Smart mode. Run Selected again to apply intelligent ordering.");
+        return;
+      }
+    }
   }
-  if (plan.missingById.size) {
-    const first = [...plan.missingById.entries()][0];
-    const task = queue.find((row) => taskId(row) === first[0]);
-    const missingTitles = first[1]
-      .map((depId) => sortedTasks.value.find((row) => taskId(row) === depId))
-      .filter(Boolean)
-      .map((row: any) => row.title || depId);
-    tasksError.value = `Missing prerequisite selection for "${task?.title || first[0]}": ${missingTitles.join(", ")}`;
-    ElMessage.error(tasksError.value);
-    return;
-  }
-  const executionQueue = plan.ordered;
   runSelectedLoading.value = true;
+  batchExecutionTotal.value = executionQueue.length;
+  batchExecutionStarted.value = 0;
+  batchExecutionNextTitle.value = executionQueue[0]?.title || executionQueue[0]?.id || "";
   runAllProgressLabel.value = `Starting 0/${executionQueue.length} selected tasks…`;
   tasksError.value = "";
   runError.value = "";
   let started = 0;
   try {
     for (const task of executionQueue) {
+      batchExecutionNextTitle.value = task?.title || task?.id || "";
       runAllProgressLabel.value = `Waiting to start ${started + 1}/${executionQueue.length}: ${task.title || task.id}`;
       await waitUntilNoActiveRuns();
       runAllProgressLabel.value = `Starting ${started + 1}/${executionQueue.length}: ${task.title || task.id}`;
       const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:run_selected:${projectId.value}:${task.id}`);
       const createdRun = await createRun(projectId.value, selectedExecutor.value, task.id, null, { request_key: requestKey });
       started += 1;
+      batchExecutionStarted.value = started;
       const runId = String(createdRun?.id || "");
       if (runId) {
         const finalStatus = await waitForRunTerminal(runId);
@@ -2884,6 +3152,9 @@ async function runSelectedTasksOrdered() {
   } finally {
     runSelectedLoading.value = false;
     runAllProgressLabel.value = "";
+    batchExecutionTotal.value = 0;
+    batchExecutionStarted.value = 0;
+    batchExecutionNextTitle.value = "";
   }
 }
 

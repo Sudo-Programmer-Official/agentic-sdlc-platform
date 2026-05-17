@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from sqlalchemy import select, func
 
 from app.core.config import get_settings
-from app.db.models import Agent, Run, RunEvent, WorkItem, WorkItemEdge
+from app.db.models import Agent, Run, RunEvent, Task, WorkItem, WorkItemEdge
 from app.db.session import SessionLocal
 from app.runtime.leases import reclaim_expired_work_items, reclaim_orphaned_work_items
 from app.runtime.recovery_policy import has_pending_recovery_work, sync_run_recovery_latch
 from app.services.event_log import record_event
+from app.services.runtime_lineage import link_run_to_work_item
 from app.services.run_delivery import publish_run_branch_if_ready
 from app.services.work_item_state import is_blocking_failure, is_dependency_satisfied, is_superseded_failure
 from app.api.v1.lifecycle_score import lifecycle_score
@@ -25,6 +27,26 @@ STALL_RECOVERY_MAX_ATTEMPTS = 2
 ACTIVE_STALL_PAUSE_SECONDS = 600
 BUDGET_WARNING_EVENT_THROTTLE_SECONDS = 120
 MAX_IDENTICAL_TEST_FAILURES = 3
+AUTO_PHASE_MAX_FILES = 6
+AUTO_PHASE_DECOMPOSE_MIN_FILES = 7
+AUTO_PHASE_DECOMPOSE_MAX_FILES = 20
+
+
+def _governance_mode(run: Run) -> str:
+    summary = run.summary if isinstance(run.summary, dict) else {}
+    mode = str(summary.get("repository_state") or "").strip().upper()
+    if mode:
+        return mode
+    task_source = str(summary.get("task_source") or "").strip().lower()
+    task_source_type = str(summary.get("task_source_type") or "").strip().lower()
+    requirement_id = str(summary.get("requirement_id") or "").strip().lower()
+    if task_source == "genesis" or task_source_type == "genesis_setup" or requirement_id.startswith("genesis."):
+        return "GENESIS"
+    return "ACTIVE_PRODUCT"
+
+
+def _is_bootstrap_mode(run: Run) -> bool:
+    return _governance_mode(run) in {"GENESIS", "EARLY_BUILD"}
 
 
 def _is_recovery_item(item: WorkItem) -> bool:
@@ -222,6 +244,57 @@ async def _latest_event_ts(session, run: Run, event_type: str) -> datetime | Non
     )
 
 
+def _work_item_required_and_criticality(work_item: WorkItem) -> tuple[bool, str]:
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    required_raw = payload.get("required", None)
+    if isinstance(required_raw, bool):
+        required = required_raw
+    else:
+        required = work_item.type in {"PLAN_DAG", "CODE_BACKEND", "CODE_FRONTEND", "RUN_TESTS"}
+    criticality = str(payload.get("criticality") or "").strip().upper()
+    if not criticality:
+        criticality = "OPTIONAL" if not required else "FEATURE"
+    return required, criticality
+
+
+async def _classify_terminal_quality(session, run: Run) -> tuple[str, dict[str, int]]:
+    items = (
+        await session.execute(select(WorkItem).where(WorkItem.run_id == run.id))
+    ).scalars().all()
+    counts: dict[str, int] = {}
+    critical_failed = 0
+    optional_failed = 0
+    for item in items:
+        status = str(item.status or "").upper()
+        counts[status] = counts.get(status, 0) + 1
+        if status not in {"FAILED", "CANCELED", "BLOCKED"}:
+            continue
+        required, criticality = _work_item_required_and_criticality(item)
+        if required or criticality in {"FOUNDATION", "CRITICAL"}:
+            critical_failed += 1
+        else:
+            optional_failed += 1
+    counts["critical_failed"] = int(critical_failed)
+    counts["optional_failed"] = int(optional_failed)
+    if critical_failed > 0:
+        return "DEGRADED_COMPLETION", counts
+    if optional_failed > 0:
+        return "COMPLETED_WITH_RECOVERY", counts
+    recovery_attempts = (
+        await session.execute(
+            select(func.count())
+            .select_from(RunEvent)
+            .where(
+                RunEvent.run_id == run.id,
+                RunEvent.event_type.in_(["WORK_ITEM_RECOVERY", "RECOVERY_ATTEMPT_SUCCEEDED"]),
+            )
+        )
+    ).scalar() or 0
+    if int(recovery_attempts) > 0:
+        return "COMPLETED_WITH_RECOVERY", counts
+    return "COMPLETED_CLEAN", counts
+
+
 async def _finalize_run_degraded(session, run: Run, *, reason: str, actor_type: str = "SYSTEM") -> bool:
     from app.services.state_guard import update_run_status
 
@@ -233,8 +306,10 @@ async def _finalize_run_degraded(session, run: Run, *, reason: str, actor_type: 
     summary["degraded_reason"] = reason
     summary["degraded_at"] = datetime.now(timezone.utc).isoformat()
     summary["goal_state"] = "CONCLUDED_UNRESOLVABLE"
+    summary["terminal_quality"] = "DEGRADED_COMPLETION"
     run.summary = summary
     session.add(run)
+    await _sync_task_status_for_terminal_run(session, run, run_status="COMPLETED", reason=reason)
     await record_event(
         session,
         project_id=run.project_id,
@@ -243,6 +318,15 @@ async def _finalize_run_degraded(session, run: Run, *, reason: str, actor_type: 
         actor_type=actor_type,
         tenant_id=run.tenant_id,
         payload={"reason": reason, "final_status": "COMPLETED"},
+    )
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_TERMINAL_CLASSIFIED",
+        actor_type=actor_type,
+        tenant_id=run.tenant_id,
+        payload={"terminal_quality": "DEGRADED_COMPLETION", "reason": reason},
     )
     await record_event(
         session,
@@ -284,7 +368,69 @@ async def _mark_run_failed(
         tenant_id=run.tenant_id,
         payload={"reason": reason},
     )
+    await _sync_task_status_for_terminal_run(session, run, run_status="FAILED", reason=reason)
     return True
+
+
+async def _sync_task_status_for_terminal_run(
+    session,
+    run: Run,
+    *,
+    run_status: str,
+    reason: str | None = None,
+) -> None:
+    task = await session.scalar(
+        select(Task)
+        .where(
+            Task.run_id == run.id,
+            Task.project_id == run.project_id,
+            Task.tenant_id == run.tenant_id,
+            Task.deleted_at.is_(None),
+        )
+        .order_by(Task.updated_at.desc(), Task.created_at.desc())
+        .limit(1)
+    )
+    if task is None:
+        summary = run.summary if isinstance(run.summary, dict) else {}
+        raw_task_id = summary.get("task_id")
+        try:
+            parsed_task_id = uuid.UUID(str(raw_task_id)) if raw_task_id else None
+        except (TypeError, ValueError, AttributeError):
+            parsed_task_id = None
+        if parsed_task_id is not None:
+            task = await session.scalar(
+                select(Task).where(
+                    Task.id == parsed_task_id,
+                    Task.project_id == run.project_id,
+                    Task.tenant_id == run.tenant_id,
+                    Task.deleted_at.is_(None),
+                )
+            )
+    if task is None:
+        return
+
+    normalized = str(run_status or "").upper()
+    if normalized == "COMPLETED":
+        task.status = "DONE"
+        task.last_error = None
+    elif normalized == "FAILED":
+        task.status = "FAILED"
+        if reason:
+            task.last_error = reason
+    elif normalized == "CANCELED":
+        task.status = "CANCELED"
+    if task.started_at is None:
+        task.started_at = run.started_at
+    if task.status in {"DONE", "FAILED", "CANCELED"}:
+        task.finished_at = run.finished_at or datetime.now(timezone.utc)
+    result_payload = dict(task.result_payload or {})
+    result_payload["run_id"] = str(run.id)
+    result_payload["run_status"] = normalized
+    if reason:
+        result_payload["run_reason"] = reason
+    task.result_payload = result_payload
+    task.run_id = run.id
+    session.add(task)
 
 
 def _is_budget_exhausted_failure(item: WorkItem) -> bool:
@@ -331,6 +477,233 @@ def _is_operator_confirmation_failure(item: WorkItem) -> bool:
     )
     haystack = "\n".join((message, error, last_error))
     return any(marker in haystack for marker in markers)
+
+
+def _is_patch_too_large_failure(item: WorkItem) -> bool:
+    result = item.result if isinstance(item.result, dict) else {}
+    message = str(result.get("message") or "").lower()
+    error = str(result.get("error") or "").lower()
+    failure_class = str(result.get("failure_class") or "").lower()
+    last_error = str(item.last_error or "").lower()
+    haystack = "\n".join((message, error, last_error))
+    return (
+        "patch too large for" in haystack
+        or "patch_too_large" in haystack
+        or failure_class in {"patch_too_large", "patch_apply_failure"}
+    )
+
+
+def _verification_from_failed_item(item: WorkItem) -> dict:
+    result = item.result if isinstance(item.result, dict) else {}
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
+    return verification
+
+
+def _verification_file_scope(item: WorkItem) -> list[str]:
+    verification = _verification_from_failed_item(item)
+    for key in ("verified_files", "actual_files"):
+        value = verification.get(key)
+        if isinstance(value, list):
+            files = [str(path).strip() for path in value if isinstance(path, str) and path.strip()]
+            if files:
+                return list(dict.fromkeys(files))
+    payload = item.payload if isinstance(item.payload, dict) else {}
+    for key in ("target_files", "files", "expected_files"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            files = [str(path).strip() for path in value if isinstance(path, str) and path.strip()]
+            if files:
+                return list(dict.fromkeys(files))
+    return []
+
+
+def _is_decomposable_operator_confirmation(item: WorkItem) -> bool:
+    if not _is_operator_confirmation_failure(item):
+        return False
+    verification = _verification_from_failed_item(item)
+    file_count = int(verification.get("file_count") or 0)
+    return AUTO_PHASE_DECOMPOSE_MIN_FILES <= file_count <= AUTO_PHASE_DECOMPOSE_MAX_FILES
+
+
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    if size <= 0:
+        return [values]
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
+async def _auto_decompose_operator_confirmation(session, run: Run, *, failed_items: list[WorkItem]) -> bool:
+    candidates = [
+        item
+        for item in failed_items
+        if is_blocking_failure(item) and not is_superseded_failure(item) and _is_decomposable_operator_confirmation(item)
+    ]
+    if not candidates:
+        return False
+
+    summary = dict(run.summary or {})
+    if summary.get("auto_phase_decomposition_in_progress"):
+        return False
+
+    source = sorted(candidates, key=lambda item: (item.priority, item.created_at), reverse=True)[0]
+    scoped_files = _verification_file_scope(source)
+    if not scoped_files:
+        return False
+    file_chunks = _chunked(scoped_files, AUTO_PHASE_MAX_FILES)
+    if len(file_chunks) <= 1:
+        return False
+
+    task_payload = dict(source.payload or {})
+    base_key = source.key or source.type
+    created: list[WorkItem] = []
+    predecessor_id = None
+
+    for index, chunk in enumerate(file_chunks, start=1):
+        phase_payload = dict(task_payload)
+        phase_payload["files"] = list(chunk)
+        phase_payload["target_files"] = list(chunk)
+        phase_payload["expected_files"] = list(chunk)
+        phase_payload["recovery_action"] = "auto_phase_decomposition"
+        phase_payload["recovery_source_id"] = str(source.id)
+        phase_payload["phase_index"] = index
+        phase_payload["phase_total"] = len(file_chunks)
+        wi = WorkItem(
+            project_id=source.project_id,
+            tenant_id=source.tenant_id,
+            run_id=source.run_id,
+            type=source.type,
+            key=f"{base_key}_PHASE_{index}",
+            status="QUEUED",
+            priority=max(source.priority + 1, 1),
+            executor=source.executor,
+            attempt=0,
+            max_attempts=max(source.max_attempts, 1),
+            required_capabilities=list(source.required_capabilities or []),
+            payload=phase_payload,
+            depends_on_count=1 if predecessor_id else 0,
+        )
+        session.add(wi)
+        await session.flush()
+        await link_run_to_work_item(session, wi)
+        created.append(wi)
+        if predecessor_id:
+            session.add(
+                WorkItemEdge(
+                    tenant_id=source.tenant_id,
+                    run_id=source.run_id,
+                    from_work_item_id=predecessor_id,
+                    to_work_item_id=wi.id,
+                )
+            )
+        predecessor_id = wi.id
+
+    followup_types = ["WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"]
+    last_phase_id = predecessor_id
+    for item_type in followup_types:
+        candidate = await session.scalar(
+            select(WorkItem)
+            .where(WorkItem.run_id == run.id, WorkItem.type == item_type)
+            .order_by(WorkItem.created_at.desc())
+            .limit(1)
+        )
+        if candidate is None:
+            continue
+        replay_payload = dict(candidate.payload or {})
+        replay_payload["recovery_action"] = "auto_phase_decomposition"
+        replay_payload["recovery_source_id"] = str(source.id)
+        replay = WorkItem(
+            project_id=source.project_id,
+            tenant_id=source.tenant_id,
+            run_id=source.run_id,
+            type=candidate.type,
+            key=f"{candidate.key or candidate.type}_PHASED_{uuid.uuid4().hex[:4]}",
+            status="QUEUED",
+            priority=max(candidate.priority, 1),
+            executor=candidate.executor,
+            attempt=0,
+            max_attempts=max(candidate.max_attempts, 1),
+            required_capabilities=list(candidate.required_capabilities or []),
+            payload=replay_payload,
+            depends_on_count=1 if last_phase_id else 0,
+        )
+        session.add(replay)
+        await session.flush()
+        await link_run_to_work_item(session, replay)
+        if last_phase_id:
+            session.add(
+                WorkItemEdge(
+                    tenant_id=source.tenant_id,
+                    run_id=source.run_id,
+                    from_work_item_id=last_phase_id,
+                    to_work_item_id=replay.id,
+                )
+            )
+        last_phase_id = replay.id
+        created.append(replay)
+
+    for blocked in candidates:
+        blocked_result = dict(blocked.result or {})
+        blocked_result["superseded"] = True
+        blocked_result["superseded_reason"] = "auto_phase_decomposition"
+        blocked_result["superseded_by"] = str(created[0].id)
+        blocked.result = blocked_result
+        session.add(blocked)
+
+    summary["goal_state"] = "RECOVERING"
+    summary["auto_phase_decomposition_in_progress"] = True
+    summary["auto_phase_decomposition"] = {
+        "source_work_item_id": str(source.id),
+        "created_work_item_ids": [str(item.id) for item in created],
+        "phase_count": len(file_chunks),
+        "file_count": len(scoped_files),
+        "max_files_per_phase": AUTO_PHASE_MAX_FILES,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    run.summary = summary
+    session.add(run)
+
+    for item in created:
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            work_item_id=item.id,
+            event_type="WORK_ITEM_CREATED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            payload={"work_item_id": str(item.id), "type": item.type, "reason": "auto_phase_decomposition"},
+        )
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        work_item_id=source.id,
+        event_type="WORK_ITEM_RECOVERY",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "work_item_id": str(source.id),
+            "recovery_action": "auto_phase_decomposition",
+            "recovery_work_item_ids": [str(item.id) for item in created],
+            "phase_count": len(file_chunks),
+        },
+        message="Auto phase decomposition queued from operator confirmation scope.",
+    )
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_AUTO_DECOMPOSED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "source_work_item_id": str(source.id),
+            "phase_count": len(file_chunks),
+            "file_count": len(scoped_files),
+            "max_files_per_phase": AUTO_PHASE_MAX_FILES,
+        },
+    )
+    return True
 
 
 async def _maybe_emit_budget_warning(session, run: Run) -> None:
@@ -396,6 +769,8 @@ async def _pause_run_for_budget(session, run: Run, *, failed_items: list[WorkIte
 async def _pause_run_for_operator_confirmation(session, run: Run, *, failed_items: list[WorkItem]) -> bool:
     from app.services.state_guard import update_run_status
 
+    if _is_bootstrap_mode(run):
+        return False
     blocked = [item for item in failed_items if _is_operator_confirmation_failure(item)]
     if not blocked:
         return False
@@ -422,6 +797,54 @@ async def _pause_run_for_operator_confirmation(session, run: Run, *, failed_item
             "reason": "operator_confirmation_required",
             "failed_work_item_ids": [str(item.id) for item in blocked],
         },
+    )
+    return True
+
+
+async def _pause_run_for_patch_scope(session, run: Run, *, failed_items: list[WorkItem]) -> bool:
+    from app.services.state_guard import update_run_status
+
+    if _is_bootstrap_mode(run):
+        return False
+    blocked = [item for item in failed_items if _is_patch_too_large_failure(item)]
+    if not blocked:
+        return False
+
+    requires_decomposition = False
+    for item in blocked:
+        payload = item.payload if isinstance(item.payload, dict) else {}
+        recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
+        recovery_action = str(payload.get("recovery_action") or "").strip().lower()
+        if recovery_strategy == "write_file_preferred" or recovery_action == "goal_recovery_retry":
+            requires_decomposition = True
+            break
+    if not requires_decomposition:
+        return False
+
+    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+    if not ok:
+        return False
+    summary = dict(run.summary or {})
+    summary["goal_state"] = "NEEDS_HUMAN_INPUT"
+    summary["patch_scope_pause"] = {
+        "reason": "patch_scope_too_large_requires_decomposition",
+        "paused_at": datetime.now(timezone.utc).isoformat(),
+        "failed_work_item_ids": [str(item.id) for item in blocked],
+    }
+    run.summary = summary
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_DECOMPOSITION_REQUIRED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "reason": "patch_scope_too_large_requires_decomposition",
+            "failed_work_item_ids": [str(item.id) for item in blocked],
+        },
+        message="Paused run: patch scope exceeded bounded mutation policy; decomposition required.",
     )
     return True
 
@@ -526,11 +949,26 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
         return False
     if any(_is_quota_exhausted_failure(item) for item in blocking_failed):
         return False
-    if any(_is_operator_confirmation_failure(item) for item in blocking_failed):
+    bootstrap_mode = _is_bootstrap_mode(run)
+    if (not bootstrap_mode) and any(_is_operator_confirmation_failure(item) for item in blocking_failed):
         return False
     source = blocking_failed[0]
+    source_result = source.result if isinstance(source.result, dict) else {}
+    source_last_error = str(source.last_error or "").lower()
+    source_failure_class = str(source_result.get("failure_class") or "").strip().lower()
+    source_failure_type = str(source_result.get("failure_type") or "").strip().lower()
+    output_contract_invalid = (
+        source_failure_class == "output_contract_invalid"
+        or source_failure_type == "parser_error"
+        or "output_contract_invalid" in source_last_error
+    )
+    source_payload = source.payload if isinstance(source.payload, dict) else {}
+    source_recovery_strategy = str(source_payload.get("recovery_strategy") or "").strip().lower()
+    source_strict_contract_mode = bool(source_payload.get("strict_output_contract_mode"))
+    if output_contract_invalid and source_recovery_strategy == "write_file_preferred" and source_strict_contract_mode:
+        return False
     next_cycle = current_cycles + 1
-    recovery_payload = dict(source.payload or {})
+    recovery_payload = dict(source_payload)
     recovery_payload.update(
         {
             "recovery_action": "goal_recovery_retry",
@@ -538,6 +976,17 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
             "goal_recovery_cycle": next_cycle,
         }
     )
+    if output_contract_invalid and source.type == "CODE_FRONTEND":
+        recovery_payload["recovery_strategy"] = "write_file_preferred"
+        recovery_payload["recovery_reason"] = "output_contract_invalid"
+        recovery_payload["strict_output_contract_mode"] = True
+        recovery_payload["prior_output_contract_failures"] = int(
+            recovery_payload.get("prior_output_contract_failures") or 0
+        ) + 1
+        recovery_payload["recovery_action"] = "retry_with_write_file"
+    if bootstrap_mode and source.type in {"CODE_BACKEND", "CODE_FRONTEND"}:
+        recovery_payload.setdefault("recovery_strategy", "write_file_preferred")
+        recovery_payload.setdefault("recovery_reason", "bootstrap_mode_retry")
     recovery_item = WorkItem(
         project_id=source.project_id,
         tenant_id=source.tenant_id,
@@ -556,7 +1005,7 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
     session.add(recovery_item)
     await session.flush()
 
-    source_result = dict(source.result or {})
+    source_result = dict(source_result or {})
     source_result["superseded"] = True
     source_result["superseded_by"] = str(recovery_item.id)
     source_result["superseded_reason"] = "goal_recovery_retry_spawned"
@@ -594,6 +1043,123 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
             "recovery_cycle": next_cycle,
         },
         message="Goal recovery retry queued from terminal blocking failure.",
+    )
+    return True
+
+
+async def _requeue_validation_after_recovery(session, run: Run) -> bool:
+    work_items = (
+        await session.execute(
+            select(WorkItem)
+            .where(WorkItem.run_id == run.id)
+            .order_by(WorkItem.created_at.asc())
+        )
+    ).scalars().all()
+    if not work_items:
+        return False
+
+    by_type: dict[str, list[WorkItem]] = {}
+    for item in work_items:
+        by_type.setdefault(item.type, []).append(item)
+
+    validation_types = ["WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"]
+    # Only replay validation if no active/queued validation work exists and there is canceled validation to replay.
+    has_live_validation = any(
+        any(item.status in {"QUEUED", "RUNNING", "CLAIMED"} for item in by_type.get(item_type, []))
+        for item_type in validation_types
+    )
+    if has_live_validation:
+        return False
+    if not any(any(item.status == "CANCELED" for item in by_type.get(item_type, [])) for item_type in validation_types):
+        return False
+
+    latest_recovery_code = next(
+        (
+            item
+            for item in reversed(work_items)
+            if item.type in {"CODE_BACKEND", "CODE_FRONTEND"}
+            and item.status == "DONE"
+            and isinstance(item.payload, dict)
+            and str(item.payload.get("recovery_action") or "") in {"goal_recovery_retry", "auto_phase_decomposition"}
+        ),
+        None,
+    )
+    if latest_recovery_code is None:
+        return False
+
+    predecessor_id: uuid.UUID | None = latest_recovery_code.id
+    created: list[WorkItem] = []
+    for item_type in validation_types:
+        template = next((item for item in reversed(by_type.get(item_type, [])) if item.status == "CANCELED"), None)
+        if template is None:
+            continue
+        payload = dict(template.payload or {})
+        payload["recovery_action"] = "replay_validation_after_recovery"
+        payload["recovery_source_id"] = str(latest_recovery_code.id)
+        replay = WorkItem(
+            project_id=run.project_id,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            type=template.type,
+            key=f"{template.key or template.type}_REPLAY_{uuid.uuid4().hex[:4]}",
+            status="QUEUED",
+            priority=max(template.priority, 1),
+            executor=template.executor,
+            attempt=0,
+            max_attempts=max(template.max_attempts, 1),
+            required_capabilities=list(template.required_capabilities or []),
+            payload=payload,
+            depends_on_count=1 if predecessor_id else 0,
+        )
+        session.add(replay)
+        await session.flush()
+        await link_run_to_work_item(session, replay)
+        if predecessor_id:
+            session.add(
+                WorkItemEdge(
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    from_work_item_id=predecessor_id,
+                    to_work_item_id=replay.id,
+                )
+            )
+        predecessor_id = replay.id
+        created.append(replay)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            work_item_id=replay.id,
+            event_type="WORK_ITEM_CREATED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            payload={"work_item_id": str(replay.id), "type": replay.type, "reason": "replay_validation_after_recovery"},
+        )
+
+    if not created:
+        return False
+
+    summary = dict(run.summary or {})
+    summary["validation_replay"] = {
+        "reason": "recovery_completed_before_validation",
+        "source_work_item_id": str(latest_recovery_code.id),
+        "created_work_item_ids": [str(item.id) for item in created],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    run.summary = summary
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_VALIDATION_REPLAY_QUEUED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "reason": "recovery_completed_before_validation",
+            "source_work_item_id": str(latest_recovery_code.id),
+            "created_work_item_ids": [str(item.id) for item in created],
+        },
     )
     return True
 
@@ -695,6 +1261,26 @@ async def tick(session):
         runnable_items = await _runnable_queued_items(session, run) if queued else []
         if queued and active == 0 and runnable_items:
             await _nudge_worker_if_stalled(session, run, runnable_items, active)
+        if queued and active == 0 and not runnable_items and failed_non_superseded and not recovery_pending:
+            canceled_count = await _cancel_terminally_blocked_items(session, run)
+            if canceled_count:
+                await record_event(
+                    session,
+                    project_id=run.project_id,
+                    run_id=run.id,
+                    event_type="RUN_DAG_STARVATION_RESOLVED",
+                    actor_type="SYSTEM",
+                    tenant_id=run.tenant_id,
+                    payload={
+                        "queued_count": int(queued),
+                        "failed_non_superseded": int(failed_non_superseded),
+                        "canceled_count": int(canceled_count),
+                        "strategy": "cancel_blocked_then_recover",
+                    },
+                    message="Queued graph starvation resolved by canceling blocked descendants of failed ancestors.",
+                )
+                # Let the normal failed/recovery flow re-evaluate immediately.
+                continue
 
         # Guard: active work items should still emit progress. If not, pause for operator recovery.
         if active > 0:
@@ -826,9 +1412,13 @@ async def tick(session):
                     queued = 0
 
         if failed_non_superseded and active == 0 and queued == 0 and not recovery_pending:
+            if await _auto_decompose_operator_confirmation(session, run, failed_items=failed_items):
+                continue
             if await _pause_run_for_budget(session, run, failed_items=failed_items):
                 continue
             if await _pause_run_for_operator_confirmation(session, run, failed_items=failed_items):
+                continue
+            if await _pause_run_for_patch_scope(session, run, failed_items=failed_items):
                 continue
             if await _pause_run_for_recovery_stall(session, run):
                 continue
@@ -845,6 +1435,8 @@ async def tick(session):
                 if not ok:
                     continue
         elif failed_non_superseded == 0 and active == 0 and queued == 0:
+            if await _requeue_validation_after_recovery(session, run):
+                continue
             locked = await session.scalar(
                 select(Run)
                 .where(Run.id == run.id, Run.status.in_(["RUNNING", "QUEUED"]))
@@ -886,11 +1478,28 @@ async def tick(session):
             summary = dict(locked.summary or {})
             summary["goal_state"] = "DONE"
             if final_status == "COMPLETED":
+                terminal_quality, counts = await _classify_terminal_quality(session, locked)
                 summary.pop("degraded_completion", None)
                 summary.pop("degraded_reason", None)
                 summary.pop("degraded_at", None)
+                summary["terminal_quality"] = terminal_quality
+                summary["terminal_counts"] = counts
             locked.summary = summary
             session.add(locked)
+            await _sync_task_status_for_terminal_run(session, locked, run_status=final_status)
+            if final_status == "COMPLETED":
+                await record_event(
+                    session,
+                    project_id=locked.project_id,
+                    run_id=locked.id,
+                    event_type="RUN_TERMINAL_CLASSIFIED",
+                    actor_type="SYSTEM",
+                    tenant_id=locked.tenant_id,
+                    payload={
+                        "terminal_quality": summary.get("terminal_quality", "COMPLETED_CLEAN"),
+                        "terminal_counts": summary.get("terminal_counts", {}),
+                    },
+                )
             await record_event(
                 session,
                 project_id=locked.project_id,

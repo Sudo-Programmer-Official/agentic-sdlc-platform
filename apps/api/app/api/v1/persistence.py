@@ -167,6 +167,7 @@ from app.services.project_contract_service import summarize_project_contract
 from app.services.governance_kpis import build_governance_kpis
 from app.services.impact_analysis_loop import score_impact_prediction
 from app.services.external_reference_ingestion import persist_external_reference
+from app.services.run_recommendations import get_run_recommendations
 from app.services.secret_vault import resolve_vault_secret, store_vault_secret
 from app.services.environment_readiness import (
     checklist_template,
@@ -417,6 +418,23 @@ class WorkspaceUsageDailyOut(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_cost_cents: int = 0
+
+
+class RunRecommendationTaskOut(BaseModel):
+    task_id: str
+    title: str
+    reason: str
+    status: str
+    source_type: str
+    confidence: float
+
+
+class RunRecommendationsOut(BaseModel):
+    recommended_next_task: RunRecommendationTaskOut | None = None
+    blocked_by: list[str] = Field(default_factory=list)
+    recovery_suggestions: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    reason_trace: list[str] = Field(default_factory=list)
 
 
 class WorkspaceUsageSummaryOut(BaseModel):
@@ -1774,6 +1792,7 @@ async def create_run(
     if project.workspace_id:
         await _check_workspace_token_limit(session, ctx, project.workspace_id)
     task_id = payload.task_id if payload else None
+    force_rerun = bool(payload.force_rerun) if payload else False
     request_key = str(payload.request_key).strip() if payload and payload.request_key else ""
     if request_key:
         existing = await _find_run_by_request_key(
@@ -1784,6 +1803,66 @@ async def create_run(
         )
         if existing is not None:
             return _run_out(existing)
+    if force_rerun and task_id is not None:
+        source_task = await session.scalar(
+            select(Task).where(
+                Task.id == task_id,
+                Task.project_id == project_id,
+                Task.tenant_id == ctx.tenant_id,
+                Task.deleted_at.is_(None),
+            )
+        )
+        if source_task is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+        source_provenance = source_task.provenance if isinstance(source_task.provenance, dict) else {}
+        rerun_provenance = dict(source_provenance)
+        rerun_provenance["rerun_of_task_id"] = str(source_task.id)
+        rerun_provenance["parent_task_id"] = str(source_task.id)
+        rerun_provenance["attempt_type"] = "RETRY"
+        rerun_provenance["force_rerun"] = True
+        rerun_provenance["created_from_run_modal"] = True
+        rerun_task = Task(
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            document_id=source_task.document_id,
+            generated_from_document_version=source_task.generated_from_document_version,
+            title=source_task.title,
+            description=source_task.description,
+            category=source_task.category,
+            stage=source_task.stage,
+            status="PENDING",
+            assignee=source_task.assignee,
+            created_by=ctx.user_id or source_task.created_by,
+            source=source_task.source,
+            source_type=source_task.source_type,
+            source_node_id=source_task.source_node_id,
+            requirement_id=source_task.requirement_id,
+            derived_from_requirement_ids=source_task.derived_from_requirement_ids,
+            capability_id=source_task.capability_id,
+            capability_label=source_task.capability_label,
+            architecture_slice=source_task.architecture_slice,
+            impact_zone=source_task.impact_zone,
+            provenance=rerun_provenance,
+            branch_strategy=source_task.branch_strategy,
+            base_branch=source_task.base_branch,
+            branch_name=source_task.branch_name,
+        )
+        session.add(rerun_task)
+        await session.flush()
+        await log_activity(
+            session,
+            project_id=project_id,
+            entity_type="task",
+            entity_id=rerun_task.id,
+            action_type="task.rerun.created",
+            metadata={
+                "source_task_id": str(source_task.id),
+                "force_rerun": True,
+                "status": "PENDING",
+            },
+            actor=getattr(ctx, "user_id", None),
+        )
+        task_id = rerun_task.id
     try:
         run = await launch_run_for_project(
             session,
@@ -2835,6 +2914,16 @@ class ClaimRequest(BaseModel):
     lease_seconds: int = DEFAULT_CLAIM_LEASE_SECONDS
 
 
+class TaskRerunPreflightOut(BaseModel):
+    task_id: uuid.UUID
+    classification: str
+    reason: str
+    recommended_action: str
+    task_status: str | None = None
+    latest_run_id: uuid.UUID | None = None
+    latest_run_status: str | None = None
+
+
 @router.patch("/runs/{run_id}/status", response_model=RunOut)
 @public_router.patch("/runs/{run_id}/status", response_model=RunOut)
 async def patch_run_status(
@@ -2877,6 +2966,26 @@ async def patch_run_status(
         actor_type="USER",
         payload={"previous": prev, "new": "CANCELED"},
     )
+    task = await session.scalar(
+        select(Task)
+        .where(
+            Task.run_id == run.id,
+            Task.project_id == run.project_id,
+            Task.tenant_id == run.tenant_id,
+            Task.deleted_at.is_(None),
+        )
+        .order_by(Task.updated_at.desc(), Task.created_at.desc())
+        .limit(1)
+    )
+    if task is not None:
+        task.status = "CANCELED"
+        task.finished_at = datetime.now(timezone.utc)
+        task.last_error = "Run canceled by operator."
+        result_payload = dict(task.result_payload or {})
+        result_payload["run_id"] = str(run.id)
+        result_payload["run_status"] = "CANCELED"
+        task.result_payload = result_payload
+        session.add(task)
     await session.commit()
     await session.refresh(run)
     return _run_out(run)
@@ -5638,6 +5747,181 @@ async def list_tasks(
             deduped.append(task)
         tasks = deduped
     return [_task_out(t) for t in tasks]
+
+
+@router.get("/projects/{project_id}/run-recommendations", response_model=RunRecommendationsOut)
+@public_router.get("/projects/{project_id}/run-recommendations", response_model=RunRecommendationsOut)
+async def run_recommendations(
+    project_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunRecommendationsOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    data = await get_run_recommendations(session, tenant_id=ctx.tenant_id, project_id=project_id)
+    return RunRecommendationsOut.model_validate(data)
+
+
+@router.get("/projects/{project_id}/tasks/{task_id}/rerun-preflight", response_model=TaskRerunPreflightOut)
+@public_router.get("/projects/{project_id}/tasks/{task_id}/rerun-preflight", response_model=TaskRerunPreflightOut)
+async def rerun_preflight(
+    project_id: uuid.UUID,
+    task_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> TaskRerunPreflightOut:
+    task = await session.scalar(
+        select(Task).where(
+            Task.id == task_id,
+            Task.project_id == project_id,
+            Task.tenant_id == ctx.tenant_id,
+            Task.deleted_at.is_(None),
+        )
+    )
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    latest_run = None
+    if task.run_id:
+        latest_run = await session.scalar(
+            select(Run).where(Run.id == task.run_id, Run.tenant_id == ctx.tenant_id)
+        )
+    if latest_run is None:
+        candidate_runs = (
+            await session.execute(
+                select(Run)
+                .where(Run.project_id == project_id, Run.tenant_id == ctx.tenant_id)
+                .order_by(Run.updated_at.desc(), Run.created_at.desc())
+                .limit(30)
+            )
+        ).scalars().all()
+        latest_run = next(
+            (
+                row
+                for row in candidate_runs
+                if isinstance(row.summary, dict) and str(row.summary.get("task_id") or "").strip() == str(task.id)
+            ),
+            None,
+        )
+
+    task_status = str(task.status or "").upper()
+    latest_run_status = str(latest_run.status or "").upper() if latest_run is not None else ""
+    classification = "partial_drift"
+    reason = "Task may need delta patching against current repository state."
+    recommended_action = "patch"
+
+    if task_status in {"FAILED", "BLOCKED", "CANCELED"} or latest_run_status in {"FAILED", "CANCELED"}:
+        classification = "broken"
+        reason = "Previous execution ended in a failure/canceled state; recovery-style rerun is appropriate."
+        recommended_action = "recover"
+    elif task_status in {"DONE", "COMPLETED", "CLOSED"} and latest_run_status == "COMPLETED":
+        classification = "already_satisfied"
+        reason = "Latest linked run completed successfully and task is already marked done."
+        recommended_action = "skip"
+
+    return TaskRerunPreflightOut(
+        task_id=task.id,
+        classification=classification,
+        reason=reason,
+        recommended_action=recommended_action,
+        task_status=task_status or None,
+        latest_run_id=latest_run.id if latest_run else None,
+        latest_run_status=latest_run_status or None,
+    )
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/rerun-noop-attempt", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
+@public_router.post("/projects/{project_id}/tasks/{task_id}/rerun-noop-attempt", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
+async def create_rerun_noop_attempt(
+    project_id: uuid.UUID,
+    task_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> TaskOut:
+    source_task = await session.scalar(
+        select(Task).where(
+            Task.id == task_id,
+            Task.project_id == project_id,
+            Task.tenant_id == ctx.tenant_id,
+            Task.deleted_at.is_(None),
+        )
+    )
+    if source_task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    preflight = await rerun_preflight(project_id, task_id, ctx=ctx, session=session)
+    if preflight.classification != "already_satisfied":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"NO_OP attempt is only allowed for already_satisfied tasks (current={preflight.classification}).",
+        )
+
+    source_provenance = source_task.provenance if isinstance(source_task.provenance, dict) else {}
+    now = datetime.now(timezone.utc)
+    provenance = dict(source_provenance)
+    provenance["rerun_of_task_id"] = str(source_task.id)
+    provenance["parent_task_id"] = str(source_task.id)
+    provenance["attempt_type"] = "NO_OP"
+    provenance["attempt_classification"] = "already_satisfied"
+    provenance["safe_rerun_skipped"] = True
+    provenance["created_from_run_modal"] = True
+
+    attempt = Task(
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+        document_id=source_task.document_id,
+        generated_from_document_version=source_task.generated_from_document_version,
+        title=source_task.title,
+        description=source_task.description,
+        category=source_task.category,
+        stage=source_task.stage,
+        status="DONE",
+        assignee=source_task.assignee,
+        created_by=ctx.user_id or source_task.created_by,
+        source=source_task.source,
+        source_type=source_task.source_type,
+        source_node_id=source_task.source_node_id,
+        requirement_id=source_task.requirement_id,
+        derived_from_requirement_ids=source_task.derived_from_requirement_ids,
+        capability_id=source_task.capability_id,
+        capability_label=source_task.capability_label,
+        architecture_slice=source_task.architecture_slice,
+        impact_zone=source_task.impact_zone,
+        provenance=provenance,
+        branch_strategy=source_task.branch_strategy,
+        base_branch=source_task.base_branch,
+        branch_name=source_task.branch_name,
+        started_at=now,
+        finished_at=now,
+        result_payload={
+            "attempt_type": "NO_OP",
+            "classification": preflight.classification,
+            "recommended_action": preflight.recommended_action,
+            "reason": preflight.reason,
+            "source_task_id": str(source_task.id),
+            "preflight": preflight.model_dump(mode="json"),
+        },
+    )
+    session.add(attempt)
+    await session.flush()
+    await log_activity(
+        session,
+        project_id=project_id,
+        entity_type="task",
+        entity_id=attempt.id,
+        action_type="task.rerun.noop",
+        metadata={
+            "source_task_id": str(source_task.id),
+            "attempt_type": "NO_OP",
+            "classification": preflight.classification,
+            "reason": preflight.reason,
+        },
+        actor=getattr(ctx, "user_id", None),
+    )
+    await session.commit()
+    await session.refresh(attempt)
+    return _task_out(attempt)
 
 
 @router.get("/projects/{project_id}/improvement-requests", response_model=List[ImprovementRequestOut])

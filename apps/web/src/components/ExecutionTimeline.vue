@@ -123,6 +123,12 @@ const steps = computed(() => {
       because = `Bootstrap completed and the run was handed off to the ${effectiveMode} runtime path.`;
       next = effectiveMode === "external" ? "Wait for a worker to claim the next ready item." : "Watch the runtime execute the next ready item.";
       state = "RUNNING";
+    } else if (message === "Governance profile elevated") {
+      const fromState = String(details.from_repository_state || "EARLY_BUILD");
+      const toState = String(details.to_repository_state || "ACTIVE_PRODUCT");
+      because = `Repository governance transitioned from ${fromState} to ${toState} as lifecycle maturity increased.`;
+      next = "Continue with stricter bounded execution, decomposition, and validation protections.";
+      state = "GOVERNANCE";
     } else if (message === "Run completed") {
       because = "All required tasks finished successfully.";
       next = "Review artifacts and move the SDLC stage forward.";

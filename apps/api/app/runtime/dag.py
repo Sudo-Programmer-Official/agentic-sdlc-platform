@@ -228,7 +228,13 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
         "REVIEW_INTEGRATION": f"Confirm integration for {task_title}",
     }
     payload = dict(task_payload)
+    task_source = str(payload.get("task_source") or "").strip().lower()
+    is_foundation = task_source in {"genesis", "genesis_setup"} or task_source.startswith("genesis.")
+    stage_required = stage_name in {"PLAN_DAG", "CODE_BACKEND", "CODE_FRONTEND", "RUN_TESTS"}
+    stage_criticality = "FOUNDATION" if is_foundation and stage_required else ("FEATURE" if stage_required else "OPTIONAL")
     payload["title"] = stage_titles.get(stage_name, task_title)
+    payload["required"] = bool(stage_required)
+    payload["criticality"] = stage_criticality
     scoped_files = [
         path for path in (payload.get("expected_files") or [])
         if isinstance(path, str) and path.strip()

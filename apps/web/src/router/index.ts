@@ -27,6 +27,7 @@ import KnowledgeEventDetail from "../views/KnowledgeEventDetail.vue";
 import AiOpsDashboard from "../views/AiOpsDashboard.vue";
 import SignIn from "../views/SignIn.vue";
 import E2ESmokeHarness from "../views/E2ESmokeHarness.vue";
+import RunGuide from "../views/RunGuide.vue";
 
 const routes: RouteRecordRaw[] = [
   { path: "/", name: "public-landing", component: PublicLanding, meta: { layout: "minimal" } },
@@ -41,6 +42,7 @@ const routes: RouteRecordRaw[] = [
   { path: "/workspace/dashboard", name: "workspace-dashboard", component: WorkspaceDashboard, meta: { requiresAuth: true } },
   { path: "/admin", name: "admin-console", component: AdminConsole, meta: { requiresAuth: true } },
   { path: "/signin", name: "signin", component: SignIn, meta: { layout: "minimal" } },
+  { path: "/help/run-guide", name: "run-guide", component: RunGuide, meta: { requiresAuth: true } },
   { path: "/__e2e__/smoke", name: "e2e-smoke", component: E2ESmokeHarness, meta: { layout: "minimal" } },
   { path: "/projects/:projectId/operator", name: "operator-dashboard", component: OperatorDashboard, meta: { requiresAuth: true } },
   { path: "/projects/:projectId", name: "project-overview", component: ProjectOverview, meta: { requiresAuth: true } },

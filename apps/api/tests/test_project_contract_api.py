@@ -133,3 +133,78 @@ async def test_project_contract_patch_updates_rules_and_derivation(db_session):
         assert patched["derived_json"]["enforcement"]["enforce_color_tokens"] is True
         assert patched["derived_json"]["enforcement"]["mode"] == "strict"
         assert patched["derived_json"]["enforcement"]["allowed_hex_values"] == ["#2563eb"]
+
+
+@pytest.mark.anyio
+async def test_design_contract_get_and_put_endpoints(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Design contract project", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        fetched = await client.get(f"/api/v1/projects/{project.id}/design-contract")
+        assert fetched.status_code == 200, fetched.text
+        baseline = fetched.json()
+        assert baseline["identity"]["name"] == "Design contract project"
+        assert baseline["typography"]["heading_font"] == "Inter"
+        assert baseline["experience_blueprint"] == "premium_saas"
+        assert isinstance(baseline["token_registry"], dict)
+
+        put_response = await client.put(
+            f"/api/v1/projects/{project.id}/design-contract",
+            json={
+                "experience_blueprint": "enterprise_operational",
+                "identity": {
+                    "name": "Prompt2PR",
+                    "tone": "operational_enterprise",
+                    "personality": "confident_governed_clear",
+                },
+                "tokens": {
+                    "primary": "#2563eb",
+                    "surface": "#0f172a",
+                    "accent": "#7c3aed",
+                    "success": "#22c55e",
+                },
+                "typography": {
+                    "heading_font": "Sora",
+                    "body_font": "Inter",
+                    "radius_scale": "soft",
+                    "density": "comfortable",
+                },
+                "components": {
+                    "buttons": {"style": "glass", "radius": "xl", "shadow": "soft"},
+                    "registry": ["HeroSection", "DashboardShell", "MetricCard"],
+                },
+                "token_registry": {
+                    "colors": {"primary": "#2563eb", "accent": "#7c3aed"},
+                    "spacing": {"sm": "0.5rem", "md": "1rem"},
+                    "radius": {"md": "0.5rem"},
+                    "motion": {"base": "200ms"},
+                    "elevation": {"md": "shadow"},
+                },
+                "allowed_components": ["HeroSection", "DashboardShell", "MetricCard"],
+                "layout": {
+                    "spacing": "airy",
+                    "container_width": "wide",
+                    "visual_weight": "balanced",
+                    "hero_style": "immersive",
+                },
+                "updated_by": "ui-user",
+            },
+        )
+        assert put_response.status_code == 200, put_response.text
+        body = put_response.json()
+        assert body["contract_json"]["design_contract"]["experience_blueprint"] == "enterprise_operational"
+        assert body["contract_json"]["design_contract"]["identity"]["tone"] == "operational_enterprise"
+        assert body["contract_json"]["design_contract"]["tokens"]["accent"] == "#7c3aed"
+        assert body["contract_json"]["design_contract"]["token_registry"]["colors"]["accent"] == "#7c3aed"
+        assert body["contract_json"]["design_contract"]["allowed_components"] == ["HeroSection", "DashboardShell", "MetricCard"]
+
+        fetched_after = await client.get(f"/api/v1/projects/{project.id}/design-contract")
+        assert fetched_after.status_code == 200, fetched_after.text
+        updated = fetched_after.json()
+        assert updated["experience_blueprint"] == "enterprise_operational"
+        assert updated["identity"]["name"] == "Prompt2PR"
+        assert updated["typography"]["heading_font"] == "Sora"
+        assert updated["layout"]["hero_style"] == "immersive"

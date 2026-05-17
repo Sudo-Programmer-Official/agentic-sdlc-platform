@@ -89,6 +89,7 @@ def _build_task_run_summary(task: Task) -> dict[str, object]:
         "requirement_id": task.requirement_id or (task.derived_from_requirement_ids[0] if isinstance(task.derived_from_requirement_ids, list) and task.derived_from_requirement_ids else None),
         "requirement_ids": task.derived_from_requirement_ids if isinstance(task.derived_from_requirement_ids, list) else None,
         "task_source": task.source,
+        "task_source_type": task.source_type,
         "task_branch_strategy": task.branch_strategy,
         "task_base_branch": clean_branch_value(task.base_branch),
         "task_requested_branch_name": clean_branch_value(task.branch_name),
@@ -102,6 +103,21 @@ def _build_task_run_summary(task: Task) -> dict[str, object]:
         if isinstance(edit_budget, dict):
             summary["edit_budget"] = dict(edit_budget)
     return summary
+
+
+def _resolve_repository_state(*, is_genesis_setup: bool, prior_runs: int) -> str:
+    if is_genesis_setup:
+        return "GENESIS"
+    if prior_runs <= 1:
+        return "EARLY_BUILD"
+    return "ACTIVE_PRODUCT"
+
+
+def _normalize_repository_state(value: object) -> str:
+    raw = str(value or "").strip().upper()
+    if raw in {"GENESIS", "EARLY_BUILD", "ACTIVE_PRODUCT", "PRODUCTION_CRITICAL", "LEGACY_COMPLEX"}:
+        return raw
+    return "ACTIVE_PRODUCT"
 
 
 async def _resolve_architecture_payload(
@@ -300,6 +316,34 @@ async def launch_run_for_project(
 
     if run_summary is None:
         run_summary = {}
+    latest_prior_run = await session.scalar(
+        select(Run)
+        .where(
+            Run.project_id == project_id,
+            Run.tenant_id == tenant_id,
+        )
+        .order_by(Run.created_at.desc())
+        .limit(1)
+    )
+    previous_repository_state = "GENESIS"
+    if latest_prior_run is not None and isinstance(latest_prior_run.summary, dict):
+        previous_repository_state = _normalize_repository_state(latest_prior_run.summary.get("repository_state"))
+    prior_runs = (
+        await session.scalar(
+            select(func.count())
+            .select_from(Run)
+            .where(
+                Run.project_id == project_id,
+                Run.tenant_id == tenant_id,
+            )
+        )
+    ) or 0
+    current_repository_state = _resolve_repository_state(
+        is_genesis_setup=is_genesis_setup,
+        prior_runs=int(prior_runs),
+    )
+    run_summary["repository_state"] = current_repository_state
+    run_summary["repository_state_previous"] = previous_repository_state
     if (
         selected_task is not None
         and executor_name.lower() == "dummy"
@@ -451,6 +495,27 @@ async def launch_run_for_project(
             "branch_name": run.branch_name,
         },
     )
+    transitioned_to_stricter_mode = (
+        previous_repository_state in {"GENESIS", "EARLY_BUILD"}
+        and current_repository_state in {"ACTIVE_PRODUCT", "PRODUCTION_CRITICAL"}
+        and previous_repository_state != current_repository_state
+    )
+    if transitioned_to_stricter_mode:
+        await record_event(
+            session,
+            project_id=project_id,
+            run_id=run.id,
+            event_type="RUN_GOVERNANCE_TRANSITION",
+            actor_type="SYSTEM",
+            tenant_id=tenant_id,
+            message=(
+                f"Governance profile elevated from {previous_repository_state} to {current_repository_state}."
+            ),
+            payload={
+                "from_repository_state": previous_repository_state,
+                "to_repository_state": current_repository_state,
+            },
+        )
     log.info(
         "Run created project_id=%s run_id=%s executor=%s task_id=%s",
         project_id,

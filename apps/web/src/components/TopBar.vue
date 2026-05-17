@@ -158,6 +158,7 @@
               </div>
             </div>
             <button type="button" class="topbar-chip" @click="goHome">Workspace</button>
+            <button type="button" class="topbar-chip" @click="goRunGuide">Run Guide</button>
             <button v-if="showEnterMc" type="button" class="topbar-chip" @click="goToRun">Enter Mission Control</button>
             <button v-if="showStop" type="button" class="topbar-chip" @click="pauseRun" :disabled="!canPause || pausing">
               {{ pausing ? "Stopping…" : "Emergency Stop" }}
@@ -433,6 +434,10 @@ async function switchWorkspaceSelection(id: string | number | null) {
 
 function goHome() {
   router.push("/workspace");
+}
+
+function goRunGuide() {
+  router.push("/help/run-guide");
 }
 
 function goToRun() {

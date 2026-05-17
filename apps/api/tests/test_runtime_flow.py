@@ -1695,6 +1695,461 @@ async def test_scheduler_spawns_goal_recovery_retry_before_conclusion(monkeypatc
 
 
 @pytest.mark.anyio
+async def test_scheduler_goal_recovery_adapts_output_contract_invalid_frontend(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Output contract recovery project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True},
+            result={"failure_class": "output_contract_invalid"},
+            last_error="AI policy halted execution: output_contract_invalid",
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+        failed_item_id = failed_item.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        recovery_items = (
+            await session.execute(
+                select(WorkItem).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.status == "QUEUED",
+                    WorkItem.id != failed_item_id,
+                )
+            )
+        ).scalars().all()
+        assert recovery_items
+        payload = recovery_items[0].payload or {}
+        assert payload.get("recovery_strategy") == "write_file_preferred"
+        assert payload.get("strict_output_contract_mode") is True
+        assert payload.get("prior_output_contract_failures") == 1
+        assert payload.get("recovery_action") == "retry_with_write_file"
+
+
+@pytest.mark.anyio
+async def test_scheduler_goal_recovery_does_not_loop_after_adaptive_output_contract_retry(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="No loop recovery project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND_RECOVERY_1",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={
+                "blocking": True,
+                "recovery_strategy": "write_file_preferred",
+                "strict_output_contract_mode": True,
+            },
+            result={"failure_class": "output_contract_invalid"},
+            last_error="AI policy halted execution: output_contract_invalid",
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        queued_frontend = (
+            await session.execute(
+                select(WorkItem).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.status == "QUEUED",
+                    WorkItem.type == "CODE_FRONTEND",
+                )
+            )
+        ).scalars().all()
+        assert not queued_frontend
+
+@pytest.mark.anyio
+async def test_scheduler_patch_too_large_spawns_recovery_before_pause(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Patch too large recovery project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_BACKEND",
+            key="CODE_BACKEND",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True, "target_files": ["app.py"]},
+            result={"message": "Patch too large for app.py (>40% change)"},
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        recovery_items = (
+            await session.execute(
+                select(WorkItem).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.status == "QUEUED",
+                    WorkItem.type == "CODE_BACKEND",
+                )
+            )
+        ).scalars().all()
+        assert recovery_items
+        assert recovery_items[0].payload.get("recovery_action") == "goal_recovery_retry"
+
+
+@pytest.mark.anyio
+async def test_scheduler_pauses_when_patch_too_large_repeats_after_recovery(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Patch too large pause project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_BACKEND",
+            key="CODE_BACKEND_RECOVERY_1",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={
+                "blocking": True,
+                "target_files": ["app.py"],
+                "recovery_action": "goal_recovery_retry",
+                "recovery_strategy": "write_file_preferred",
+            },
+            result={"message": "Patch too large for app.py (>40% change)"},
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "PAUSED"
+        assert isinstance(run.summary, dict)
+        pause = run.summary.get("patch_scope_pause")
+        assert isinstance(pause, dict)
+        assert pause.get("reason") == "patch_scope_too_large_requires_decomposition"
+        event_types = [
+            event.event_type
+            for event in (
+                await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+            ).scalars().all()
+        ]
+        assert "RUN_DECOMPOSITION_REQUIRED" in event_types
+
+
+@pytest.mark.anyio
+async def test_scheduler_bootstrap_mode_does_not_pause_patch_too_large(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Bootstrap patch-too-large project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            summary={"repository_state": "GENESIS", "task_source": "genesis"},
+        )
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_BACKEND",
+            key="CODE_BACKEND_RECOVERY_1",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True, "recovery_action": "goal_recovery_retry"},
+            result={"message": "Patch too large for app.py (>40% change)"},
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("patch_scope_pause") is None
+
+
+@pytest.mark.anyio
+async def test_scheduler_replays_validation_after_successful_recovery(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Validation replay scheduler project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        session.add(
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="CODE_FRONTEND",
+                key="CODE_FRONTEND",
+                status="DONE",
+                priority=10,
+                executor="codex",
+                payload={"files": ["index.html"]},
+            )
+        )
+        session.add(
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="CODE_BACKEND",
+                key="CODE_BACKEND_RECOVERY_1",
+                status="DONE",
+                priority=10,
+                executor="codex",
+                payload={
+                    "files": ["app.py"],
+                    "recovery_action": "goal_recovery_retry",
+                    "recovery_source_id": str(uuid.uuid4()),
+                },
+            )
+        )
+        for stage_type, stage_key, stage_executor in (
+            ("WRITE_TESTS", "WRITE_TESTS", "test"),
+            ("RUN_TESTS", "RUN_TESTS", "test"),
+            ("REVIEW_DIFF", "REVIEW_DIFF", "review"),
+            ("REVIEW_INTEGRATION", "REVIEW_INTEGRATION", "review"),
+        ):
+            session.add(
+                WorkItem(
+                    project_id=project.id,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                    type=stage_type,
+                    key=stage_key,
+                    status="CANCELED",
+                    priority=8,
+                    executor=stage_executor,
+                    payload={"files": ["index.html", "app.py"]},
+                )
+            )
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        assert isinstance(run.summary, dict)
+        replay = run.summary.get("validation_replay")
+        assert isinstance(replay, dict)
+        assert replay.get("reason") == "recovery_completed_before_validation"
+
+        replay_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id, WorkItem.status == "QUEUED").order_by(WorkItem.created_at.asc())
+            )
+        ).scalars().all()
+        replay_types = [item.type for item in replay_items]
+        assert replay_types == ["WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"]
+        for item in replay_items:
+            assert item.payload.get("recovery_action") == "replay_validation_after_recovery"
+
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_VALIDATION_REPLAY_QUEUED" in event_types
+        assert "RUN_COMPLETED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_scheduler_marks_linked_task_done_when_run_completes(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Task completion sync project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        task = Task(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            title="initialize monorepo",
+            category="func",
+            stage="RUN",
+            status="PENDING",
+            source="manual",
+            source_type="manual",
+        )
+        session.add(task)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            summary={"task_id": str(task.id)},
+        )
+        session.add(run)
+        await session.flush()
+
+        task.run_id = run.id
+        session.add(task)
+        session.add(
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="PLAN_DAG",
+                key="PLAN_DAG",
+                status="DONE",
+                priority=10,
+                executor="codex",
+                payload={"task_id": str(task.id)},
+                result={"status": "DONE"},
+            )
+        )
+        await session.commit()
+        run_id = run.id
+        task_id = task.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        task = await session.get(Task, task_id)
+        assert run is not None
+        assert task is not None
+        assert run.status == "COMPLETED"
+        assert task.status == "DONE"
+        assert task.finished_at is not None
+
+
+@pytest.mark.anyio
 async def test_scheduler_does_not_spawn_goal_recovery_retry_for_insufficient_quota(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
@@ -1820,6 +2275,170 @@ async def test_scheduler_pauses_run_for_operator_confirmation_required(monkeypat
         assert "RUN_OPERATOR_ACTION_REQUIRED" in event_types
         assert "WORK_ITEM_RECOVERY" not in event_types
         assert "WORK_ITEM_CREATED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_scheduler_bootstrap_mode_retries_operator_confirmation_instead_of_pause(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Bootstrap operator confirmation project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            summary={"repository_state": "GENESIS", "task_source": "genesis"},
+        )
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True},
+            result={"message": "Patch execution requires operator confirmation before mutating the repository."},
+            last_error="Patch execution requires operator confirmation before mutating the repository.",
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        items = (
+            await session.execute(select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at.asc()))
+        ).scalars().all()
+        queued_recovery = [item for item in items if item.status == "QUEUED" and item.type == "CODE_FRONTEND"]
+        assert queued_recovery
+        assert queued_recovery[0].payload.get("recovery_action") == "goal_recovery_retry"
+        assert queued_recovery[0].payload.get("recovery_strategy") == "write_file_preferred"
+
+
+@pytest.mark.anyio
+async def test_scheduler_auto_decomposes_operator_confirmation_for_medium_scope(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    scoped_files = [
+        "apps/web/src/views/MissionControl.vue",
+        "apps/web/src/components/ExecutionTimeline.vue",
+        "apps/web/src/components/AuditTimeline.vue",
+        "apps/web/src/views/AiOpsDashboard.vue",
+        "apps/web/src/views/AgentRuns.vue",
+        "apps/web/src/views/SdlcTimeline.vue",
+        "apps/web/src/api/aiOps.ts",
+        "apps/web/src/views/ProjectOverview.vue",
+    ]
+
+    async with runtime_db() as session:
+        project = Project(name="Operator confirmation decomposition project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True, "files": scoped_files},
+            result={
+                "message": "Patch execution requires operator confirmation before mutating the repository.",
+                "payload": {
+                    "verification": {
+                        "status": "REQUIRES_CONFIRMATION",
+                        "requires_confirmation": True,
+                        "risk_level": "MEDIUM",
+                        "file_count": len(scoped_files),
+                        "verified_files": scoped_files,
+                        "scope_match": True,
+                    }
+                },
+            },
+            last_error="Patch execution requires operator confirmation before mutating the repository.",
+        )
+        session.add(failed_item)
+        session.add(
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="RUN_TESTS",
+                key="RUN_TESTS",
+                status="CANCELED",
+                priority=8,
+                executor="test",
+                payload={"files": ["tests/test_runtime_flow.py"]},
+            )
+        )
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("goal_state") == "RECOVERING"
+        assert run.summary.get("auto_phase_decomposition_in_progress") is True
+
+        items = (
+            await session.execute(select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at.asc()))
+        ).scalars().all()
+        phase_items = [item for item in items if (item.key or "").startswith("CODE_FRONTEND_PHASE_")]
+        assert len(phase_items) == 2
+        for item in phase_items:
+            assert item.status == "QUEUED"
+            assert item.payload.get("recovery_action") == "auto_phase_decomposition"
+            assert len(item.payload.get("files") or []) <= 6
+
+        source_failed = next(item for item in items if item.key == "CODE_FRONTEND" and item.status == "FAILED")
+        assert isinstance(source_failed.result, dict)
+        assert source_failed.result.get("superseded") is True
+        assert source_failed.result.get("superseded_reason") == "auto_phase_decomposition"
+
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_AUTO_DECOMPOSED" in event_types
+        assert "RUN_OPERATOR_ACTION_REQUIRED" not in event_types
 
 
 @pytest.mark.anyio
@@ -3190,6 +3809,8 @@ async def test_run_launch_allows_genesis_setup_runs_before_readiness(monkeypatch
             schedule=False,
         )
         assert run.status == "QUEUED"
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("repository_state") == "GENESIS"
 
 
 @pytest.mark.anyio
@@ -3214,3 +3835,63 @@ async def test_run_launch_does_not_block_projects_without_genesis(monkeypatch, r
             schedule=False,
         )
         assert run.status == "QUEUED"
+
+
+@pytest.mark.anyio
+async def test_run_launch_emits_governance_transition_event(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "embedded")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Governance transition launch project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        session.add(
+            Run(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                status="COMPLETED",
+                executor="dummy",
+                summary={"repository_state": "GENESIS"},
+            )
+        )
+        session.add(
+            Run(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                status="COMPLETED",
+                executor="dummy",
+                summary={"repository_state": "EARLY_BUILD"},
+            )
+        )
+        await session.commit()
+        project_id = project.id
+
+    async with runtime_db() as session:
+        run = await launch_run_for_project(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            executor_name="dummy",
+            schedule=False,
+        )
+        run_id = run.id
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("repository_state") == "ACTIVE_PRODUCT"
+        assert run.summary.get("repository_state_previous") in {"GENESIS", "EARLY_BUILD"}
+        previous_state = run.summary.get("repository_state_previous")
+
+    async with runtime_db() as session:
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        transition = [event for event in events if event.event_type == "RUN_GOVERNANCE_TRANSITION"]
+        assert len(transition) == 1
+        payload = transition[0].payload if isinstance(transition[0].payload, dict) else {}
+        assert payload.get("from_repository_state") == previous_state
+        assert payload.get("to_repository_state") == "ACTIVE_PRODUCT"

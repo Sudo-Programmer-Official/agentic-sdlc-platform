@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_tenant_context
 from app.db.session import get_session
 from app.schemas.project_contract import (
+    DesignContractOut,
+    DesignContractUpsert,
     ProjectContractBootstrapRequest,
     ProjectContractDeriveRequest,
     ProjectContractOut,
@@ -18,9 +20,11 @@ from app.schemas.project_contract import (
 from app.services.project_contract_service import (
     bootstrap_project_contract,
     derive_project_contract,
+    get_design_contract,
     get_project_contract,
     patch_project_contract,
     summarize_project_contract,
+    upsert_design_contract,
     upsert_project_contract,
 )
 
@@ -181,5 +185,48 @@ async def derive_contract(
             if detail in {"Project not found", "Project contract not found"}
             else status.HTTP_400_BAD_REQUEST
         )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    return ProjectContractOut.model_validate(profile)
+
+
+@router.get("/projects/{project_id}/design-contract", response_model=DesignContractOut)
+@public_router.get("/projects/{project_id}/design-contract", response_model=DesignContractOut)
+async def fetch_design_contract(
+    project_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> DesignContractOut:
+    try:
+        return await get_design_contract(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.put("/projects/{project_id}/design-contract", response_model=ProjectContractOut)
+@public_router.put("/projects/{project_id}/design-contract", response_model=ProjectContractOut)
+async def save_design_contract(
+    project_id: uuid.UUID,
+    payload: DesignContractUpsert,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectContractOut:
+    try:
+        profile = await upsert_design_contract(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            payload=payload,
+            updated_by=payload.updated_by or ctx.user_id,
+        )
+        await session.commit()
+        await session.refresh(profile)
+    except ValueError as exc:
+        await session.rollback()
+        detail = str(exc)
+        status_code = status.HTTP_404_NOT_FOUND if detail == "Project not found" else status.HTTP_400_BAD_REQUEST
         raise HTTPException(status_code=status_code, detail=detail) from exc
     return ProjectContractOut.model_validate(profile)

@@ -163,6 +163,17 @@
           <div class="mission-chip-panel__meta">{{ latestRun?.executor || "No executor" }}</div>
         </div>
         <div class="mission-chip-panel">
+          <div class="mission-chip-panel__label">Terminal Quality</div>
+          <div class="mission-chip-panel__value">
+            <el-tag effect="light" :type="runStatusTagType(latestTerminalQuality)">
+              {{ latestTerminalQualityLabel }}
+            </el-tag>
+          </div>
+          <div class="mission-chip-panel__meta">
+            Critical failed {{ latestTerminalCounts.critical_failed || 0 }} · Optional failed {{ latestTerminalCounts.optional_failed || 0 }}
+          </div>
+        </div>
+        <div class="mission-chip-panel">
           <div class="mission-chip-panel__label">Workspace</div>
           <div class="mission-chip-panel__value">{{ latestRun?.workspace_status || "PENDING" }}</div>
           <div class="mission-chip-panel__meta font-mono">{{ shortenPath(latestRun?.repo_path) }}</div>
@@ -1181,11 +1192,18 @@
                 <div class="flex flex-wrap items-center gap-2">
                   <div class="font-mono text-sm text-slate-900">{{ card.run_id }}</div>
                   <el-tag :type="runStatusTagType(card.outcome_status)" effect="light">{{ card.outcome_label }}</el-tag>
+                  <el-tag v-if="card.terminal_quality" :type="runStatusTagType(card.terminal_quality)" effect="light">
+                    {{ card.terminal_quality }}
+                  </el-tag>
                   <el-tag v-if="card.approval_status" :type="approvalTagType(card.approval_status)" effect="light">
                     {{ card.approval_status }}
                   </el-tag>
                 </div>
                 <div class="mt-2 text-sm text-slate-600">{{ card.goal_text || "No goal summary recorded." }}</div>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <el-tag effect="light" :type="card.governance_mode_tag">{{ card.governance_mode_label }}</el-tag>
+                  <span class="text-xs text-slate-500">{{ card.governance_mode_description }}</span>
+                </div>
                 <div v-if="card.next_action_hint" class="mt-2 text-xs text-slate-500">
                   <strong>Next:</strong> {{ card.next_action_hint }}
                 </div>
@@ -1196,6 +1214,8 @@
                   <div><strong>Recoveries:</strong> {{ card.recovery_count }}</div>
                   <div><strong>Artifacts:</strong> {{ card.artifact_count }}</div>
                   <div><strong>Confidence:</strong> {{ formatConfidence(card.confidence_score) }}</div>
+                  <div v-if="card.terminal_counts"><strong>Critical failed:</strong> {{ card.terminal_counts.critical_failed || 0 }}</div>
+                  <div v-if="card.terminal_counts"><strong>Optional failed:</strong> {{ card.terminal_counts.optional_failed || 0 }}</div>
                 </div>
                 <div v-if="card.execution_contract" class="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
                   <div><strong>Contract:</strong> {{ humanizeToken(card.execution_contract.lifecycle_state) }}</div>
@@ -3042,6 +3062,12 @@ const canonicalRunId = computed(() => {
 });
 
 const latestRun = computed(() => runs.value.find((run) => run?.id === canonicalRunId.value) || null);
+const latestTerminalQuality = computed(() => String(latestRun.value?.summary?.terminal_quality || "").trim().toUpperCase());
+const latestTerminalQualityLabel = computed(() => latestTerminalQuality.value || "IN_PROGRESS");
+const latestTerminalCounts = computed(() => {
+  const counts = latestRun.value?.summary?.terminal_counts;
+  return counts && typeof counts === "object" ? counts : {};
+});
 const linkedRequirementId = computed(
   () =>
     latestRun.value?.summary?.requirement_id ||
@@ -3164,11 +3190,40 @@ const recentRunCardsEnhanced = computed(() =>
     else if (status === "FAILED" || status === "CANCELED") nextActionHint = "Open logs, then retry failed step or replay the run.";
     else if (status === "COMPLETED" && card?.patch_artifact && !card?.pull_request_url) nextActionHint = "Approve patch and create PR.";
     else if (status === "COMPLETED" && card?.pull_request_url) nextActionHint = "Open PR and merge when ready.";
+    const rawMode = String(card?.repository_state || card?.summary?.repository_state || "").trim().toUpperCase();
+    const mode = rawMode === "GENESIS" || rawMode === "EARLY_BUILD" || rawMode === "PRODUCTION_CRITICAL" || rawMode === "ACTIVE_PRODUCT"
+      ? rawMode
+      : "ACTIVE_PRODUCT";
+    const governanceModeLabel = mode === "GENESIS"
+      ? "Genesis Mode"
+      : mode === "EARLY_BUILD"
+      ? "Early Build Mode"
+      : mode === "PRODUCTION_CRITICAL"
+      ? "Production Critical Mode"
+      : "Active Product Mode";
+    const governanceModeDescription = mode === "GENESIS"
+      ? "Broad scaffolding and bootstrap operations are allowed."
+      : mode === "EARLY_BUILD"
+      ? "Larger bounded mutations are allowed while architecture is evolving."
+      : mode === "PRODUCTION_CRITICAL"
+      ? "Strict governance and production protections are enforced."
+      : "Stricter governance, decomposition, and validation protections are enforced.";
+    const governanceModeTag = mode === "GENESIS"
+      ? "success"
+      : mode === "EARLY_BUILD"
+      ? "warning"
+      : mode === "PRODUCTION_CRITICAL"
+      ? "danger"
+      : "info";
     return {
       ...card,
       outcome_status: outcomeStatus,
       outcome_label: outcomeLabel,
       next_action_hint: nextActionHint,
+      governance_mode: mode,
+      governance_mode_label: governanceModeLabel,
+      governance_mode_description: governanceModeDescription,
+      governance_mode_tag: governanceModeTag,
     };
   })
 );
@@ -5399,7 +5454,9 @@ function formatTimestamp(value?: string | null) {
 function runStatusTagType(status?: string | null) {
   if (status === "RUNNING") return "warning";
   if (status === "COMPLETED") return "success";
+  if (status === "COMPLETED_CLEAN") return "success";
   if (status === "COMPLETED_WITH_RECOVERY") return "success";
+  if (status === "DEGRADED_COMPLETION") return "warning";
   if (status === "FAILED" || status === "CANCELED") return "danger";
   if (status === "QUEUED") return "info";
   return "default";
@@ -5524,6 +5581,8 @@ function normalizeTimelineStatus(status?: string | null) {
 function mapEventMessage(eventType: string, title?: string) {
   const itemTitle = title || "Work item";
   if (eventType === "RUN_CREATED") return "Run created";
+  if (eventType === "RUN_GOVERNANCE_TRANSITION") return "Governance profile elevated";
+  if (eventType === "RUN_DESIGN_GOVERNANCE_VIOLATION") return "Design governance violation detected";
   if (eventType === "RUN_BOOTSTRAP_STARTED") return "Planner bootstrap started";
   if (eventType === "RUN_RUNNING") return "Run started";
   if (eventType === "RUN_COMPLETED") return "Run completed";

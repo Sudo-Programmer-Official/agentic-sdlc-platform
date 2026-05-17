@@ -54,6 +54,7 @@ def _event_title(event: RunEvent, work_item: WorkItem | None) -> str:
         "RUN_BOOTSTRAP_STARTED": "Planner bootstrap started",
         "RUN_PLAN_CAPTURED": "Run plan captured",
         "RUN_EXECUTION_HANDOFF": "Execution handoff decided",
+        "RUN_DESIGN_GOVERNANCE_VIOLATION": "Design governance violation detected",
         "RUN_RUNNING": "Run started",
         "RUN_COMPLETED": "Run completed",
         "RUN_FAILED": "Run failed",

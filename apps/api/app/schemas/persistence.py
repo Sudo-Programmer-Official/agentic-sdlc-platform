@@ -424,6 +424,7 @@ class RunCreate(BaseModel):
     task_id: Optional[uuid.UUID] = None
     run_kind: str | None = None
     request_key: str | None = None
+    force_rerun: bool = False
 
 
 class VisionRunScreenshotIn(BaseModel):

@@ -64,6 +64,8 @@ class MissionControlRunCard(BaseModel):
     created_at: datetime
     patch_artifact: MissionControlArtifactRef | None = None
     execution_contract: MissionControlExecutionContractTelemetry | None = None
+    terminal_quality: str | None = None
+    terminal_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class MissionControlChangeImpact(BaseModel):

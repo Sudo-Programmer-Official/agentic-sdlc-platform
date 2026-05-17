@@ -71,3 +71,54 @@ class ProjectContractSummaryOut(BaseModel):
     assumptions_used: list[str] = Field(default_factory=list)
     derived_ready: bool = False
     last_derived_at: datetime | None = None
+
+
+class DesignContractIdentity(BaseModel):
+    name: str = "Product"
+    tone: str = "technical_minimal_premium"
+    personality: str = "confident_operational_clean"
+
+
+class DesignContractTypography(BaseModel):
+    heading_font: str = "Inter"
+    body_font: str = "Inter"
+    radius_scale: str = "soft"
+    density: str = "comfortable"
+
+
+class DesignContractLayout(BaseModel):
+    spacing: str = "airy"
+    container_width: str = "wide"
+    visual_weight: str = "balanced"
+    hero_style: str = "immersive"
+
+
+class DesignContractTokenRegistry(BaseModel):
+    colors: dict[str, str] = Field(default_factory=dict)
+    spacing: dict[str, str] = Field(default_factory=dict)
+    radius: dict[str, str] = Field(default_factory=dict)
+    motion: dict[str, str] = Field(default_factory=dict)
+    elevation: dict[str, str] = Field(default_factory=dict)
+
+
+class DesignContractOut(BaseModel):
+    experience_blueprint: str = "premium_saas"
+    identity: DesignContractIdentity = Field(default_factory=DesignContractIdentity)
+    tokens: dict[str, str] = Field(default_factory=dict)
+    token_registry: DesignContractTokenRegistry = Field(default_factory=DesignContractTokenRegistry)
+    allowed_components: list[str] = Field(default_factory=list)
+    typography: DesignContractTypography = Field(default_factory=DesignContractTypography)
+    components: dict[str, Any] = Field(default_factory=dict)
+    layout: DesignContractLayout = Field(default_factory=DesignContractLayout)
+
+
+class DesignContractUpsert(BaseModel):
+    experience_blueprint: str | None = None
+    identity: DesignContractIdentity | None = None
+    tokens: dict[str, str] = Field(default_factory=dict)
+    token_registry: DesignContractTokenRegistry | None = None
+    allowed_components: list[str] = Field(default_factory=list)
+    typography: DesignContractTypography | None = None
+    components: dict[str, Any] = Field(default_factory=dict)
+    layout: DesignContractLayout | None = None
+    updated_by: str | None = None

@@ -89,6 +89,7 @@ export async function loginWithEmailPassword(email: string, password: string) {
   const auth = getAuth(app);
   const credential = await signInWithEmailAndPassword(auth, email, password);
   const token = await credential.user.getIdToken();
+  setAuthToken(token);
   const bootstrap = await bootstrapFirstLogin(token);
   setActiveTenantId(bootstrap.tenant_id);
   setActiveWorkspaceId(bootstrap.workspace_id);
@@ -105,6 +106,7 @@ export async function signupWithEmailPassword(email: string, password: string) {
   const auth = getAuth(app);
   const credential = await createUserWithEmailAndPassword(auth, email, password);
   const token = await credential.user.getIdToken();
+  setAuthToken(token);
   const bootstrap = await bootstrapFirstLogin(token, { force_new_tenant: true });
   setActiveTenantId(bootstrap.tenant_id);
   setActiveWorkspaceId(bootstrap.workspace_id);

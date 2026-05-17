@@ -9,7 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Project, ProjectContract, ProjectRepository
-from app.schemas.project_contract import ProjectContractSummaryOut
+from app.schemas.project_contract import (
+    DesignContractOut,
+    DesignContractUpsert,
+    ProjectContractSummaryOut,
+)
 
 _HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 
@@ -248,6 +252,57 @@ def _build_bootstrap_contract(project: Project, repo: ProjectRepository | None) 
             "enabled": True,
             "mode": "warn",
         },
+        "design_contract": {
+            "experience_blueprint": "premium_saas",
+            "identity": {
+                "name": project.name,
+                "tone": "technical_minimal_premium",
+                "personality": "confident_operational_clean",
+            },
+            "tokens": {
+                "primary": "#2563eb",
+                "surface": "#f8fafc",
+                "accent": "#ec4899",
+                "success": "#22c55e",
+                "text_primary": "#0f172a",
+            },
+            "typography": {
+                "heading_font": "Inter",
+                "body_font": "Inter",
+                "radius_scale": "soft",
+                "density": "comfortable",
+            },
+            "token_registry": {
+                "colors": {
+                    "primary": "#2563eb",
+                    "surface": "#f8fafc",
+                    "accent": "#ec4899",
+                    "success": "#22c55e",
+                    "text_primary": "#0f172a",
+                },
+                "spacing": {
+                    "xs": "0.25rem",
+                    "sm": "0.5rem",
+                    "md": "1rem",
+                    "lg": "1.5rem",
+                    "xl": "2rem",
+                },
+                "radius": {"sm": "0.375rem", "md": "0.5rem", "lg": "0.75rem", "xl": "1rem"},
+                "motion": {"fast": "120ms", "base": "200ms", "slow": "320ms"},
+                "elevation": {"sm": "shadow-sm", "md": "shadow", "lg": "shadow-lg"},
+            },
+            "allowed_components": ["HeroSection", "DashboardShell", "MetricCard", "Timeline", "PrimaryButton"],
+            "components": {
+                "buttons": {"style": "glass", "radius": "xl", "shadow": "soft"},
+                "registry": ["HeroSection", "DashboardShell", "MetricCard", "Timeline", "PrimaryButton"],
+            },
+            "layout": {
+                "spacing": "airy",
+                "container_width": "wide",
+                "visual_weight": "balanced",
+                "hero_style": "immersive",
+            },
+        },
     }
     summary = (
         f"{project.name} project contract enforces brand tokens and design-system conventions for bounded UI delivery."
@@ -368,8 +423,68 @@ def _runtime_meta_from_profile(profile: ProjectContract) -> dict[str, Any]:
         "summary": summary.model_dump(mode="json"),
         "brand_kit": contract_json.get("brand_kit") if isinstance(contract_json.get("brand_kit"), dict) else {},
         "design_system": contract_json.get("design_system") if isinstance(contract_json.get("design_system"), dict) else {},
+        "design_contract": contract_json.get("design_contract") if isinstance(contract_json.get("design_contract"), dict) else {},
         "enforcement": derived_json.get("enforcement") if isinstance(derived_json.get("enforcement"), dict) else {},
     }
+
+
+def _coerce_design_contract(contract_json: dict[str, Any], *, fallback_name: str) -> DesignContractOut:
+    raw = contract_json.get("design_contract") if isinstance(contract_json.get("design_contract"), dict) else {}
+    identity = raw.get("identity") if isinstance(raw.get("identity"), dict) else {}
+    typography = raw.get("typography") if isinstance(raw.get("typography"), dict) else {}
+    layout = raw.get("layout") if isinstance(raw.get("layout"), dict) else {}
+    tokens_raw = raw.get("tokens") if isinstance(raw.get("tokens"), dict) else {}
+    token_registry_raw = raw.get("token_registry") if isinstance(raw.get("token_registry"), dict) else {}
+    allowed_components_raw = raw.get("allowed_components")
+    components = raw.get("components") if isinstance(raw.get("components"), dict) else {}
+
+    tokens: dict[str, str] = {}
+    for key, value in tokens_raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        normalized_key = _normalize_token_name(key)
+        normalized_value = value.strip()
+        if normalized_key and normalized_value:
+            tokens[normalized_key] = normalized_value
+    if not tokens:
+        tokens = {
+            "primary": "#2563eb",
+            "surface": "#f8fafc",
+            "accent": "#ec4899",
+            "success": "#22c55e",
+            "text_primary": "#0f172a",
+        }
+    token_registry = {
+        "colors": token_registry_raw.get("colors") if isinstance(token_registry_raw.get("colors"), dict) else dict(tokens),
+        "spacing": token_registry_raw.get("spacing") if isinstance(token_registry_raw.get("spacing"), dict) else {},
+        "radius": token_registry_raw.get("radius") if isinstance(token_registry_raw.get("radius"), dict) else {},
+        "motion": token_registry_raw.get("motion") if isinstance(token_registry_raw.get("motion"), dict) else {},
+        "elevation": token_registry_raw.get("elevation") if isinstance(token_registry_raw.get("elevation"), dict) else {},
+    }
+    registry_components = components.get("registry") if isinstance(components.get("registry"), list) else []
+    allowed_components = [
+        str(item).strip()
+        for item in (allowed_components_raw if isinstance(allowed_components_raw, list) else registry_components)
+        if isinstance(item, str) and str(item).strip()
+    ]
+    experience_blueprint = str(raw.get("experience_blueprint") or "premium_saas").strip() or "premium_saas"
+
+    return DesignContractOut.model_validate(
+        {
+            "experience_blueprint": experience_blueprint,
+            "identity": {
+                "name": str(identity.get("name") or fallback_name).strip() or fallback_name,
+                "tone": str(identity.get("tone") or "technical_minimal_premium").strip() or "technical_minimal_premium",
+                "personality": str(identity.get("personality") or "confident_operational_clean").strip() or "confident_operational_clean",
+            },
+            "tokens": tokens,
+            "token_registry": token_registry,
+            "allowed_components": allowed_components,
+            "typography": typography,
+            "components": components,
+            "layout": layout,
+        }
+    )
 
 
 async def get_project_contract(
@@ -580,3 +695,69 @@ async def summarize_project_contract(
         derived_json=_build_derived_contract(inferred_json),
         last_derived_at=None,
     )
+
+
+async def get_design_contract(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+) -> DesignContractOut:
+    project = await _get_project(session, tenant_id=tenant_id, project_id=project_id)
+    profile = await _get_profile(session, tenant_id=tenant_id, project_id=project_id)
+    if profile is None:
+        return _coerce_design_contract({}, fallback_name=project.name)
+    contract_json = profile.contract_json if isinstance(profile.contract_json, dict) else {}
+    return _coerce_design_contract(contract_json, fallback_name=project.name)
+
+
+async def upsert_design_contract(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    payload: DesignContractUpsert,
+    updated_by: str | None,
+) -> ProjectContract:
+    project = await _get_project(session, tenant_id=tenant_id, project_id=project_id)
+    profile = await _get_profile(session, tenant_id=tenant_id, project_id=project_id)
+    existing_contract_json = profile.contract_json if profile is not None and isinstance(profile.contract_json, dict) else {}
+    current = _coerce_design_contract(existing_contract_json, fallback_name=project.name)
+
+    incoming = {
+        "experience_blueprint": payload.experience_blueprint or current.experience_blueprint,
+        "identity": payload.identity.model_dump() if payload.identity else current.identity.model_dump(),
+        "tokens": payload.tokens if payload.tokens else dict(current.tokens),
+        "token_registry": payload.token_registry.model_dump() if payload.token_registry else current.token_registry.model_dump(),
+        "allowed_components": payload.allowed_components if payload.allowed_components else list(current.allowed_components),
+        "typography": payload.typography.model_dump() if payload.typography else current.typography.model_dump(),
+        "components": payload.components if payload.components else dict(current.components),
+        "layout": payload.layout.model_dump() if payload.layout else current.layout.model_dump(),
+    }
+    normalized = DesignContractOut.model_validate(incoming)
+
+    merged = dict(existing_contract_json)
+    merged["design_contract"] = normalized.model_dump(mode="json")
+    if profile is None:
+        # Bootstrap baseline sections so runtime checks stay available.
+        base_json, base_summary = _build_bootstrap_contract(project, repo=None)
+        base_json["design_contract"] = normalized.model_dump(mode="json")
+        return await upsert_project_contract(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            status="DRAFT",
+            source="MANUAL",
+            summary=base_summary,
+            contract_json=base_json,
+            created_by=updated_by,
+            updated_by=updated_by,
+        )
+    profile.contract_json = merged
+    profile.derived_json = _build_derived_contract(merged)
+    profile.last_derived_at = datetime.now(timezone.utc)
+    profile.updated_by = updated_by or profile.updated_by
+    profile.version += 1
+    session.add(profile)
+    await session.flush()
+    return profile

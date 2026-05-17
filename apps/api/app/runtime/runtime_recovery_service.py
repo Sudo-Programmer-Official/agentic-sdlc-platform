@@ -38,6 +38,7 @@ STABLE_RECOVERY_ACTIONS = {
     "mark_delivery_manual_required",
     "escalate_to_human",
     "fail_safely",
+    "retry_with_design_token_normalization",
 }
 
 
@@ -51,6 +52,8 @@ FAILURE_CLASS_MAP = {
     "clone_auth_failure": "auth_failed",
     "environment_failure": "worker_stalled",
     "missing_context": "scope_violation",
+    "patch_size_violation": "scope_violation",
+    "design_token_violation": "validation_drift",
 }
 
 
@@ -87,6 +90,14 @@ class RuntimeRecoveryService:
                 return "retry_with_smaller_patch"
             if attempt_number == 2:
                 return "retry_with_write_file"
+            return "refresh_context"
+        if failure_type == "scope_violation":
+            if attempt_number == 1:
+                return "retry_with_write_file"
+            return "refresh_context"
+        if failure_type == "validation_drift":
+            if attempt_number == 1:
+                return "retry_with_design_token_normalization"
             return "refresh_context"
         mapped = ACTION_MAP.get(rule_action, "fail_safely")
         return mapped if mapped in STABLE_RECOVERY_ACTIONS else "fail_safely"
@@ -394,5 +405,18 @@ class RuntimeRecoveryService:
                 str(work_item.last_error or ""),
             ]
         ).strip()
+        lowered = text.lower()
+        if "ad-hoc hex color" in lowered and "is not in token_registry.colors" in lowered:
+            import re
+
+            match = re.search(r"(#[0-9a-fA-F]{3,8})", text)
+            hex_value = (match.group(1).lower() if match else "unknown")
+            return f"{failure_type}:design_token_missing:{hex_value}"
+        if "patch too large for" in lowered:
+            import re
+
+            match = re.search(r"patch too large for ([^ )]+)", lowered)
+            file_name = (match.group(1).strip() if match else "unknown")
+            return f"{failure_type}:patch_too_large:{file_name}"
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16] if text else "none"
         return f"{failure_type}:{work_item.type}:{digest}"

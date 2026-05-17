@@ -49,6 +49,7 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         "rules": (
             RecoveryRule("FAILED", "patch_apply_failure", "retry"),
             RecoveryRule("FAILED", "output_contract_invalid", "retry"),
+            RecoveryRule("FAILED", "design_token_violation", "retry"),
             RecoveryRule("FAILED", "transient", "retry"),
         ),
     },
@@ -56,6 +57,8 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         "max_retries": 3,
         "rules": (
             RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "output_contract_invalid", "retry"),
+            RecoveryRule("FAILED", "patch_size_violation", "retry"),
             RecoveryRule("FAILED", "transient", "retry"),
         ),
     },
@@ -84,6 +87,7 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
 }
 
 RECOVERY_TERMINAL_STATUSES = {"QUEUED", "RUNNING", "CLAIMED"}
+MAX_SAME_FAILURE_SIGNATURE_RETRIES = 2
 
 
 def _unique_paths(values: list[str]) -> list[str]:
@@ -200,6 +204,8 @@ def classify_failure(work_item: WorkItem) -> str:
         return "dependency_failure"
     if any(token in text for token in ("timeout", "temporarily unavailable", "connection reset", "network")):
         return "transient"
+    if "model_call_failed" in text:
+        return "transient"
     if any(
         token in text
         for token in (
@@ -222,6 +228,10 @@ def classify_failure(work_item: WorkItem) -> str:
         )
     ):
         return "patch_apply_failure"
+    if "patch too large for" in text:
+        return "patch_size_violation"
+    if "ad-hoc hex color" in text and "is not in token_registry.colors" in text:
+        return "design_token_violation"
     if work_item.type == "RUN_TESTS" and work_item.status == "FAILED" and "failed " in text:
         return "test_assertion_failure"
     if work_item.type == "RUN_TESTS" and work_item.status == "FAILED":
@@ -252,6 +262,17 @@ def _is_recovery_work_item(work_item: WorkItem) -> bool:
         return True
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     return any(key in payload for key in ("recovery_source_id", "failed_work_item_id", "recovery_action"))
+
+
+def _next_same_signature_count(
+    *,
+    prior_signature: str,
+    current_signature: str,
+    prior_count: int,
+) -> int:
+    if not prior_signature or not current_signature or prior_signature != current_signature:
+        return 0
+    return max(0, int(prior_count)) + 1
 
 
 async def has_pending_recovery_work(session: AsyncSession, run_id: uuid.UUID) -> bool:
@@ -539,6 +560,78 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         failure_type=stable_failure_type,
         attempt_number=prior_attempts + 1,
     )
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    repository_state = str(payload.get("repository_state") or "").strip().upper()
+    if (
+        failure_class == "patch_size_violation"
+        and repository_state in {"GENESIS", "EARLY_BUILD"}
+    ):
+        recovery_action = "retry_with_write_file"
+    prior_signature = str((work_item.result or {}).get("failure_signature") or "") if isinstance(work_item.result, dict) else ""
+    prior_signature_count = int((work_item.result or {}).get("same_failure_signature_count") or 0) if isinstance(work_item.result, dict) else 0
+    same_signature_count = _next_same_signature_count(
+        prior_signature=prior_signature,
+        current_signature=failure_signature,
+        prior_count=prior_signature_count,
+    )
+    if prior_attempts >= 1 and prior_signature and prior_signature == failure_signature:
+        switched_action: str | None = None
+        if failure_signature.startswith("validation_drift:design_token_missing:"):
+            switched_action = "retry_with_design_token_normalization"
+        elif failure_signature.startswith("scope_violation:patch_too_large:"):
+            switched_action = "retry_with_write_file"
+        if switched_action and switched_action != recovery_action:
+            recovery_action = switched_action
+            await record_event(
+                session,
+                project_id=work_item.project_id,
+                run_id=work_item.run_id,
+                work_item_id=work_item.id,
+                event_type="RUN_CONVERGENCE_STRATEGY_SWITCHED",
+                actor_type="SYSTEM",
+                tenant_id=work_item.tenant_id,
+                payload={
+                    "work_item_id": str(work_item.id),
+                    "failure_signature": failure_signature,
+                    "previous_action": rule.action,
+                    "new_action": recovery_action,
+                    "reason": "repeated_failure_signature",
+                },
+            )
+    if same_signature_count >= MAX_SAME_FAILURE_SIGNATURE_RETRIES:
+        _merge_result_metadata(
+            work_item,
+            failure_class=failure_class,
+            failure_type=stable_failure_type,
+            recovery_action="escalate_to_human",
+            failure_signature=failure_signature,
+            same_failure_signature_count=same_signature_count,
+            retry_state=RetryState.EXHAUSTED,
+            recovery_exhausted_reason="repeated_failure_signature",
+            suggested_next_action="Adjust scope, contract/tokens, or strategy before rerunning.",
+        )
+        session.add(work_item)
+        await session.flush()
+        await record_event(
+            session,
+            project_id=work_item.project_id,
+            run_id=work_item.run_id,
+            work_item_id=work_item.id,
+            event_type="RUN_CONVERGENCE_STOPPED",
+            actor_type="SYSTEM",
+            tenant_id=work_item.tenant_id,
+            payload={
+                "work_item_id": str(work_item.id),
+                "failure_signature": failure_signature,
+                "same_failure_signature_count": same_signature_count,
+                "threshold": MAX_SAME_FAILURE_SIGNATURE_RETRIES,
+                "reason": "repeated_failure_signature",
+            },
+            message="Recovery halted: repeated identical failure signature exceeded convergence threshold.",
+        )
+        await runtime_recovery.emit_escalated_event(work_item, reason="repeated_failure_signature")
+        await sync_run_recovery_latch(session, work_item.run_id)
+        return {"action": "escalate_to_human", "reason": "repeated_failure_signature"}
     await runtime_recovery.emit_action_selected_event(work_item, recovery_action)
     budget_decision = await runtime_recovery.check_budget(run, work_item, stable_failure_type)
     if not budget_decision.allowed:
@@ -548,6 +641,7 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
             failure_type=stable_failure_type,
             recovery_action="escalate_to_human",
             failure_signature=failure_signature,
+            same_failure_signature_count=same_signature_count,
             retry_state=RetryState.EXHAUSTED,
             recovery_exhausted_reason=budget_decision.reason,
             suggested_next_action="Review failure evidence and continue manually.",
@@ -566,6 +660,7 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         recovery_tier=recovery_tier_for_failure(failure_class),
         retry_state="PENDING",
         recovery_attempts=prior_attempts + 1,
+        same_failure_signature_count=same_signature_count,
     )
     session.add(work_item)
     await session.flush()
@@ -595,6 +690,9 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
             elif recovery_action == "retry_with_smaller_patch":
                 payload["recovery_strategy"] = "minimal_patch_preferred"
                 payload["recovery_reason"] = "patch_apply_failed"
+            elif recovery_action == "retry_with_design_token_normalization":
+                payload["recovery_strategy"] = "design_token_auto_normalize"
+                payload["recovery_reason"] = "design_token_missing"
             elif recovery_action == "refresh_context":
                 payload["recovery_strategy"] = "refresh_context"
             work_item.payload = payload

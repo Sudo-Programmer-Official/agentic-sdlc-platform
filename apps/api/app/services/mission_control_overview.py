@@ -319,6 +319,18 @@ def _build_recent_runs(
                 execution_contract=build_execution_contract_telemetry(
                     run.summary if run is not None and isinstance(run.summary, dict) else None
                 ),
+                terminal_quality=(
+                    str((run.summary or {}).get("terminal_quality") or "").strip().upper()
+                    if run is not None and isinstance(run.summary, dict)
+                    else None
+                ) or None,
+                terminal_counts=(
+                    (run.summary or {}).get("terminal_counts")
+                    if run is not None
+                    and isinstance(run.summary, dict)
+                    and isinstance((run.summary or {}).get("terminal_counts"), dict)
+                    else {}
+                ),
             )
         )
     return cards

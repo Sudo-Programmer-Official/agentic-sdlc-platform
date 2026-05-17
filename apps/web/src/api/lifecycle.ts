@@ -556,6 +556,11 @@ export async function listTasks(
   return parseApiResponse(resp);
 }
 
+export async function fetchRunRecommendations(projectId: string) {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/run-recommendations`);
+  return parseApiResponse(resp);
+}
+
 export async function listImprovementRequests(projectId: string, limit = 50) {
   const resp = await apiFetch(`${API_BASE}/projects/${projectId}/improvement-requests?limit=${encodeURIComponent(String(limit))}`);
   return parseApiResponse(resp);
@@ -1388,6 +1393,91 @@ export async function bootstrapProjectContract(
   return parseApiResponse(resp);
 }
 
+export async function fetchDesignContract(projectId: string) {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/design-contract`);
+  if (resp.status !== 404) return parseApiResponse(resp);
+  const legacyResp = await apiFetch(`${API_BASE}/projects/${projectId}/project-contract`);
+  const legacy = await parseApiResponse(legacyResp);
+  const contract = legacy?.contract_json?.design_contract;
+  if (contract && typeof contract === "object") return contract;
+  return {
+    experience_blueprint: "premium_saas",
+    identity: { name: "Project", tone: "technical_minimal_premium", personality: "confident_operational_clean" },
+    tokens: {},
+    token_registry: { colors: {}, spacing: {}, radius: {}, motion: {}, elevation: {} },
+    allowed_components: [],
+    typography: { heading_font: "Inter", body_font: "Inter", radius_scale: "soft", density: "comfortable" },
+    components: {},
+    layout: { spacing: "airy", container_width: "wide", visual_weight: "balanced", hero_style: "immersive" },
+  };
+}
+
+export async function saveDesignContract(projectId: string, payload: {
+  experience_blueprint?: string;
+  identity?: {
+    name?: string;
+    tone?: string;
+    personality?: string;
+  };
+  tokens?: Record<string, string>;
+  token_registry?: {
+    colors?: Record<string, string>;
+    spacing?: Record<string, string>;
+    radius?: Record<string, string>;
+    motion?: Record<string, string>;
+    elevation?: Record<string, string>;
+  };
+  allowed_components?: string[];
+  typography?: {
+    heading_font?: string;
+    body_font?: string;
+    radius_scale?: string;
+    density?: string;
+  };
+  components?: Record<string, any>;
+  layout?: {
+    spacing?: string;
+    container_width?: string;
+    visual_weight?: string;
+    hero_style?: string;
+  };
+  updated_by?: string | null;
+}) {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/design-contract`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (resp.status !== 404) return parseApiResponse(resp);
+
+  let existing: any = null;
+  const legacyResp = await apiFetch(`${API_BASE}/projects/${projectId}/project-contract`);
+  if (legacyResp.ok) {
+    existing = await parseApiResponse(legacyResp);
+  }
+  const contractJson = existing?.contract_json && typeof existing.contract_json === "object"
+    ? { ...existing.contract_json }
+    : {};
+  contractJson.design_contract = {
+    ...(contractJson.design_contract && typeof contractJson.design_contract === "object"
+      ? contractJson.design_contract
+      : {}),
+    ...payload,
+  };
+  const fallbackSaveResp = await apiFetch(`${API_BASE}/projects/${projectId}/project-contract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      status: existing?.status || "DRAFT",
+      source: existing?.source || "MANUAL",
+      summary: existing?.summary || "Design contract updated via compatibility fallback.",
+      contract_json: contractJson,
+      updated_by: payload.updated_by || null,
+    }),
+  });
+  return parseApiResponse(fallbackSaveResp);
+}
+
 export async function fetchGitHubConnectInfo(): Promise<GitHubConnectInfo> {
   const resp = await apiFetch(`${API_BASE}/integrations/github/connect`);
   return parseApiResponse(resp);
@@ -1446,7 +1536,7 @@ export async function createRun(
   executor = "codex",
   taskId?: string | null,
   runKind?: string | null,
-  options: { request_key?: string } = {}
+  options: { request_key?: string; force_rerun?: boolean } = {}
 ) {
   const resp = await apiFetch(`${API_BASE}/projects/${projectId}/runs`, {
     method: "POST",
@@ -1456,8 +1546,37 @@ export async function createRun(
       task_id: taskId || null,
       run_kind: runKind || null,
       request_key: options.request_key || null,
+      force_rerun: Boolean(options.force_rerun),
     }),
   });
+  return parseApiResponse(resp);
+}
+
+export async function fetchTaskRerunPreflight(projectId: string, taskId: string) {
+  let resp = await apiFetch(`${API_BASE}/projects/${projectId}/tasks/${taskId}/rerun-preflight`, {
+    cache: "no-store",
+  });
+  if (resp.status === 404) {
+    resp = await apiFetch(`${API_BASE}/store/projects/${projectId}/tasks/${taskId}/rerun-preflight`, {
+      cache: "no-store",
+    });
+  }
+  return parseApiResponse(resp);
+}
+
+export async function createTaskRerunNoopAttempt(projectId: string, taskId: string) {
+  let resp = await apiFetch(`${API_BASE}/projects/${projectId}/tasks/${taskId}/rerun-noop-attempt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (resp.status === 404) {
+    resp = await apiFetch(`${API_BASE}/store/projects/${projectId}/tasks/${taskId}/rerun-noop-attempt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+  }
   return parseApiResponse(resp);
 }
 

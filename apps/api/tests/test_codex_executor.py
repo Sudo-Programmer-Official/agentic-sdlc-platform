@@ -11,9 +11,15 @@ from app.db.models import AIJobRun
 from app.db.models import Project, Run, WorkItem
 from app.runtime.context import RunContext
 from app.runtime.codex_executor import (
+    _allow_adjacent_scope_expansion,
+    _build_design_token_rewrite_map,
     _edit_budget_from_payload,
     _extract_structured_json_candidate,
     _fix_test_failure_writable_scope,
+    _is_bootstrap_or_genesis_scope,
+    _normalize_frontend_design_tokens,
+    _operator_confirmation_next_action,
+    _should_block_for_operator_confirmation,
     _is_static_frontend_scope,
     _stage_scope_violations,
     _target_files_from_payload,
@@ -167,6 +173,167 @@ def test_verification_from_action_scope_keeps_confirmation_for_sensitive_paths()
     assert verification.scope_match is True
     assert verification.suggested_next_action == "Require operator confirmation before patch execution."
     assert [finding.code for finding in verification.findings] == ["scope_from_actions"]
+
+
+def test_operator_confirmation_gate_does_not_block_medium_risk_mutation():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="MEDIUM",
+        findings=[
+            RunPatchVerificationFinding(
+                code="missing_tests",
+                severity="warning",
+                title="No nearby tests detected",
+                detail="No nearby tests detected.",
+                files=[],
+            )
+        ],
+    )
+    actions = [Action(type="write_file", path="index.html", content="<html></html>")]
+    assert _should_block_for_operator_confirmation(verification, actions) is False
+
+
+def test_operator_confirmation_gate_blocks_high_risk_mutation():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="HIGH",
+        findings=[],
+    )
+    actions = [Action(type="apply_patch", path="app.py", patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b\n")]
+    assert _should_block_for_operator_confirmation(verification, actions) is True
+
+
+def test_operator_confirmation_gate_blocks_high_severity_finding():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="MEDIUM",
+        findings=[
+            RunPatchVerificationFinding(
+                code="sensitive_scope",
+                severity="high",
+                title="Sensitive subsystem detected",
+                detail="Sensitive subsystem.",
+                files=["app/auth.py"],
+            )
+        ],
+    )
+    actions = [Action(type="write_file", path="app/auth.py", content="x")]
+    assert _should_block_for_operator_confirmation(verification, actions) is True
+
+
+def test_operator_confirmation_gate_blocks_broad_20_file_mutation():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="MEDIUM",
+        file_count=20,
+        findings=[],
+    )
+    actions = [Action(type="apply_patch", path="app.py", patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b\n")]
+    assert _should_block_for_operator_confirmation(verification, actions) is True
+    assert "decomposition plan" in _operator_confirmation_next_action(verification).lower()
+
+
+def test_operator_confirmation_gate_4_file_missing_tests_does_not_block():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="MEDIUM",
+        file_count=4,
+        findings=[
+            RunPatchVerificationFinding(
+                code="missing_tests",
+                severity="warning",
+                title="No nearby tests detected",
+                detail="No nearby tests detected.",
+                files=[],
+            )
+        ],
+    )
+    actions = [Action(type="write_file", path="index.html", content="<html></html>")]
+    assert _should_block_for_operator_confirmation(verification, actions) is False
+
+
+def test_operator_confirmation_gate_genesis_bounded_missing_tests_does_not_block():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="MEDIUM",
+        file_count=4,
+        findings=[
+            RunPatchVerificationFinding(
+                code="missing_tests",
+                severity="warning",
+                title="No nearby tests detected",
+                detail="No nearby tests detected.",
+                files=[],
+            )
+        ],
+    )
+    actions = [Action(type="apply_patch", path="app.py", patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b\n")]
+    assert _should_block_for_operator_confirmation(
+        verification,
+        actions,
+        repository_state="GENESIS",
+    ) is False
+
+
+def test_operator_confirmation_gate_genesis_still_blocks_high_severity():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="MEDIUM",
+        file_count=4,
+        findings=[
+            RunPatchVerificationFinding(
+                code="protected_zone",
+                severity="high",
+                title="Protected zone touched",
+                detail="Sensitive subsystem mutation.",
+                files=["apps/api/app/runtime/codex_executor.py"],
+            )
+        ],
+    )
+    actions = [Action(type="write_file", path="apps/api/app/runtime/codex_executor.py", content="x")]
+    assert _should_block_for_operator_confirmation(
+        verification,
+        actions,
+        repository_state="GENESIS",
+    ) is True
+
+
+def test_design_token_rewrite_map_uses_aliases_from_design_contract():
+    project_contract = {
+        "design_contract": {
+            "token_registry": {
+                "colors": {
+                    "primary_500": "#2563eb",
+                }
+            },
+            "rewrite_aliases": {
+                "#ec4899": "primary_500",
+            },
+        }
+    }
+    rewrite_map = _build_design_token_rewrite_map(
+        project_contract=project_contract,
+        allowed_hex={"#2563eb"},
+    )
+    assert rewrite_map == {"#ec4899": "#2563eb"}
+
+
+def test_normalize_frontend_design_tokens_rewrites_hex_deterministically():
+    content = ".btn{background:#ec4899;color:#0f172a}"
+    normalized, replacements = _normalize_frontend_design_tokens(
+        content=content,
+        allowed_hex={"#0f172a", "#2563eb"},
+        rewrite_map={"#ec4899": "#2563eb"},
+    )
+    assert normalized == ".btn{background:#2563eb;color:#0f172a}"
+    assert replacements == [("#ec4899", "#2563eb")]
 
 
 def test_target_files_from_payload_prefers_explicit_target_scope():
@@ -525,6 +692,57 @@ def test_select_mutation_strategy_honors_recovery_write_file_preferred():
     assert zone == "layout_zone"
 
 
+def test_select_mutation_strategy_honors_recovery_write_file_preferred_for_backend():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_BACKEND")
+
+    selected, fallback, reasons, drift_risk, confidence, zone = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={"target_files": ["app.py"], "recovery_strategy": "write_file_preferred"},
+        allowed_files=["app.py"],
+    )
+
+    assert selected == "write_file"
+    assert fallback == ["apply_patch"]
+    assert reasons == ["recovery_strategy_write_file_preferred"]
+    assert drift_risk >= 0.8
+    assert confidence >= 0.85
+    assert zone == "logic_zone"
+
+
+def test_select_mutation_strategy_prefers_write_file_for_backend_genesis_state():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_BACKEND")
+
+    selected, fallback, reasons, drift_risk, confidence, zone = executor._select_mutation_strategy(
+        work_item=work_item,
+        payload={"target_files": ["app.py"], "repository_state": "GENESIS"},
+        allowed_files=["app.py"],
+    )
+
+    assert selected == "write_file"
+    assert fallback == ["apply_patch"]
+    assert reasons == ["repository_state_write_file_preferred"]
+    assert drift_risk >= 0.65
+    assert confidence >= 0.85
+    assert zone == "logic_zone"
+
+
+def test_backend_mutation_strategy_violation_requires_write_file_in_recovery_mode():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_BACKEND", payload={"recovery_strategy": "write_file_preferred"})
+    actions = [SimpleNamespace(type="apply_patch", path="app.py", patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b\n")]
+
+    violations = executor._mutation_strategy_violations(
+        work_item=work_item,
+        selected_strategy="write_file",
+        actions=actions,
+    )
+
+    assert len(violations) == 1
+    assert "CODE_BACKEND mutation_strategy violation" in violations[0]
+
+
 def test_select_mutation_strategy_prefers_write_file_for_layout_sensitive_task_text():
     executor = CodexExecutor()
     work_item = SimpleNamespace(type="CODE_FRONTEND")
@@ -747,6 +965,168 @@ def test_instructions_include_strict_project_contract_rejection_notice():
     assert "Violation of these rules will cause rejection." in instructions
 
 
+def test_instructions_include_design_context_packet():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"expected_files": ["index.html"]},
+    )
+    context = RunContext(
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        project_contract={
+            "design_contract": {
+                "experience_blueprint": "enterprise_operational",
+                "identity": {"tone": "governed_structured_stable"},
+                "typography": {"density": "compact"},
+                "allowed_components": ["DashboardShell", "MetricCard"],
+                "token_registry": {"colors": {"primary": "#1d4ed8"}},
+            }
+        },
+    )
+
+    instructions = executor._instructions_for(work_item, context=context)
+
+    assert "DESIGN_CONTEXT_PACKET" in instructions
+    assert "enterprise_operational" in instructions
+    assert "DashboardShell" in instructions
+    assert "compose from governed primitives only" in instructions
+
+
+def test_ai_job_metadata_includes_design_context_packet_fields():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        key="CODE_FRONTEND",
+        tenant_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        id=uuid.uuid4(),
+        payload={},
+    )
+    context_bundle = {
+        "files": {"index.html": "<html></html>"},
+        "meta": {
+            "project_contract": {
+                "design_contract": {
+                    "experience_blueprint": "ai_native",
+                    "identity": {"tone": "modern_dynamic_assistive"},
+                    "typography": {"density": "comfortable"},
+                    "allowed_components": ["PromptPanel", "AssistantThread"],
+                    "token_registry": {"colors": {"primary": "#0f766e"}},
+                }
+            }
+        },
+    }
+    request = executor._build_ai_job_request(work_item, context_bundle, allowed_files=["index.html"], execution_contract=None)
+
+    assert request.metadata["design_experience_blueprint"] == "ai_native"
+    assert request.metadata["design_visual_tone"] == "modern_dynamic_assistive"
+    assert request.metadata["design_layout_density"] == "comfortable"
+    assert request.metadata["design_allowed_components"] == ["PromptPanel", "AssistantThread"]
+
+
+def test_design_validation_violations_detect_inline_style_and_adhoc_hex():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={})
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/page.tsx",
+            content='<div style="color:#ff0000">Hello</div>',
+        )
+    ]
+    project_contract = {
+        "design_contract": {
+            "token_registry": {"colors": {"primary": "#2563eb"}},
+        },
+        "enforcement": {
+            "disallow_inline_styles": True,
+            "enforce_color_tokens": True,
+        },
+    }
+
+    violations = executor._design_validation_violations(
+        work_item=work_item,
+        actions=actions,
+        project_contract=project_contract,
+    )
+
+    assert any("inline style attributes are disallowed" in item for item in violations)
+    assert any("ad-hoc hex color" in item for item in violations)
+
+
+def test_design_validation_violations_detect_unauthorized_components():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={})
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/page.tsx",
+            content="<DashboardShell><RoguePanel /></DashboardShell>",
+        )
+    ]
+    project_contract = {
+        "design_contract": {
+            "allowed_components": ["DashboardShell"],
+        },
+        "enforcement": {},
+    }
+
+    violations = executor._design_validation_violations(
+        work_item=work_item,
+        actions=actions,
+        project_contract=project_contract,
+    )
+
+    assert any("unauthorized components" in item and "RoguePanel" in item for item in violations)
+
+
+def test_design_validation_records_include_structured_fields():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={})
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/page.tsx",
+            content='<div style="color:#ff0000"><RoguePanel /></div>',
+        )
+    ]
+    project_contract = {
+        "design_contract": {
+            "allowed_components": ["DashboardShell"],
+            "token_registry": {"colors": {"primary": "#2563eb"}},
+        },
+        "enforcement": {
+            "disallow_inline_styles": True,
+            "enforce_color_tokens": True,
+        },
+    }
+
+    records = executor._design_validation_records(
+        work_item=work_item,
+        actions=actions,
+        project_contract=project_contract,
+    )
+
+    assert any(record.get("type") == "design_contract_violation" for record in records)
+    assert any(record.get("rule") == "disallow_inline_styles" for record in records)
+    assert any(record.get("rule") == "enforce_color_tokens" and record.get("value") == "#ff0000" for record in records)
+    assert any(record.get("rule") == "allowed_components" and "RoguePanel" in str(record.get("value")) for record in records)
+
+
+def test_bootstrap_scope_detects_genesis_setup_and_early_build_state():
+    assert _is_bootstrap_or_genesis_scope(SimpleNamespace(payload={"task_source": "genesis_setup"}))
+    assert _is_bootstrap_or_genesis_scope(SimpleNamespace(payload={"task_source": "genesis.foundation"}))
+    assert _is_bootstrap_or_genesis_scope(SimpleNamespace(payload={"repository_state": "EARLY_BUILD"}))
+
+
+def test_adjacent_scope_expansion_allows_dependency_file_in_genesis_repair():
+    work_item = SimpleNamespace(type="FIX_TEST_FAILURE", payload={"repository_state": "GENESIS"})
+    assert _allow_adjacent_scope_expansion(work_item=work_item, extra_files=["requirements.txt"])
+    assert not _allow_adjacent_scope_expansion(work_item=work_item, extra_files=["apps/api/app/main.py"])
+
+
 def test_instructions_for_plan_stage_forbid_mutations():
     executor = CodexExecutor()
     work_item = SimpleNamespace(
@@ -944,6 +1324,16 @@ def test_patch_ratio_for_non_frontend_plan_scope_preserves_default_plan_limit():
     )
 
     assert executor._patch_ratio_for(work_item) == 0.6
+
+
+def test_patch_ratio_for_backend_genesis_scope_is_unbounded():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_BACKEND",
+        payload={"target_files": ["app.py"], "repository_state": "GENESIS"},
+    )
+
+    assert executor._patch_ratio_for(work_item) == float("inf")
 
 
 def test_patch_guard_uses_apply_patch_path_when_diff_headers_are_missing():

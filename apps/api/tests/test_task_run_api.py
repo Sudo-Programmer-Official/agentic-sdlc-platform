@@ -120,6 +120,192 @@ async def test_create_run_blocks_codex_when_architecture_not_derived(db_session)
 
 
 @pytest.mark.anyio
+async def test_force_rerun_creates_attempt_task_and_binds_run(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Force rerun attempts", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    task = Task(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        title="Initialize backend",
+        description="First successful attempt.",
+        status="DONE",
+        source="manual",
+    )
+    session.add(task)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/projects/{project.id}/runs",
+            json={"executor": "dummy", "task_id": str(task.id), "force_rerun": True},
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["summary"]["task_title"] == "Initialize backend"
+
+    tasks = (
+        await session.execute(select(Task).where(Task.project_id == project.id).order_by(Task.created_at.asc()))
+    ).scalars().all()
+    assert len(tasks) == 2
+    source_task = tasks[0]
+    attempt_task = tasks[1]
+    assert source_task.id == task.id
+    assert attempt_task.id != source_task.id
+    assert attempt_task.status == "PENDING"
+    assert isinstance(attempt_task.provenance, dict)
+    assert attempt_task.provenance.get("rerun_of_task_id") == str(source_task.id)
+    assert attempt_task.provenance.get("attempt_type") == "RETRY"
+
+    run = await session.get(Run, uuid.UUID(payload["id"]))
+    assert run is not None
+    assert run.summary["task_id"] == str(attempt_task.id)
+    await session.refresh(source_task)
+    await session.refresh(attempt_task)
+    assert attempt_task.run_id == run.id
+
+
+@pytest.mark.anyio
+async def test_rerun_preflight_reports_already_satisfied_for_done_task_with_completed_run(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Rerun preflight satisfied", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    task = Task(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        title="Initialize frontend",
+        status="DONE",
+        source="manual",
+    )
+    session.add(task)
+    await session.flush()
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="dummy",
+        summary={"task_id": str(task.id)},
+    )
+    session.add(run)
+    await session.flush()
+    task.run_id = run.id
+    session.add(task)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/tasks/{task.id}/rerun-preflight")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["classification"] == "already_satisfied"
+    assert data["recommended_action"] == "skip"
+
+
+@pytest.mark.anyio
+async def test_rerun_preflight_reports_broken_for_failed_task(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Rerun preflight broken", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    task = Task(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        title="Initialize backend",
+        status="FAILED",
+        source="manual",
+    )
+    session.add(task)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/tasks/{task.id}/rerun-preflight")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["classification"] == "broken"
+    assert data["recommended_action"] == "recover"
+
+
+@pytest.mark.anyio
+async def test_create_rerun_noop_attempt_creates_done_child_attempt(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Rerun noop attempt", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_task = Task(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        title="Initialize contracts",
+        status="DONE",
+        source="manual",
+    )
+    session.add(source_task)
+    await session.flush()
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="dummy",
+        summary={"task_id": str(source_task.id)},
+    )
+    session.add(source_run)
+    await session.flush()
+    source_task.run_id = source_run.id
+    session.add(source_task)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/projects/{project.id}/tasks/{source_task.id}/rerun-noop-attempt")
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "DONE"
+    assert payload["rerun_of_task_id"] == str(source_task.id)
+
+    tasks = (
+        await session.execute(select(Task).where(Task.project_id == project.id).order_by(Task.created_at.asc()))
+    ).scalars().all()
+    assert len(tasks) == 2
+    noop_attempt = tasks[1]
+    assert noop_attempt.status == "DONE"
+    assert noop_attempt.started_at is not None
+    assert noop_attempt.finished_at is not None
+    assert isinstance(noop_attempt.result_payload, dict)
+    assert noop_attempt.result_payload.get("attempt_type") == "NO_OP"
+    assert noop_attempt.result_payload.get("classification") == "already_satisfied"
+
+
+@pytest.mark.anyio
+async def test_create_rerun_noop_attempt_rejects_non_satisfied_tasks(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Rerun noop reject", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    task = Task(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        title="Initialize telemetry",
+        status="FAILED",
+        source="manual",
+    )
+    session.add(task)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/projects/{project.id}/tasks/{task.id}/rerun-noop-attempt")
+
+    assert response.status_code == 409
+
+
+@pytest.mark.anyio
 async def test_retry_push_endpoint_clears_manual_push_flag(monkeypatch, db_session):
     session, tenant_id = db_session
     project = Project(name="Retry push API", tenant_id=tenant_id)

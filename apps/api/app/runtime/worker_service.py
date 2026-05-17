@@ -67,6 +67,35 @@ def _extract_failed_result_error(result: dict) -> str:
     return "executor returned FAILED without error details"
 
 
+def _design_governance_violation_payload(result: dict | None) -> dict | None:
+    payload = result if isinstance(result, dict) else {}
+    warnings = payload.get("warnings")
+    patch_guard = payload.get("patch_guard") if isinstance(payload.get("patch_guard"), dict) else {}
+    design_records = (
+        patch_guard.get("design_violation_records")
+        if isinstance(patch_guard.get("design_violation_records"), list)
+        else []
+    )
+    project_records = (
+        patch_guard.get("project_violation_records")
+        if isinstance(patch_guard.get("project_violation_records"), list)
+        else []
+    )
+    has_warning = isinstance(warnings, list) and any(str(item).strip().lower() == "design_contract_violation" for item in warnings)
+    has_design_records = bool(design_records) or any(
+        isinstance(record, dict) and str(record.get("type") or "").strip().lower() == "design_contract_violation"
+        for record in project_records
+    )
+    if not has_warning and not has_design_records:
+        return None
+    return {
+        "reason": "design_contract_violation",
+        "design_violation_records": design_records,
+        "project_violation_records": project_records,
+        "project_enforcement_mode": patch_guard.get("project_enforcement_mode"),
+    }
+
+
 async def execute_item(session, wi: WorkItem, agent: Agent):
     work_item_id = wi.id
     run_id = wi.run_id
@@ -117,6 +146,25 @@ async def execute_item(session, wi: WorkItem, agent: Agent):
                 "execution_zone": ((wi.result or {}).get("mutation_strategy") or {}).get("execution_zone"),
             },
         )
+        if wi.status == "FAILED":
+            design_payload = _design_governance_violation_payload(wi.result if isinstance(wi.result, dict) else None)
+            if design_payload is not None:
+                await record_event(
+                    session,
+                    project_id=project_id,
+                    run_id=run_id,
+                    work_item_id=work_item_id,
+                    event_type="RUN_DESIGN_GOVERNANCE_VIOLATION",
+                    actor_type="SYSTEM",
+                    actor_id=str(agent_id),
+                    tenant_id=tenant_id,
+                    payload={
+                        "work_item_id": str(work_item_id),
+                        "status": wi.status,
+                        **design_payload,
+                    },
+                    message="Design governance violation detected during patch validation.",
+                )
         await session.flush()
         failure_stage = "recovery_policy"
         await maybe_apply_recovery(session, wi)

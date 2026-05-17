@@ -56,6 +56,10 @@
         <div class="text-xs uppercase tracking-wide text-slate-400">Runs</div>
         <div class="mt-2 text-lg font-semibold text-slate-900">{{ runSummary }}</div>
         <div class="text-xs text-slate-500">Latest: {{ latestRunText }}</div>
+        <div class="mt-2">
+          <el-tag effect="light" :type="latestRepositoryStateTagType">{{ latestRepositoryStateLabel }}</el-tag>
+        </div>
+        <div class="mt-1 text-xs text-slate-500">{{ latestRepositoryStateDescription }}</div>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="flex items-center justify-between gap-2">
@@ -95,6 +99,26 @@
         <div class="text-xs text-slate-500">
           Protected zones: {{ architectureSummary?.protected_zone_count ?? 0 }}
           · Validation recipes: {{ architectureSummary?.validation_recipe_count ?? 0 }}
+        </div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Design Contract</div>
+          <el-button size="small" plain :disabled="!projectId" @click="openDesignContractDialog">
+            Manage
+          </el-button>
+        </div>
+        <div class="mt-2 text-sm font-semibold text-slate-900">
+          {{ designContractIdentityName }}
+        </div>
+        <div class="mt-1 text-xs text-slate-600">
+          {{ designContractIdentityTone }} · {{ designContractIdentityPersonality }}
+        </div>
+        <div class="mt-2 text-xs text-slate-500">
+          Tokens: {{ designContractTokenCount }} · Components: {{ designContractRegistryCount }}
+        </div>
+        <div class="text-xs text-slate-500">
+          Typography: {{ designContractTypographyLabel }} · Layout: {{ designContractLayoutLabel }}
         </div>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -928,6 +952,134 @@
       </div>
     </el-dialog>
 
+    <el-dialog v-model="showDesignContractDialog" title="Design Contract" width="760px">
+      <div class="space-y-4">
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div class="text-sm font-semibold text-slate-900">Governed UI Profile</div>
+          <div class="mt-1 text-xs text-slate-600">
+            Define design identity, tokens, typography, component rules, and layout defaults used by runtime generation.
+          </div>
+          <div class="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+            <div><strong>Identity:</strong> {{ designContractIdentityName }}</div>
+            <div><strong>Tone:</strong> {{ designContractIdentityTone }}</div>
+            <div><strong>Personality:</strong> {{ designContractIdentityPersonality }}</div>
+            <div><strong>Tokens:</strong> {{ designContractTokenCount }}</div>
+          </div>
+        </div>
+
+        <div v-if="designContractLoading" class="text-sm text-slate-500">Loading design contract…</div>
+        <template v-else>
+          <div class="grid gap-2 md:grid-cols-[1fr_auto]">
+            <el-select v-model="selectedDesignPreset" placeholder="Select experience preset">
+              <el-option
+                v-for="preset in designPresetOptions"
+                :key="preset.value"
+                :label="preset.label"
+                :value="preset.value"
+              />
+            </el-select>
+            <el-button type="primary" plain :disabled="!selectedDesignPreset" @click="applyDesignPreset">
+              Apply Preset
+            </el-button>
+          </div>
+          <div
+            v-if="presetDiffRows.length"
+            class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+          >
+            <div class="font-semibold">Preset changes preview</div>
+            <div class="mt-1">Applying this preset will update:</div>
+            <ul class="mt-1 list-disc pl-5">
+              <li v-for="row in presetDiffRows.slice(0, 10)" :key="row.path">
+                <span class="font-mono">{{ row.path }}</span>:
+                <span class="text-slate-700">{{ row.from }}</span>
+                <span class="mx-1">→</span>
+                <span class="text-slate-900">{{ row.to }}</span>
+              </li>
+            </ul>
+            <div v-if="presetDiffRows.length > 10" class="mt-1">
+              +{{ presetDiffRows.length - 10 }} more field changes
+            </div>
+          </div>
+          <div class="text-xs text-slate-500">
+            Presets set a governed baseline. You can still refine the JSON before saving.
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Experience Blueprint</div>
+            <el-select v-model="designContractForm.experience_blueprint" placeholder="Select blueprint">
+              <el-option
+                v-for="preset in designPresetOptions"
+                :key="preset.value"
+                :label="preset.label"
+                :value="preset.value"
+              />
+            </el-select>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Visual Tone</div>
+            <div class="grid gap-2 md:grid-cols-2">
+              <el-input v-model="designContractForm.identity.tone" placeholder="Tone (e.g. technical_minimal_premium)" />
+              <el-input v-model="designContractForm.identity.personality" placeholder="Personality (e.g. confident_operational_clean)" />
+            </div>
+            <el-input v-model="designContractForm.identity.name" placeholder="Brand / Product name" />
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Layout Density</div>
+            <div class="grid gap-2 md:grid-cols-3">
+              <el-select v-model="designContractForm.typography.density">
+                <el-option label="Compact" value="compact" />
+                <el-option label="Comfortable" value="comfortable" />
+                <el-option label="Spacious" value="spacious" />
+              </el-select>
+              <el-select v-model="designContractForm.layout.spacing">
+                <el-option label="Compact" value="compact" />
+                <el-option label="Airy" value="airy" />
+                <el-option label="Structured" value="structured" />
+              </el-select>
+              <el-select v-model="designContractForm.layout.container_width">
+                <el-option label="Narrow" value="narrow" />
+                <el-option label="Wide" value="wide" />
+                <el-option label="Full" value="full" />
+              </el-select>
+            </div>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Component Policy</div>
+            <el-checkbox-group v-model="designContractForm.allowed_components">
+              <el-checkbox v-for="component in componentPolicyOptions" :key="component" :label="component">
+                {{ component }}
+              </el-checkbox>
+            </el-checkbox-group>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Advanced</div>
+              <el-switch v-model="showDesignAdvancedEditor" />
+            </div>
+            <div class="text-xs text-slate-500">Enable raw JSON editing only when needed for advanced overrides.</div>
+          </div>
+          <template v-if="showDesignAdvancedEditor">
+            <el-button size="small" plain @click="syncDesignEditorFromForm">Refresh JSON from guided fields</el-button>
+          <el-input
+            v-model="designContractEditorValue"
+            type="textarea"
+            :rows="18"
+            placeholder='{"identity": {...}, "tokens": {...}, "typography": {...}, "components": {...}, "layout": {...}}'
+            class="font-mono"
+          />
+            <el-button size="small" plain @click="applyDesignEditorToForm">Apply JSON to guided fields</el-button>
+          </template>
+        </template>
+
+        <div v-if="designContractError" class="text-sm text-rose-600">{{ designContractError }}</div>
+        <div class="flex justify-end gap-2">
+          <el-button @click="showDesignContractDialog = false">Close</el-button>
+          <el-button type="primary" :loading="designContractSaveLoading" @click="saveDesignContractDraft">
+            Save Contract
+          </el-button>
+        </div>
+      </div>
+    </el-dialog>
+
     <el-dialog v-model="showTasksDialog" title="Tasks" width="640px">
       <div class="mb-3 flex items-center justify-between gap-3">
         <div class="text-xs text-slate-500">
@@ -936,6 +1088,16 @@
         <div class="flex items-center gap-2">
           <el-button type="primary" size="small" plain @click="openCreateTaskDialog">
             Create Task
+          </el-button>
+          <el-button
+            type="success"
+            size="small"
+            plain
+            :disabled="!selectedRunnableTasks.length || runAllLoading"
+            :loading="runSelectedLoading"
+            @click="runSelectedTasksOrdered"
+          >
+            Run Selected (Ordered)
           </el-button>
           <el-button
             type="success"
@@ -950,14 +1112,28 @@
         </div>
       </div>
       <div class="mb-3 flex flex-wrap gap-2 text-xs">
-        <el-tag effect="light" type="info">Total {{ sortedTasks.length }}</el-tag>
+        <el-tag effect="light" type="info">Total {{ filteredTasks.length }} / {{ sortedTasks.length }}</el-tag>
         <el-tag effect="light" type="warning">Queued {{ taskStatusCounts.queued }}</el-tag>
         <el-tag effect="light" type="primary">In Progress {{ taskStatusCounts.inProgress }}</el-tag>
         <el-tag effect="light" type="success">Done {{ taskStatusCounts.done }}</el-tag>
         <el-tag effect="light" type="danger">Blocked/Failed {{ taskStatusCounts.failed }}</el-tag>
       </div>
+      <div class="mb-3 flex flex-wrap items-center gap-2 text-xs">
+        <span class="text-slate-500">Attempt filter:</span>
+        <el-tag
+          v-for="option in attemptFilterOptions"
+          :key="option.value"
+          effect="light"
+          :type="attemptFilter === option.value ? option.type : 'info'"
+          class="cursor-pointer"
+          @click="attemptFilter = option.value"
+        >
+          {{ option.label }}
+        </el-tag>
+      </div>
       <div v-if="runAllProgressLabel" class="mb-2 text-xs text-slate-500">{{ runAllProgressLabel }}</div>
-      <el-table :data="sortedTasks" size="small">
+      <el-table :data="filteredTasks" size="small" row-key="id" @selection-change="onTaskSelectionChange">
+        <el-table-column type="selection" width="46" :selectable="canSelectTaskForOrderedRun" />
         <el-table-column label="#" width="56">
           <template #default="scope">
             <span class="font-mono text-xs text-slate-500">{{ scope.$index + 1 }}</span>
@@ -986,6 +1162,13 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="Attempt" width="120">
+          <template #default="scope">
+            <el-tag size="small" effect="light" :type="attemptTagType(scope.row)">
+              {{ taskAttemptTypeLabel(scope.row) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="Status" width="140">
           <template #default="scope">
             <span>{{ taskEffectiveStatus(scope.row) }}</span>
@@ -1000,16 +1183,29 @@
         <el-table-column prop="generated_from_document_version" label="Doc Ver" width="90" />
         <el-table-column label="Action" width="140">
           <template #default="scope">
-            <el-button
-              type="primary"
-              size="small"
-              text
-              :disabled="runAllLoading || !canRunTask(scope.row)"
-              :loading="taskRunLoadingId === scope.row.id"
-              @click="runTask(scope.row)"
-            >
-              Run This Task
-            </el-button>
+            <div class="flex flex-col items-start gap-1">
+              <el-button
+                type="primary"
+                size="small"
+                text
+                :disabled="runAllLoading || !canRunTask(scope.row)"
+                :loading="taskRunLoadingId === scope.row.id"
+                @click="runTask(scope.row)"
+              >
+                Run This Task
+              </el-button>
+              <el-button
+                v-if="canForceRunTask(scope.row)"
+                type="warning"
+                size="small"
+                text
+                :disabled="runAllLoading"
+                :loading="taskRunLoadingId === scope.row.id"
+                @click="runTask(scope.row, true)"
+              >
+                Force Run
+              </el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -1133,6 +1329,8 @@ import {
   bootstrapProjectArchitectureProfile,
   deriveProjectArchitectureProfile,
   saveProjectArchitectureProfile,
+  fetchDesignContract,
+  saveDesignContract,
   previewImpact,
   regenerateTasks,
   listTasks,
@@ -1170,6 +1368,8 @@ import {
   fetchProjectUnderstanding,
   getProjectEnvironmentChecklists,
   fetchProjectDeploymentReadiness,
+  fetchTaskRerunPreflight,
+  createTaskRerunNoopAttempt,
   getOrCreateActionRequestKey,
   getActiveTenantId,
 } from "../api/lifecycle";
@@ -1218,6 +1418,39 @@ const runSummary = computed(() => {
 });
 const latestRunRecord = computed(() => runs.value[0] || null);
 const latestRunText = computed(() => latestRunRecord.value?.id || projectContext.latestRunId || "None");
+const latestRepositoryState = computed(() => {
+  const summary = latestRunRecord.value?.summary;
+  if (!summary || typeof summary !== "object") return "ACTIVE_PRODUCT";
+  const raw = String((summary as Record<string, any>).repository_state || "").trim().toUpperCase();
+  if (raw === "GENESIS" || raw === "EARLY_BUILD" || raw === "ACTIVE_PRODUCT" || raw === "PRODUCTION_CRITICAL") {
+    return raw;
+  }
+  return "ACTIVE_PRODUCT";
+});
+const latestRepositoryStateLabel = computed(() => {
+  if (latestRepositoryState.value === "GENESIS") return "Genesis Mode";
+  if (latestRepositoryState.value === "EARLY_BUILD") return "Early Build Mode";
+  if (latestRepositoryState.value === "PRODUCTION_CRITICAL") return "Production Critical Mode";
+  return "Active Product Mode";
+});
+const latestRepositoryStateDescription = computed(() => {
+  if (latestRepositoryState.value === "GENESIS") {
+    return "Broad scaffolding and bootstrap operations are allowed while foundation is being established.";
+  }
+  if (latestRepositoryState.value === "EARLY_BUILD") {
+    return "Larger bounded mutations are allowed while architecture and deployment topology are still evolving.";
+  }
+  if (latestRepositoryState.value === "PRODUCTION_CRITICAL") {
+    return "Strict governance and high-risk protections are enforced for protected production surfaces.";
+  }
+  return "Stricter governance, decomposition, validation, and deployment protections are enforced.";
+});
+const latestRepositoryStateTagType = computed(() => {
+  if (latestRepositoryState.value === "GENESIS") return "success";
+  if (latestRepositoryState.value === "EARLY_BUILD") return "warning";
+  if (latestRepositoryState.value === "PRODUCTION_CRITICAL") return "danger";
+  return "info";
+});
 const architectureRefreshNeeded = computed(() => projectContext.architectureRefreshNeeded);
 const planRefreshNeeded = computed(() => projectContext.planRefreshNeeded);
 const testRefreshNeeded = computed(() => projectContext.testRefreshNeeded);
@@ -1250,6 +1483,129 @@ const architectureSaveLoading = ref(false);
 const architectureError = ref("");
 const architectureEditorValue = ref("{}");
 const architectureSummaryText = ref("");
+const designContract = ref<any | null>(null);
+const showDesignContractDialog = ref(false);
+const designContractLoading = ref(false);
+const designContractSaveLoading = ref(false);
+const designContractError = ref("");
+const designContractEditorValue = ref("{}");
+const showDesignAdvancedEditor = ref(false);
+const selectedDesignPreset = ref("");
+const componentPolicyOptions = [
+  "HeroSection",
+  "DashboardShell",
+  "MetricCard",
+  "Timeline",
+  "PrimaryButton",
+  "PolicyPanel",
+  "AuditTimeline",
+  "FeatureGrid",
+  "CTASection",
+  "PromptPanel",
+  "AssistantThread",
+  "InsightCard",
+  "PricingSection",
+  "DataTable",
+];
+const designContractForm = ref<any>({
+  experience_blueprint: "premium_saas",
+  identity: { name: "Product", tone: "technical_minimal_premium", personality: "confident_operational_clean" },
+  tokens: {},
+  token_registry: { colors: {}, spacing: {}, radius: {}, motion: {}, elevation: {} },
+  allowed_components: [],
+  typography: { heading_font: "Inter", body_font: "Inter", radius_scale: "soft", density: "comfortable" },
+  components: { buttons: { style: "glass", radius: "xl", shadow: "soft" }, registry: [] },
+  layout: { spacing: "airy", container_width: "wide", visual_weight: "balanced", hero_style: "immersive" },
+});
+const designPresetOptions = [
+  { label: "Premium SaaS", value: "premium_saas" },
+  { label: "Operational Dashboard", value: "operational_dashboard" },
+  { label: "AI Native", value: "ai_native" },
+  { label: "Modern Startup", value: "modern_startup" },
+  { label: "Enterprise", value: "enterprise" },
+];
+const designPresetRegistry: Record<string, any> = {
+  premium_saas: {
+    experience_blueprint: "premium_saas",
+    identity: { name: "Product", tone: "technical_minimal_premium", personality: "confident_operational_clean" },
+    tokens: { primary: "#2563eb", surface: "#f8fafc", accent: "#7c3aed", success: "#22c55e", text_primary: "#0f172a" },
+    token_registry: {
+      colors: { primary: "#2563eb", surface: "#f8fafc", accent: "#7c3aed", success: "#22c55e", text_primary: "#0f172a" },
+      spacing: { xs: "0.25rem", sm: "0.5rem", md: "1rem", lg: "1.5rem", xl: "2rem" },
+      radius: { sm: "0.375rem", md: "0.5rem", lg: "0.75rem", xl: "1rem" },
+      motion: { fast: "120ms", base: "200ms", slow: "320ms" },
+      elevation: { sm: "shadow-sm", md: "shadow", lg: "shadow-lg" },
+    },
+    allowed_components: ["HeroSection", "PricingSection", "PrimaryButton"],
+    typography: { heading_font: "Sora", body_font: "Inter", radius_scale: "soft", density: "comfortable" },
+    components: { buttons: { style: "glass", radius: "xl", shadow: "soft" }, registry: ["HeroSection", "PricingSection", "PrimaryButton"] },
+    layout: { spacing: "airy", container_width: "wide", visual_weight: "balanced", hero_style: "immersive" },
+  },
+  operational_dashboard: {
+    experience_blueprint: "enterprise_operational",
+    identity: { name: "Operations", tone: "dense_operational_structured", personality: "precise_fast_signal_heavy" },
+    tokens: { primary: "#0ea5e9", surface: "#f1f5f9", accent: "#14b8a6", success: "#16a34a", text_primary: "#0f172a" },
+    token_registry: {
+      colors: { primary: "#0ea5e9", surface: "#f1f5f9", accent: "#14b8a6", success: "#16a34a", text_primary: "#0f172a" },
+      spacing: { xs: "0.25rem", sm: "0.5rem", md: "0.875rem", lg: "1.25rem", xl: "1.75rem" },
+      radius: { sm: "0.25rem", md: "0.375rem", lg: "0.5rem", xl: "0.75rem" },
+      motion: { fast: "100ms", base: "180ms", slow: "280ms" },
+      elevation: { sm: "shadow-sm", md: "shadow", lg: "shadow-md" },
+    },
+    allowed_components: ["DashboardShell", "MetricCard", "Timeline", "DataTable"],
+    typography: { heading_font: "Manrope", body_font: "Inter", radius_scale: "medium", density: "compact" },
+    components: { buttons: { style: "solid", radius: "lg", shadow: "none" }, registry: ["DashboardShell", "MetricCard", "Timeline", "DataTable"] },
+    layout: { spacing: "compact", container_width: "wide", visual_weight: "information_dense", hero_style: "functional" },
+  },
+  ai_native: {
+    experience_blueprint: "ai_native",
+    identity: { name: "AI Product", tone: "modern_dynamic_assistive", personality: "adaptive_clear_experimental" },
+    tokens: { primary: "#0f766e", surface: "#f8fafc", accent: "#2563eb", success: "#22c55e", text_primary: "#0f172a" },
+    token_registry: {
+      colors: { primary: "#0f766e", surface: "#f8fafc", accent: "#2563eb", success: "#22c55e", text_primary: "#0f172a" },
+      spacing: { xs: "0.25rem", sm: "0.5rem", md: "1rem", lg: "1.5rem", xl: "2rem" },
+      radius: { sm: "0.375rem", md: "0.5rem", lg: "0.75rem", xl: "1rem" },
+      motion: { fast: "120ms", base: "200ms", slow: "300ms" },
+      elevation: { sm: "shadow-sm", md: "shadow", lg: "shadow-lg" },
+    },
+    allowed_components: ["PromptPanel", "AssistantThread", "InsightCard"],
+    typography: { heading_font: "Space Grotesk", body_font: "Inter", radius_scale: "soft", density: "comfortable" },
+    components: { buttons: { style: "elevated", radius: "xl", shadow: "soft" }, registry: ["PromptPanel", "AssistantThread", "InsightCard"] },
+    layout: { spacing: "airy", container_width: "wide", visual_weight: "balanced", hero_style: "immersive" },
+  },
+  modern_startup: {
+    experience_blueprint: "startup_launch",
+    identity: { name: "Startup", tone: "bold_consumer_fast", personality: "energetic_confident_simple" },
+    tokens: { primary: "#ef4444", surface: "#fff7ed", accent: "#f59e0b", success: "#22c55e", text_primary: "#111827" },
+    token_registry: {
+      colors: { primary: "#ef4444", surface: "#fff7ed", accent: "#f59e0b", success: "#22c55e", text_primary: "#111827" },
+      spacing: { xs: "0.25rem", sm: "0.5rem", md: "1rem", lg: "1.5rem", xl: "2rem" },
+      radius: { sm: "0.5rem", md: "0.75rem", lg: "1rem", xl: "1.25rem" },
+      motion: { fast: "120ms", base: "220ms", slow: "340ms" },
+      elevation: { sm: "shadow", md: "shadow-md", lg: "shadow-lg" },
+    },
+    allowed_components: ["HeroSection", "FeatureGrid", "CTASection"],
+    typography: { heading_font: "Sora", body_font: "Inter", radius_scale: "rounded", density: "comfortable" },
+    components: { buttons: { style: "solid", radius: "xl", shadow: "medium" }, registry: ["HeroSection", "FeatureGrid", "CTASection"] },
+    layout: { spacing: "airy", container_width: "wide", visual_weight: "hero_forward", hero_style: "immersive" },
+  },
+  enterprise: {
+    experience_blueprint: "enterprise_operational",
+    identity: { name: "Enterprise", tone: "governed_structured_stable", personality: "trustworthy_clear_ordered" },
+    tokens: { primary: "#1d4ed8", surface: "#f8fafc", accent: "#475569", success: "#16a34a", text_primary: "#0f172a" },
+    token_registry: {
+      colors: { primary: "#1d4ed8", surface: "#f8fafc", accent: "#475569", success: "#16a34a", text_primary: "#0f172a" },
+      spacing: { xs: "0.25rem", sm: "0.5rem", md: "1rem", lg: "1.25rem", xl: "1.75rem" },
+      radius: { sm: "0.25rem", md: "0.375rem", lg: "0.5rem", xl: "0.75rem" },
+      motion: { fast: "100ms", base: "180ms", slow: "260ms" },
+      elevation: { sm: "shadow-sm", md: "shadow", lg: "shadow-md" },
+    },
+    allowed_components: ["DashboardShell", "PolicyPanel", "AuditTimeline"],
+    typography: { heading_font: "Inter", body_font: "Inter", radius_scale: "medium", density: "comfortable" },
+    components: { buttons: { style: "solid", radius: "lg", shadow: "none" }, registry: ["DashboardShell", "PolicyPanel", "AuditTimeline"] },
+    layout: { spacing: "structured", container_width: "wide", visual_weight: "balanced", hero_style: "functional" },
+  },
+};
 const planHistory = ref<any[]>([]);
 const health = ref<any | null>(null);
 const healthError = ref("");
@@ -1266,6 +1622,49 @@ const lifecycleScore = ref<any | null>(null);
 const lifecycleError = ref("");
 const lifecycleHistory = ref<any[]>([]);
 const lifecycleHistoryError = ref("");
+
+const designContractIdentityName = computed(
+  () => String(designContract.value?.identity?.name || "Product").trim() || "Product"
+);
+const designContractIdentityTone = computed(
+  () => String(designContract.value?.identity?.tone || "technical_minimal_premium").trim() || "technical_minimal_premium"
+);
+const designContractIdentityPersonality = computed(
+  () => String(designContract.value?.identity?.personality || "confident_operational_clean").trim() || "confident_operational_clean"
+);
+const designContractTokenCount = computed(() => {
+  const tokens = designContract.value?.token_registry?.colors || designContract.value?.tokens;
+  return tokens && typeof tokens === "object" ? Object.keys(tokens).length : 0;
+});
+const designContractRegistryCount = computed(() => {
+  const registry = designContract.value?.allowed_components || designContract.value?.components?.registry;
+  return Array.isArray(registry) ? registry.length : 0;
+});
+const designContractTypographyLabel = computed(() => {
+  const heading = String(designContract.value?.typography?.heading_font || "Inter");
+  const body = String(designContract.value?.typography?.body_font || "Inter");
+  return `${heading}/${body}`;
+});
+const designContractLayoutLabel = computed(() => {
+  const spacing = String(designContract.value?.layout?.spacing || "airy");
+  const width = String(designContract.value?.layout?.container_width || "wide");
+  return `${spacing}, ${width}`;
+});
+const presetDiffRows = computed(() => {
+  const key = String(selectedDesignPreset.value || "").trim();
+  const preset = designPresetRegistry[key];
+  if (!preset) return [] as Array<{ path: string; from: string; to: string }>;
+
+  let current: any = {};
+  try {
+    current = JSON.parse(designContractEditorValue.value || "{}");
+  } catch {
+    current = designContract.value || {};
+  }
+  const rows: Array<{ path: string; from: string; to: string }> = [];
+  collectDesignDiffRows(current, preset, "", rows);
+  return rows;
+});
 const activityDialog = ref(false);
 const activity = ref<any[]>([]);
 const activityError = ref("");
@@ -1359,8 +1758,11 @@ const stageError = ref("");
 const runs = ref<any[]>([]);
 const runsLoading = ref(false);
 const runError = ref("");
+const runSelectedLoading = ref(false);
+const selectedTaskIds = ref<string[]>([]);
 const runUnblockLoading = ref<Record<string, boolean>>({});
 const runResumeLoading = ref<Record<string, boolean>>({});
+const attemptFilter = ref<"all" | "initial" | "retry" | "noop">("all");
 let overviewPollHandle: ReturnType<typeof setTimeout> | null = null;
 let overviewPollInFlight = false;
 const selectedExecutor = ref("codex");
@@ -1449,9 +1851,30 @@ const sortedTasks = computed(() => {
     return String(a?.id || "").localeCompare(String(b?.id || ""));
   });
 });
-const runnableTasks = computed(() => sortedTasks.value.filter((task) => canRunTask(task)));
+const attemptFilterOptions = [
+  { value: "all" as const, label: "All", type: "info" as const },
+  { value: "initial" as const, label: "Initial", type: "success" as const },
+  { value: "retry" as const, label: "Retry", type: "warning" as const },
+  { value: "noop" as const, label: "No-op", type: "primary" as const },
+];
+const filteredTasks = computed(() => {
+  const mode = attemptFilter.value;
+  if (mode === "all") return sortedTasks.value;
+  return sortedTasks.value.filter((task) => {
+    const label = taskAttemptTypeLabel(task).toUpperCase();
+    if (mode === "initial") return label === "INITIAL";
+    if (mode === "retry") return label !== "INITIAL" && label !== "NO_OP";
+    if (mode === "noop") return label === "NO_OP";
+    return true;
+  });
+});
+const runnableTasks = computed(() => filteredTasks.value.filter((task) => canRunTask(task)));
+const selectedRunnableTasks = computed(() => {
+  const selected = new Set(selectedTaskIds.value);
+  return filteredTasks.value.filter((task) => selected.has(String(task?.id || "")) && canRunTask(task));
+});
 const taskStatusCounts = computed(() => {
-  const rows = sortedTasks.value;
+  const rows = filteredTasks.value;
   const statusOf = (row: any) => taskEffectiveStatus(row);
   const count = (statuses: string[]) => rows.filter((row) => statuses.includes(statusOf(row))).length;
   return {
@@ -1789,6 +2212,172 @@ function taskLineageSourceLabel(task: any) {
   return String(task?.source_surface || task?.source_type || task?.source || "project_overview");
 }
 
+function taskAttemptTypeLabel(task: any) {
+  const provenance = task?.provenance && typeof task.provenance === "object" ? task.provenance : {};
+  const explicit = String(provenance?.attempt_type || "").trim().toUpperCase();
+  if (explicit) return explicit;
+  if (task?.rerun_of_task_id || provenance?.rerun_of_task_id || provenance?.parent_task_id) return "RETRY";
+  return "INITIAL";
+}
+
+function attemptTagType(task: any) {
+  const label = taskAttemptTypeLabel(task);
+  if (label === "NO_OP") return "info";
+  if (label === "RETRY" || label === "RECOVERY" || label === "DRIFT_REPAIR" || label === "VALIDATION_REPLAY") return "warning";
+  if (label === "DECOMPOSED") return "primary";
+  return "success";
+}
+
+function normalizedTaskTitle(task: any) {
+  return String(task?.title || "").trim().toLowerCase();
+}
+
+function taskId(task: any) {
+  return String(task?.id || "");
+}
+
+function inferTaskDependencyIds(task: any, allTasks: any[]) {
+  const id = taskId(task);
+  const title = normalizedTaskTitle(task);
+  const provenance = task?.provenance && typeof task.provenance === "object" ? task.provenance : {};
+  const allById = new Map(allTasks.map((row) => [taskId(row), row]));
+  const allByTitle = new Map(allTasks.map((row) => [normalizedTaskTitle(row), row]));
+  const deps = new Set<string>();
+
+  const collectIds = (value: any) => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const candidate = String(item || "").trim();
+        if (!candidate) continue;
+        if (allById.has(candidate)) deps.add(candidate);
+      }
+    } else if (typeof value === "string") {
+      const candidate = value.trim();
+      if (candidate && allById.has(candidate)) deps.add(candidate);
+    }
+  };
+  const collectTitles = (value: any) => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const key = String(item || "").trim().toLowerCase();
+        if (!key) continue;
+        const row = allByTitle.get(key);
+        if (row) deps.add(taskId(row));
+      }
+    } else if (typeof value === "string") {
+      const key = value.trim().toLowerCase();
+      if (!key) return;
+      const row = allByTitle.get(key);
+      if (row) deps.add(taskId(row));
+    }
+  };
+
+  collectIds(provenance?.depends_on_task_ids);
+  collectIds(provenance?.depends_on);
+  collectIds(provenance?.prerequisite_task_ids);
+  collectTitles(provenance?.depends_on_titles);
+  collectTitles(provenance?.prerequisite_titles);
+
+  // Foundation fallback graph for predictable bootstrap ordering.
+  if (String(task?.source || "") === "genesis" || String(task?.source_type || "").includes("genesis")) {
+    const monorepo = allByTitle.get("initialize monorepo");
+    if (
+      monorepo &&
+      title !== "initialize monorepo" &&
+      (
+        title.startsWith("initialize frontend")
+        || title.startsWith("initialize backend")
+        || title.startsWith("initialize contracts")
+        || title.startsWith("initialize requirements")
+        || title.startsWith("initialize ci")
+        || title.startsWith("initialize deployment profile")
+        || title.startsWith("initialize telemetry")
+        || title.startsWith("validate foundation")
+      )
+    ) {
+      deps.add(taskId(monorepo));
+    }
+    if (title.startsWith("validate foundation")) {
+      const prereqTitles = [
+        "initialize frontend",
+        "initialize backend",
+        "initialize contracts",
+        "initialize requirements",
+        "initialize ci",
+        "initialize deployment profile",
+        "initialize telemetry",
+      ];
+      for (const key of prereqTitles) {
+        const row = allByTitle.get(key);
+        if (row) deps.add(taskId(row));
+      }
+    }
+  }
+
+  deps.delete(id);
+  return deps;
+}
+
+function planSelectedTasksByDependencies(selectedTasks: any[], allTasks: any[]) {
+  const selectedById = new Map(selectedTasks.map((row) => [taskId(row), row]));
+  const depsById = new Map<string, Set<string>>();
+  const missingById = new Map<string, string[]>();
+
+  for (const task of selectedTasks) {
+    const id = taskId(task);
+    const inferred = inferTaskDependencyIds(task, allTasks);
+    depsById.set(id, inferred);
+    const missing = [...inferred].filter((depId) => !selectedById.has(depId));
+    if (missing.length) missingById.set(id, missing);
+  }
+
+  const indegree = new Map<string, number>();
+  const outgoing = new Map<string, string[]>();
+  for (const task of selectedTasks) {
+    const id = taskId(task);
+    indegree.set(id, 0);
+    outgoing.set(id, []);
+  }
+  for (const [taskNodeId, deps] of depsById.entries()) {
+    for (const depId of deps) {
+      if (!selectedById.has(depId)) continue;
+      indegree.set(taskNodeId, (indegree.get(taskNodeId) || 0) + 1);
+      outgoing.set(depId, [...(outgoing.get(depId) || []), taskNodeId]);
+    }
+  }
+
+  const stageRank: Record<string, number> = { PLAN: 0, RUN: 1, EVALUATE: 2 };
+  const queue = [...selectedTasks]
+    .filter((row) => (indegree.get(taskId(row)) || 0) === 0)
+    .sort((a, b) => {
+      const aStage = stageRank[String(a?.stage || "").toUpperCase()] ?? 9;
+      const bStage = stageRank[String(b?.stage || "").toUpperCase()] ?? 9;
+      if (aStage !== bStage) return aStage - bStage;
+      const aCreated = Date.parse(String(a?.created_at || "")) || 0;
+      const bCreated = Date.parse(String(b?.created_at || "")) || 0;
+      return aCreated - bCreated;
+    });
+  const ordered: any[] = [];
+  while (queue.length) {
+    const row = queue.shift();
+    if (!row) break;
+    const id = taskId(row);
+    ordered.push(row);
+    const children = outgoing.get(id) || [];
+    for (const childId of children) {
+      const nextIn = (indegree.get(childId) || 0) - 1;
+      indegree.set(childId, nextIn);
+      if (nextIn === 0) {
+        const child = selectedById.get(childId);
+        if (child) queue.push(child);
+      }
+    }
+  }
+
+  const unresolvedCycle = ordered.length !== selectedTasks.length;
+  return { ordered, missingById, unresolvedCycle };
+}
+
 function taskLinkedRunLabel(task: any) {
   return shortId(
     task?.latest_run_id ||
@@ -2072,14 +2661,46 @@ async function submitGenesisBlueprint() {
   }
 }
 
-async function runTask(task: any) {
-  if (!projectId.value) return;
+async function runTask(task: any, force = false) {
+  if (!projectId.value || !task?.id) return;
+  if (!force && !canRunTask(task)) {
+    ElMessage.warning("Task is not runnable in its current status.");
+    return;
+  }
+  if (force && hasRunningRun.value) {
+    ElMessage.warning("Another run is active. Wait for it to finish before force-running.");
+    return;
+  }
   taskRunLoadingId.value = task.id;
   tasksError.value = "";
   runError.value = "";
   try {
-    const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:task:${projectId.value}:${task.id}`);
-    const createdRun = await createRun(projectId.value, selectedExecutor.value, task.id, null, { request_key: requestKey });
+    if (force) {
+      try {
+        const preflight = await fetchTaskRerunPreflight(projectId.value, String(task.id));
+        const classification = String(preflight?.classification || "").toLowerCase();
+        if (classification === "already_satisfied") {
+          await createTaskRerunNoopAttempt(projectId.value, String(task.id));
+          await loadTasks();
+          ElMessage.info("Created NO_OP attempt: repository already satisfies this task intent.");
+          return;
+        }
+      } catch (preflightErr: any) {
+        const detail = String(preflightErr?.message || preflightErr || "").toLowerCase();
+        // Preflight is an optimization. If it fails, continue with the force rerun path.
+        if (detail.includes("404") || detail.includes("not found")) {
+          ElMessage.warning("Rerun preflight endpoint unavailable; continuing with force run.");
+        } else {
+          ElMessage.warning("Rerun preflight failed; continuing with force run.");
+        }
+      }
+    }
+    const actionKey = force ? "force_task" : "task";
+    const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:${actionKey}:${projectId.value}:${task.id}`);
+    const createdRun = await createRun(projectId.value, selectedExecutor.value, task.id, null, {
+      request_key: requestKey,
+      force_rerun: force,
+    });
     if (createdRun?.id) {
       runs.value = canonicalizeRuns([createdRun, ...runs.value.filter((run) => run?.id !== createdRun.id)]);
       updateProjectContext({
@@ -2088,9 +2709,9 @@ async function runTask(task: any) {
         hasActiveRun: true,
         updatedAt: new Date().toISOString(),
       });
-      ElMessage.success(`Run queued for task: ${task.title} (${String(createdRun.id).slice(0, 8)})`);
+      ElMessage.success(`${force ? "Force run" : "Run"} queued for task: ${task.title} (${String(createdRun.id).slice(0, 8)})`);
     } else {
-      ElMessage.success(`Run queued for task: ${task.title}`);
+      ElMessage.success(`${force ? "Force run" : "Run"} queued for task: ${task.title}`);
     }
     await loadTasks();
     await loadRuns();
@@ -2106,6 +2727,11 @@ async function runTask(task: any) {
 function canRunTask(task: any) {
   const status = taskEffectiveStatus(task);
   return ["PENDING", "QUEUED", "FAILED", "BLOCKED", "CANCELED"].includes(status);
+}
+
+function canForceRunTask(task: any) {
+  const status = taskEffectiveStatus(task);
+  return ["DONE", "COMPLETED", "CLOSED"].includes(status);
 }
 
 function taskEffectiveStatus(task: any) {
@@ -2155,6 +2781,108 @@ async function runAllTasksOrdered() {
     ElMessage.error(`Queued ${started}/${queue.length}. ${message}`);
   } finally {
     runAllLoading.value = false;
+    runAllProgressLabel.value = "";
+  }
+}
+
+function canSelectTaskForOrderedRun(row: any) {
+  return canRunTask(row);
+}
+
+function onTaskSelectionChange(rows: any[]) {
+  selectedTaskIds.value = rows
+    .map((row) => String(row?.id || ""))
+    .filter((value) => !!value && canRunTask(sortedTasks.value.find((task) => String(task?.id || "") === value)));
+}
+
+function hasActiveRuns(rows: any[]) {
+  return rows.some((run) => ["RUNNING", "QUEUED", "PAUSED"].includes(String(run?.status || "").toUpperCase()));
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForRunTerminal(runId: string, timeoutMs = 30 * 60 * 1000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const latestRuns = await listRuns(projectId.value);
+    runs.value = canonicalizeRuns(Array.isArray(latestRuns) ? latestRuns : []);
+    const target = runs.value.find((run: any) => String(run?.id || "") === String(runId));
+    const status = String(target?.status || "").toUpperCase();
+    if (["COMPLETED", "FAILED", "CANCELED"].includes(status)) return status;
+    await sleep(3000);
+  }
+  throw new Error("Timed out waiting for run completion.");
+}
+
+async function waitUntilNoActiveRuns(timeoutMs = 30 * 60 * 1000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const latestRuns = await listRuns(projectId.value);
+    runs.value = canonicalizeRuns(Array.isArray(latestRuns) ? latestRuns : []);
+    if (!hasActiveRuns(runs.value)) return;
+    await sleep(3000);
+  }
+  throw new Error("Timed out waiting for active run to finish.");
+}
+
+async function runSelectedTasksOrdered() {
+  if (!projectId.value || runAllLoading.value || runSelectedLoading.value) return;
+  const queue = selectedRunnableTasks.value;
+  if (!queue.length) {
+    ElMessage.info("Select at least one runnable task.");
+    return;
+  }
+  const plan = planSelectedTasksByDependencies(queue, sortedTasks.value);
+  if (plan.unresolvedCycle) {
+    tasksError.value = "Selected tasks contain a dependency cycle or ambiguous dependency metadata.";
+    ElMessage.error(tasksError.value);
+    return;
+  }
+  if (plan.missingById.size) {
+    const first = [...plan.missingById.entries()][0];
+    const task = queue.find((row) => taskId(row) === first[0]);
+    const missingTitles = first[1]
+      .map((depId) => sortedTasks.value.find((row) => taskId(row) === depId))
+      .filter(Boolean)
+      .map((row: any) => row.title || depId);
+    tasksError.value = `Missing prerequisite selection for "${task?.title || first[0]}": ${missingTitles.join(", ")}`;
+    ElMessage.error(tasksError.value);
+    return;
+  }
+  const executionQueue = plan.ordered;
+  runSelectedLoading.value = true;
+  runAllProgressLabel.value = `Starting 0/${executionQueue.length} selected tasks…`;
+  tasksError.value = "";
+  runError.value = "";
+  let started = 0;
+  try {
+    for (const task of executionQueue) {
+      runAllProgressLabel.value = `Waiting to start ${started + 1}/${executionQueue.length}: ${task.title || task.id}`;
+      await waitUntilNoActiveRuns();
+      runAllProgressLabel.value = `Starting ${started + 1}/${executionQueue.length}: ${task.title || task.id}`;
+      const requestKey = getOrCreateActionRequestKey("start_run", `project_overview:run_selected:${projectId.value}:${task.id}`);
+      const createdRun = await createRun(projectId.value, selectedExecutor.value, task.id, null, { request_key: requestKey });
+      started += 1;
+      const runId = String(createdRun?.id || "");
+      if (runId) {
+        const finalStatus = await waitForRunTerminal(runId);
+        if (finalStatus !== "COMPLETED") {
+          throw new Error(`Task ${task.title || task.id} ended with run status ${finalStatus}.`);
+        }
+      }
+      await loadTasks();
+    }
+    await Promise.all([loadTasks(), loadRuns()]);
+    ElMessage.success(`Completed ordered execution for ${started} selected task run${started === 1 ? "" : "s"}.`);
+  } catch (err: any) {
+    const message = err?.message || "Failed while running selected tasks in order";
+    tasksError.value = message;
+    runError.value = message;
+    ElMessage.error(`Completed ${started}/${executionQueue.length}. ${message}`);
+  } finally {
+    runSelectedLoading.value = false;
     runAllProgressLabel.value = "";
   }
 }
@@ -2638,6 +3366,164 @@ async function openArchitectureDialog() {
   }
 }
 
+async function loadDesignContract() {
+  if (!projectId.value) return;
+  designContractError.value = "";
+  try {
+    const payload = await fetchDesignContract(projectId.value);
+    designContract.value = payload || null;
+    designContractForm.value = {
+      experience_blueprint: payload?.experience_blueprint || "premium_saas",
+      identity: payload?.identity || {},
+      tokens: payload?.tokens || {},
+      token_registry: payload?.token_registry || {},
+      allowed_components: Array.isArray(payload?.allowed_components) ? payload.allowed_components : [],
+      typography: payload?.typography || {},
+      components: payload?.components || {},
+      layout: payload?.layout || {},
+    };
+    syncDesignEditorFromForm();
+  } catch (err: any) {
+    designContract.value = null;
+    designContractForm.value = {
+      experience_blueprint: "premium_saas",
+      identity: { name: "Product", tone: "technical_minimal_premium", personality: "confident_operational_clean" },
+      tokens: {},
+      token_registry: { colors: {}, spacing: {}, radius: {}, motion: {}, elevation: {} },
+      allowed_components: [],
+      typography: { heading_font: "Inter", body_font: "Inter", radius_scale: "soft", density: "comfortable" },
+      components: { buttons: { style: "glass", radius: "xl", shadow: "soft" }, registry: [] },
+      layout: { spacing: "airy", container_width: "wide", visual_weight: "balanced", hero_style: "immersive" },
+    };
+    designContractEditorValue.value = JSON.stringify({}, null, 2);
+    designContractError.value = err?.message || "Failed to load design contract.";
+  }
+}
+
+async function openDesignContractDialog() {
+  if (!projectId.value) return;
+  showDesignContractDialog.value = true;
+  designContractLoading.value = true;
+  designContractError.value = "";
+  try {
+    await loadDesignContract();
+  } finally {
+    designContractLoading.value = false;
+  }
+}
+
+async function saveDesignContractDraft() {
+  if (!projectId.value) return;
+  designContractSaveLoading.value = true;
+  designContractError.value = "";
+  try {
+    const payload = showDesignAdvancedEditor.value
+      ? JSON.parse(designContractEditorValue.value || "{}")
+      : { ...designContractForm.value };
+    const saved = await saveDesignContract(projectId.value, {
+      experience_blueprint: payload?.design_contract?.experience_blueprint || payload?.experience_blueprint || undefined,
+      identity: payload?.design_contract?.identity || payload?.identity || undefined,
+      tokens: payload?.design_contract?.tokens || payload?.tokens || {},
+      token_registry: payload?.design_contract?.token_registry || payload?.token_registry || undefined,
+      allowed_components: payload?.design_contract?.allowed_components || payload?.allowed_components || [],
+      typography: payload?.design_contract?.typography || payload?.typography || undefined,
+      components: payload?.design_contract?.components || payload?.components || {},
+      layout: payload?.design_contract?.layout || payload?.layout || undefined,
+      updated_by: "ui-user",
+    });
+    const normalized = saved?.contract_json?.design_contract || payload?.design_contract || payload || {};
+    designContract.value = normalized;
+    designContractForm.value = {
+      experience_blueprint: normalized?.experience_blueprint || "premium_saas",
+      identity: normalized?.identity || {},
+      tokens: normalized?.tokens || {},
+      token_registry: normalized?.token_registry || {},
+      allowed_components: Array.isArray(normalized?.allowed_components) ? normalized.allowed_components : [],
+      typography: normalized?.typography || {},
+      components: normalized?.components || {},
+      layout: normalized?.layout || {},
+    };
+    designContractEditorValue.value = JSON.stringify(normalized, null, 2);
+    ElMessage.success("Design contract saved.");
+  } catch (err: any) {
+    designContractError.value = err?.message || "Failed to save design contract.";
+  } finally {
+    designContractSaveLoading.value = false;
+  }
+}
+
+function applyDesignPreset() {
+  const key = String(selectedDesignPreset.value || "").trim();
+  if (!key) return;
+  const preset = designPresetRegistry[key];
+  if (!preset) return;
+  designContract.value = { ...preset };
+  designContractForm.value = JSON.parse(JSON.stringify(preset));
+  syncDesignEditorFromForm();
+  ElMessage.success(`Applied ${designPresetOptions.find((item) => item.value === key)?.label || "preset"} preset.`);
+}
+
+function syncDesignEditorFromForm() {
+  designContractEditorValue.value = JSON.stringify(designContractForm.value || {}, null, 2);
+}
+
+function applyDesignEditorToForm() {
+  try {
+    const parsed = JSON.parse(designContractEditorValue.value || "{}");
+    designContractForm.value = {
+      experience_blueprint: parsed?.experience_blueprint || "premium_saas",
+      identity: parsed?.identity || {},
+      tokens: parsed?.tokens || {},
+      token_registry: parsed?.token_registry || {},
+      allowed_components: Array.isArray(parsed?.allowed_components) ? parsed.allowed_components : [],
+      typography: parsed?.typography || {},
+      components: parsed?.components || {},
+      layout: parsed?.layout || {},
+    };
+    ElMessage.success("Applied JSON to guided fields.");
+  } catch (err: any) {
+    designContractError.value = err?.message || "Invalid design contract JSON.";
+  }
+}
+
+function collectDesignDiffRows(
+  source: any,
+  target: any,
+  basePath: string,
+  rows: Array<{ path: string; from: string; to: string }>
+) {
+  const sourceObj = source && typeof source === "object" ? source : {};
+  const targetObj = target && typeof target === "object" ? target : {};
+  const keys = Array.from(new Set([...Object.keys(sourceObj), ...Object.keys(targetObj)])).sort();
+
+  for (const key of keys) {
+    const path = basePath ? `${basePath}.${key}` : key;
+    const left = sourceObj[key];
+    const right = targetObj[key];
+    const leftIsObj = left && typeof left === "object" && !Array.isArray(left);
+    const rightIsObj = right && typeof right === "object" && !Array.isArray(right);
+
+    if (leftIsObj || rightIsObj) {
+      collectDesignDiffRows(left, right, path, rows);
+      continue;
+    }
+    const leftText = formatDesignDiffValue(left);
+    const rightText = formatDesignDiffValue(right);
+    if (leftText !== rightText) {
+      rows.push({ path, from: leftText, to: rightText });
+    }
+  }
+}
+
+function formatDesignDiffValue(value: any) {
+  if (value === undefined) return "∅";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return JSON.stringify(value);
+  if (typeof value === "object") return JSON.stringify(value);
+  const text = String(value);
+  return text.length > 70 ? `${text.slice(0, 67)}...` : text;
+}
+
 async function bootstrapArchitectureProfile(refreshRepoMap = false) {
   if (!projectId.value) return;
   architectureBootstrapLoading.value = true;
@@ -2977,6 +3863,7 @@ onMounted(async () => {
     await loadGenesisState();
   await loadProjectMeta();
   await loadRuns();
+  await loadDesignContract();
   await loadProjectRepo();
   await loadDeploymentProviderHints();
   await loadDeploymentReadinessContract();

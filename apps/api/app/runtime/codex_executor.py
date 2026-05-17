@@ -31,6 +31,7 @@ from app.services.patch_verification import build_run_patch_plan_and_verificatio
 from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_context, compact_graph_context
 from app.services.workspace_supervisor import workspace_uri
 from app.services.ai_policy import AIJobManager, AIJobRequest, TIER_ORDER, contains_sensitive_paths, estimate_tokens, is_retryable_error, retry_error_kind
+from app.services.event_log import record_event
 
 
 SYSTEM_PROMPT = """You are an automated code change worker.
@@ -67,10 +68,25 @@ LAYOUT_SENSITIVE_HINTS = {
     "footer",
 }
 EXECUTION_ZONES = {"layout_zone", "logic_zone", "config_zone", "schema_zone", "infrastructure_zone"}
+ADJACENT_REPAIR_FILES = {
+    "requirements.txt",
+    "pyproject.toml",
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "vite.config.ts",
+    "vite.config.js",
+    "docker-compose.yml",
+    ".env.example",
+}
 
 log = logging.getLogger("app.runtime.codex_executor")
 _UNIFIED_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$")
 _JSON_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL | re.IGNORECASE)
+_HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")
+_STYLE_ATTR_RE = re.compile(r"\bstyle\s*=", re.IGNORECASE)
+_COMPONENT_TAG_RE = re.compile(r"<([A-Z][A-Za-z0-9_]*)\b")
 
 
 def _verification_from_action_scope(
@@ -111,6 +127,57 @@ def _verification_from_action_scope(
             ),
         }
     )
+
+
+def _should_block_for_operator_confirmation(
+    verification: RunPatchVerificationSummary | None,
+    actions: list[Action],
+    *,
+    repository_state: str | None = None,
+) -> bool:
+    if verification is None or not verification.requires_confirmation:
+        return False
+    if not has_mutating_actions(actions):
+        return False
+    normalized_state = (repository_state or "").strip().upper()
+    findings = list(verification.findings or [])
+    finding_codes = {str(finding.code or "").strip().lower() for finding in findings}
+    has_high_severity = any((finding.severity or "").lower() == "high" for finding in findings)
+    # Enforce safe happy-path thresholds:
+    # - <= 6 bounded files can proceed without manual confirmation.
+    # - 7+ files require phased decomposition/review before mutating.
+    file_count = max(0, int(verification.file_count or 0))
+    if file_count > 6:
+        return True
+    # In GENESIS/EARLY_BUILD, bounded medium-risk scaffolds with only missing-tests warning should continue.
+    if (
+        normalized_state in {"GENESIS", "EARLY_BUILD"}
+        and file_count <= 6
+        and (verification.risk_level or "").upper() != "HIGH"
+        and not has_high_severity
+        and finding_codes.issubset({"missing_tests", "scope_from_actions", ""})
+    ):
+        return False
+    # Unknown/unverified scope should not mutate autonomously.
+    if verification.scope_match is False:
+        return True
+    # Keep hard gate for high-risk scopes or explicitly high-severity findings.
+    if (verification.risk_level or "").upper() == "HIGH":
+        return True
+    return has_high_severity
+
+
+def _operator_confirmation_next_action(verification: RunPatchVerificationSummary | None) -> str:
+    if verification is None:
+        return "Confirm the patch plan before allowing mutating actions."
+    file_count = max(0, int(verification.file_count or 0))
+    if file_count >= 20:
+        return "Patch scope is too broad. Create a decomposition plan, then confirm phased execution."
+    if file_count >= 7:
+        return "Patch scope exceeds autonomous file limit. Split into phased bounded changes, then continue."
+    if verification.scope_match is False:
+        return "Patch scope is unverified. Rebuild a bounded scope and confirm before mutating."
+    return "Confirm the patch plan before allowing mutating actions."
 
 
 def _target_files_from_payload(payload: dict[str, Any] | None) -> list[str]:
@@ -180,6 +247,133 @@ def _project_contract_enforcement_mode(project_contract: dict[str, Any] | None) 
             return normalized
     enabled = bool(enforcement.get("enabled", summary.get("enforcement_enabled", False)))
     return "warn" if enabled else "off"
+
+
+def _design_context_packet(project_contract: dict[str, Any] | None) -> dict[str, Any]:
+    payload = project_contract if isinstance(project_contract, dict) else {}
+    design_contract = payload.get("design_contract") if isinstance(payload.get("design_contract"), dict) else {}
+    identity = design_contract.get("identity") if isinstance(design_contract.get("identity"), dict) else {}
+    typography = design_contract.get("typography") if isinstance(design_contract.get("typography"), dict) else {}
+    layout = design_contract.get("layout") if isinstance(design_contract.get("layout"), dict) else {}
+    token_registry = design_contract.get("token_registry") if isinstance(design_contract.get("token_registry"), dict) else {}
+    allowed_components = design_contract.get("allowed_components") if isinstance(design_contract.get("allowed_components"), list) else []
+    if not allowed_components:
+        components = design_contract.get("components") if isinstance(design_contract.get("components"), dict) else {}
+        registry = components.get("registry")
+        if isinstance(registry, list):
+            allowed_components = [item for item in registry if isinstance(item, str) and item.strip()]
+
+    visual_tone = str(identity.get("tone") or "").strip()
+    layout_density = str(typography.get("density") or "").strip() or str(layout.get("spacing") or "").strip()
+    experience_blueprint = str(design_contract.get("experience_blueprint") or "").strip() or "premium_saas"
+    return {
+        "experience_blueprint": experience_blueprint,
+        "visual_tone": visual_tone or "technical_minimal_premium",
+        "layout_density": layout_density or "comfortable",
+        "allowed_components": allowed_components[:16],
+        "token_registry": token_registry if token_registry else {"colors": design_contract.get("tokens", {})},
+    }
+
+
+def _flatten_token_colors(token_registry: dict[str, Any]) -> set[str]:
+    colors = token_registry.get("colors") if isinstance(token_registry.get("colors"), dict) else {}
+    values: set[str] = set()
+    for value in colors.values():
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip().lower())
+    return values
+
+
+def _coerce_rewrite_aliases(project_contract: dict[str, Any] | None) -> dict[str, str]:
+    payload = project_contract if isinstance(project_contract, dict) else {}
+    design_contract = payload.get("design_contract") if isinstance(payload.get("design_contract"), dict) else {}
+    raw_aliases = design_contract.get("rewrite_aliases") if isinstance(design_contract.get("rewrite_aliases"), dict) else {}
+    aliases: dict[str, str] = {}
+    for raw_hex, alias in raw_aliases.items():
+        if not isinstance(raw_hex, str) or not isinstance(alias, str):
+            continue
+        normalized_hex = raw_hex.strip().lower()
+        normalized_alias = alias.strip()
+        if normalized_hex and normalized_alias:
+            aliases[normalized_hex] = normalized_alias
+    return aliases
+
+
+def _build_design_token_rewrite_map(
+    *,
+    project_contract: dict[str, Any] | None,
+    allowed_hex: set[str],
+) -> dict[str, str]:
+    payload = project_contract if isinstance(project_contract, dict) else {}
+    design_contract = payload.get("design_contract") if isinstance(payload.get("design_contract"), dict) else {}
+    token_registry = design_contract.get("token_registry") if isinstance(design_contract.get("token_registry"), dict) else {}
+    colors = token_registry.get("colors") if isinstance(token_registry.get("colors"), dict) else {}
+    alias_map = _coerce_rewrite_aliases(project_contract)
+
+    rewrite_map: dict[str, str] = {}
+    for raw_hex, alias in alias_map.items():
+        alias_value = colors.get(alias)
+        if isinstance(alias_value, str) and alias_value.strip():
+            normalized = alias_value.strip().lower()
+            if normalized in allowed_hex:
+                rewrite_map[raw_hex] = normalized
+    return rewrite_map
+
+
+def _normalize_frontend_design_tokens(
+    *,
+    content: str,
+    allowed_hex: set[str],
+    rewrite_map: dict[str, str],
+) -> tuple[str, list[tuple[str, str]]]:
+    replacements: list[tuple[str, str]] = []
+    if not isinstance(content, str) or not content:
+        return content, replacements
+
+    def _replace(match: re.Match[str]) -> str:
+        raw_hex = match.group(0)
+        lowered = raw_hex.lower()
+        if lowered in allowed_hex:
+            return raw_hex
+        target = rewrite_map.get(lowered)
+        if not target:
+            return raw_hex
+        replacements.append((raw_hex, target))
+        return target
+
+    normalized = _HEX_COLOR_RE.sub(_replace, content)
+    return normalized, replacements
+
+
+def _is_bootstrap_or_genesis_scope(work_item: WorkItem) -> bool:
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    task_source = str(payload.get("task_source") or "").strip().lower()
+    repository_state = str(payload.get("repository_state") or "").strip().upper()
+    recovery_reason = str(payload.get("recovery_reason") or "").strip().lower()
+    return (
+        task_source == "genesis"
+        or task_source == "genesis_setup"
+        or task_source.startswith("genesis.")
+        or repository_state in {"GENESIS", "EARLY_BUILD"}
+        or recovery_reason == "bootstrap_mode_retry"
+    )
+
+
+def _allow_adjacent_scope_expansion(
+    *,
+    work_item: WorkItem,
+    extra_files: list[str],
+) -> bool:
+    if not extra_files:
+        return False
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    repository_state = str(payload.get("repository_state") or "").strip().upper()
+    if repository_state not in {"GENESIS", "EARLY_BUILD"} and not _is_bootstrap_or_genesis_scope(work_item):
+        return False
+    if work_item.type not in {"FIX_TEST_FAILURE", "WRITE_TESTS", "CODE_BACKEND"}:
+        return False
+    normalized = {Path(path).name.strip() for path in extra_files if isinstance(path, str) and path.strip()}
+    return bool(normalized) and normalized.issubset(ADJACENT_REPAIR_FILES)
 
 
 def _fix_test_failure_writable_scope(
@@ -356,11 +550,23 @@ class CodexExecutor(TaskExecutor):
     def _patch_ratio_for(self, work_item: WorkItem) -> float:
         payload = work_item.payload or {}
         ratio = self.max_patch_ratio_default
+        repository_state = str(payload.get("repository_state") or "").strip().upper()
+        recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
         if "PLAN" in work_item.type:
             ratio = 0.6
         if "FIX" in work_item.type:
             ratio = 0.25
         if work_item.type == "WRITE_TESTS":
+            return float("inf")
+        if (
+            work_item.type == "CODE_BACKEND"
+            and (
+                repository_state in {"GENESIS", "EARLY_BUILD"}
+                or recovery_strategy == "write_file_preferred"
+            )
+        ):
+            # Early lifecycle backend scaffolding can legitimately replace most of
+            # a tiny bootstrap file; rely on file-count/scope governance instead.
             return float("inf")
         if _is_static_frontend_scope(payload):
             # Static frontend tasks often replace most of a tiny document. Keep the
@@ -421,6 +627,11 @@ class CodexExecutor(TaskExecutor):
             recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
             if work_item.type == "CODE_FRONTEND" and recovery_strategy == "write_file_preferred":
                 return "write_file", ["apply_patch"], ["recovery_strategy_write_file_preferred"], 0.9, 0.9, execution_zone
+            if work_item.type == "CODE_BACKEND" and recovery_strategy == "write_file_preferred":
+                return "write_file", ["apply_patch"], ["recovery_strategy_write_file_preferred"], 0.85, 0.9, execution_zone
+            repository_state = str(payload.get("repository_state") or "").strip().upper()
+            if work_item.type == "CODE_BACKEND" and repository_state in {"GENESIS", "EARLY_BUILD"}:
+                return "write_file", ["apply_patch"], ["repository_state_write_file_preferred"], 0.7, 0.88, execution_zone
         static_frontend_scope = work_item.type == "CODE_FRONTEND" and _is_static_frontend_scope(payload)
         target_files = _target_files_from_payload(payload)
         frontend_candidates = [path for path in dict.fromkeys(target_files + allowed_files) if Path(path).suffix.lower() in {".html", ".css", ".js", ".mjs", ".cjs"}]
@@ -648,6 +859,7 @@ class CodexExecutor(TaskExecutor):
             context_bundle["meta"]["architecture_profile"] = context.architecture_profile
         if isinstance(context.project_contract, dict):
             context_bundle["meta"]["project_contract"] = context.project_contract
+            context_bundle["meta"]["design_context_packet"] = _design_context_packet(context.project_contract)
         if contract is not None:
             context_bundle["meta"]["execution_contract"] = contract.to_dict()
         if isinstance(context.plan_snapshot, dict):
@@ -1042,16 +1254,23 @@ class CodexExecutor(TaskExecutor):
         stage_scope_repair_attempted = False
         project_contract_repair_attempted = False
         while True:
+            design_violation_records = self._design_validation_records(
+                work_item=work_item,
+                actions=plan.actions,
+                project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
+            )
+            design_violations = [record["message"] for record in design_violation_records]
             project_contract_check = evaluate_project_contract_precheck(
                 actions=plan.actions,
                 project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
             )
+            merged_project_violations = [*project_contract_check.violations, *design_violations]
             if (
-                project_contract_check.violations
+                merged_project_violations
                 and not project_contract_repair_attempted
                 and self._is_project_contract_repair_candidate(
                     work_item=work_item,
-                    violations=project_contract_check.violations,
+                    violations=merged_project_violations,
                 )
             ):
                 project_contract_repair_attempted = True
@@ -1063,7 +1282,7 @@ class CodexExecutor(TaskExecutor):
                             prepared=prepared,
                             user_prompt=user_prompt,
                             allowed_files=allowed_files,
-                            violations=project_contract_check.violations,
+                            violations=merged_project_violations,
                             work_item=work_item,
                             contract=contract,
                             enforcement_mode=project_contract_check.mode,
@@ -1134,6 +1353,36 @@ class CodexExecutor(TaskExecutor):
                 contract=contract,
                 project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
             )
+            extra_scope_files = [path for path in patch_guard.touched_files if path not in patch_guard.allowed_files]
+            if _allow_adjacent_scope_expansion(work_item=work_item, extra_files=extra_scope_files):
+                expanded_scope = list(dict.fromkeys(patch_guard.allowed_files + extra_scope_files))
+                allowed_files = expanded_scope
+                if contract is not None:
+                    contract.allowed_files = list(expanded_scope)
+                patch_guard = evaluate_patch_guard(
+                    actions=plan.actions,
+                    allowed_files=expanded_scope,
+                    file_budget=int(edit_budget["file_budget"]),
+                    hard_file_budget=int(edit_budget["hard_file_budget"]),
+                    contract=contract,
+                    project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
+                )
+                await record_event(
+                    context.session,
+                    project_id=work_item.project_id,
+                    run_id=work_item.run_id,
+                    work_item_id=work_item.id,
+                    event_type="RUN_SCOPE_EXPANDED",
+                    actor_type="SYSTEM",
+                    tenant_id=work_item.tenant_id,
+                    payload={
+                        "work_item_id": str(work_item.id),
+                        "reason": "adjacent_repair_scope_expansion",
+                        "repository_state": str((work_item.payload or {}).get("repository_state") or ""),
+                        "added_files": extra_scope_files,
+                        "allowed_files_count": len(expanded_scope),
+                    },
+                )
             stage_violations = _stage_scope_violations(work_item, plan.actions, patch_guard.touched_files)
             stage_violations.extend(
                 self._frontend_writefile_violations(
@@ -1148,15 +1397,29 @@ class CodexExecutor(TaskExecutor):
                     actions=plan.actions,
                 )
             )
+            stage_violations.extend(design_violations)
             if stage_violations:
                 patch_guard.violations.extend(stage_violations)
+            if design_violation_records:
+                design_mode = _project_contract_enforcement_mode(
+                    context.project_contract if isinstance(context.project_contract, dict) else None
+                )
+                design_blocking = design_mode == "strict"
+                patch_guard.project_violation_records.extend(
+                    [{**record, "mode": design_mode, "blocking": design_blocking} for record in design_violation_records]
+                )
             verification = await self._load_patch_verification(work_item, context)
             verification = _verification_from_action_scope(verification, patch_guard.touched_files)
-            if verification and verification.requires_confirmation and has_mutating_actions(plan.actions):
+            repository_state = str(((work_item.payload or {}) if isinstance(work_item.payload, dict) else {}).get("repository_state") or "")
+            if _should_block_for_operator_confirmation(
+                verification,
+                plan.actions,
+                repository_state=repository_state,
+            ):
                 await self._job_manager.fail_job(
                     prepared.job_id,
                     reason="human_review_required",
-                    next_action="Confirm the patch plan before allowing mutating actions.",
+                    next_action=_operator_confirmation_next_action(verification),
                     error_kind="human_review_required",
                     input_tokens=usage_input_tokens,
                     output_tokens=usage_output_tokens,
@@ -1265,7 +1528,10 @@ class CodexExecutor(TaskExecutor):
                     input_tokens=usage_input_tokens,
                     output_tokens=usage_output_tokens,
                     actual_cost_cents=usage_cost_cents,
-                    details={"violations": patch_guard.violations},
+                    details={
+                        "violations": patch_guard.violations,
+                        "design_violation_records": design_violation_records,
+                    },
                 )
                 return {
                     "status": "FAILED",
@@ -1280,8 +1546,9 @@ class CodexExecutor(TaskExecutor):
                         "project_warnings": patch_guard.project_warnings,
                         "project_enforcement_mode": patch_guard.project_enforcement_mode,
                         "project_violation_records": patch_guard.project_violation_records,
+                        "design_violation_records": design_violation_records,
                     },
-                    "warnings": ["patch_guard_violation"],
+                    "warnings": ["patch_guard_violation", *([] if not design_violation_records else ["design_contract_violation"])],
                 }
 
             total_written = 0
@@ -2071,6 +2338,8 @@ class CodexExecutor(TaskExecutor):
                 )
                 for violation in violations
             )
+        if work_item.type == "CODE_BACKEND":
+            return any("CODE_BACKEND mutation_strategy violation" in violation for violation in violations)
         return False
 
     def _mutation_strategy_violations(
@@ -2080,19 +2349,24 @@ class CodexExecutor(TaskExecutor):
         selected_strategy: str,
         actions: list[Any],
     ) -> list[str]:
-        if work_item.type != "CODE_FRONTEND":
+        if work_item.type not in {"CODE_FRONTEND", "CODE_BACKEND"}:
             return []
-        # Treat strategy as a preference signal for CODE_FRONTEND. A plan can still
-        # be valid when it emits one coherent mutating strategy that differs from
-        # the selected preference. Reject only conflicting mixed mutation output.
+        # Frontend: strategy is a preference signal; only reject mixed mutation output.
+        # Backend: write_file_preferred recovery is a hard override for convergence.
         mutating_types = {
             getattr(action, "type", None)
             for action in actions
             if getattr(action, "type", None) in {"write_file", "apply_patch"}
         }
+        if work_item.type == "CODE_BACKEND":
+            recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
+            if recovery_strategy == "write_file_preferred" and "apply_patch" in mutating_types:
+                return [
+                    "CODE_BACKEND mutation_strategy violation: recovery_strategy_write_file_preferred requires write_file output."
+                ]
         if len(mutating_types) > 1:
             return [
-                "CODE_FRONTEND mutation_strategy violation: plan emitted mixed mutating action types (write_file and apply_patch)."
+                f"{work_item.type} mutation_strategy violation: plan emitted mixed mutating action types (write_file and apply_patch)."
             ]
         return []
 
@@ -2114,6 +2388,154 @@ class CodexExecutor(TaskExecutor):
                     "Use minimal apply_patch hunks instead of full-file rewrites."
                 )
         return violations
+
+    def _extract_added_patch_content(self, patch: str) -> str:
+        added_lines: list[str] = []
+        for line in patch.splitlines():
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if line.startswith("+"):
+                added_lines.append(line[1:])
+        return "\n".join(added_lines)
+
+    def _design_validation_violations(
+        self,
+        *,
+        work_item: WorkItem,
+        actions: list[Any],
+        project_contract: dict[str, Any] | None,
+    ) -> list[str]:
+        return [record["message"] for record in self._design_validation_records(
+            work_item=work_item,
+            actions=actions,
+            project_contract=project_contract,
+        )]
+
+    def _design_validation_records(
+        self,
+        *,
+        work_item: WorkItem,
+        actions: list[Any],
+        project_contract: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if work_item.type != "CODE_FRONTEND" or not isinstance(project_contract, dict):
+            return []
+        design_packet = _design_context_packet(project_contract)
+        if not design_packet:
+            return []
+        enforcement = (
+            project_contract.get("enforcement") if isinstance(project_contract.get("enforcement"), dict) else {}
+        )
+        enforce_inline = bool(enforcement.get("disallow_inline_styles"))
+        enforce_tokens = bool(enforcement.get("enforce_color_tokens"))
+        allowed_components = {
+            str(name).strip()
+            for name in design_packet.get("allowed_components", [])
+            if isinstance(name, str) and str(name).strip()
+        }
+        if not enforce_inline and not enforce_tokens and not allowed_components:
+            return []
+
+        allowed_hex = _flatten_token_colors(
+            design_packet.get("token_registry") if isinstance(design_packet.get("token_registry"), dict) else {}
+        )
+        enforcement_allowed_hex = enforcement.get("allowed_hex_values") if isinstance(enforcement.get("allowed_hex_values"), list) else []
+        for value in enforcement_allowed_hex:
+            if isinstance(value, str) and value.strip():
+                allowed_hex.add(value.strip().lower())
+        rewrite_map = _build_design_token_rewrite_map(project_contract=project_contract, allowed_hex=allowed_hex)
+        bootstrap_mode = _is_bootstrap_or_genesis_scope(work_item)
+        recovery_strategy = str(((work_item.payload or {}) if isinstance(work_item.payload, dict) else {}).get("recovery_strategy") or "").strip().lower()
+        records: list[dict[str, Any]] = []
+        for action in actions:
+            action_type = getattr(action, "type", None)
+            path = getattr(action, "path", None) or "unknown"
+            content = ""
+            if action_type == "write_file":
+                raw = getattr(action, "content", None)
+                if isinstance(raw, str):
+                    content = raw
+            elif action_type == "apply_patch":
+                patch = getattr(action, "patch", None)
+                if isinstance(patch, str):
+                    content = self._extract_added_patch_content(patch)
+            if not content:
+                continue
+            normalized_content, token_rewrites = _normalize_frontend_design_tokens(
+                content=content,
+                allowed_hex=allowed_hex,
+                rewrite_map=rewrite_map,
+            )
+            if token_rewrites:
+                if action_type == "write_file":
+                    setattr(action, "content", normalized_content)
+                    content = normalized_content
+                elif action_type == "apply_patch":
+                    original_patch = getattr(action, "patch", None)
+                    if isinstance(original_patch, str):
+                        rewritten_patch = original_patch
+                        for source_hex, target_hex in token_rewrites:
+                            rewritten_patch = rewritten_patch.replace(source_hex, target_hex)
+                            rewritten_patch = rewritten_patch.replace(source_hex.lower(), target_hex)
+                            rewritten_patch = rewritten_patch.replace(source_hex.upper(), target_hex.upper())
+                        setattr(action, "patch", rewritten_patch)
+                        content = self._extract_added_patch_content(rewritten_patch)
+            if enforce_inline and _STYLE_ATTR_RE.search(content):
+                records.append(
+                    {
+                        "type": "design_contract_violation",
+                        "rule": "disallow_inline_styles",
+                        "file": path,
+                        "value": None,
+                        "message": (
+                            f"Design contract violation in {path}: inline style attributes are disallowed. "
+                            "Use tokenized classes."
+                        ),
+                    }
+                )
+            if enforce_tokens:
+                for raw_hex in _HEX_COLOR_RE.findall(content):
+                    lowered = raw_hex.lower()
+                    if bootstrap_mode and recovery_strategy == "design_token_auto_normalize":
+                        # In genesis/early bootstrap flows, treat first-pass color drift as
+                        # auto-normalized to avoid dead loops on deterministic scaffolding.
+                        allowed_hex.add(lowered)
+                        continue
+                    if lowered not in allowed_hex:
+                        records.append(
+                            {
+                                "type": "design_contract_violation",
+                                "rule": "enforce_color_tokens",
+                                "file": path,
+                                "value": raw_hex,
+                                "message": (
+                                    f"Design contract violation in {path}: ad-hoc hex color {raw_hex} is not in "
+                                    "token_registry.colors."
+                                ),
+                            }
+                        )
+                        break
+            if allowed_components:
+                discovered = {
+                    tag
+                    for tag in _COMPONENT_TAG_RE.findall(content)
+                    if isinstance(tag, str) and tag not in allowed_components
+                }
+                if discovered:
+                    sorted_discovered = sorted(discovered)
+                    records.append(
+                        {
+                            "type": "design_contract_violation",
+                            "rule": "allowed_components",
+                            "file": path,
+                            "value": ",".join(sorted_discovered[:6]),
+                            "message": (
+                                f"Design contract violation in {path}: unauthorized components "
+                                f"{', '.join(sorted_discovered[:6])}."
+                            ),
+                        }
+                    )
+        return records
 
     def _is_project_contract_repair_candidate(
         self,
@@ -2283,6 +2705,13 @@ class CodexExecutor(TaskExecutor):
                 guidance.append(
                     "If output size is large, avoid full-file write_file rewrites; emit minimal apply_patch hunks to keep JSON compact."
                 )
+        if work_item.type == "CODE_BACKEND":
+            recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
+            if recovery_strategy == "write_file_preferred":
+                guidance.append(
+                    "Recovery override: emit write_file for scoped backend file updates."
+                    " Do not emit apply_patch for this retry."
+                )
         if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
             guidance.append(
                 "This is a review stage. Return only note actions with concise findings or approval guidance."
@@ -2372,6 +2801,14 @@ class CodexExecutor(TaskExecutor):
                     " Emit write_file for the primary scoped file (index.html when present) with complete updated content."
                     " Keep scope bounded to allowed files."
                     " Do not embed data: URLs, base64 blobs, or encoded inline scripts."
+                )
+        if work_item.type == "CODE_BACKEND":
+            recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
+            if recovery_strategy == "write_file_preferred":
+                repair_prompt += (
+                    "\nFor this CODE_BACKEND recovery retry, avoid apply_patch."
+                    " Emit write_file for the primary scoped backend file with complete updated content."
+                    " Keep scope bounded to allowed files."
                 )
         current_prompt = repair_prompt
         current_max_tokens = self.settings.codex_max_tokens
@@ -2776,6 +3213,7 @@ class CodexExecutor(TaskExecutor):
         design_system = (
             project_contract.get("design_system") if isinstance(project_contract.get("design_system"), dict) else {}
         )
+        design_packet = _design_context_packet(project_contract) if project_contract else {}
         if isinstance(project_summary, dict):
             active_rules = [
                 item
@@ -2784,6 +3222,21 @@ class CodexExecutor(TaskExecutor):
             ]
             if active_rules:
                 base += " Project contract rules: " + ", ".join(active_rules[:4]) + "."
+        if design_packet:
+            base += (
+                " DESIGN_CONTEXT_PACKET: "
+                + json.dumps(
+                    {
+                        "experience_blueprint": design_packet.get("experience_blueprint"),
+                        "visual_tone": design_packet.get("visual_tone"),
+                        "layout_density": design_packet.get("layout_density"),
+                        "allowed_components": design_packet.get("allowed_components", [])[:8],
+                    },
+                    sort_keys=True,
+                )
+                + "."
+            )
+            base += " Frontend generation must obey this packet and compose from governed primitives only."
         brand_tokens = brand_kit.get("tokens") if isinstance(brand_kit.get("tokens"), dict) else {}
         token_names: list[str] = []
         if brand_tokens:
@@ -2964,6 +3417,11 @@ class CodexExecutor(TaskExecutor):
                 ]
                 if active_rules:
                     metadata["project_contract_rules"] = active_rules[:8]
+            design_packet = _design_context_packet(project_contract)
+            metadata["design_experience_blueprint"] = design_packet.get("experience_blueprint")
+            metadata["design_visual_tone"] = design_packet.get("visual_tone")
+            metadata["design_layout_density"] = design_packet.get("layout_density")
+            metadata["design_allowed_components"] = design_packet.get("allowed_components", [])[:12]
         if execution_contract is not None:
             metadata["validation_state"] = execution_contract.validation_state
             metadata["retry_state"] = execution_contract.retry_state

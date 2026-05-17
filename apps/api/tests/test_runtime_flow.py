@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
@@ -2080,6 +2080,105 @@ async def test_scheduler_replays_validation_after_successful_recovery(monkeypatc
 
 
 @pytest.mark.anyio
+async def test_scheduler_replay_validation_is_idempotent_per_recovery_source(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Validation replay idempotency project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        recovery_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="CODE_FRONTEND",
+            key="CODE_FRONTEND_RECOVERY_1",
+            status="DONE",
+            priority=10,
+            executor="codex",
+            payload={
+                "files": ["index.html"],
+                "recovery_action": "goal_recovery_retry",
+            },
+        )
+        session.add(recovery_item)
+        await session.flush()
+        recovery_item_id = recovery_item.id
+
+        for stage_type, stage_key, stage_executor in (
+            ("WRITE_TESTS", "WRITE_TESTS", "test"),
+            ("RUN_TESTS", "RUN_TESTS", "test"),
+            ("REVIEW_DIFF", "REVIEW_DIFF", "review"),
+            ("REVIEW_INTEGRATION", "REVIEW_INTEGRATION", "review"),
+        ):
+            session.add(
+                WorkItem(
+                    project_id=project.id,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                    type=stage_type,
+                    key=stage_key,
+                    status="CANCELED",
+                    priority=8,
+                    executor=stage_executor,
+                    payload={"files": ["index.html"]},
+                )
+            )
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        first_replays = (
+            await session.execute(
+                select(WorkItem).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.status == "QUEUED",
+                    WorkItem.key.like("%_REPLAY_%"),
+                )
+            )
+        ).scalars().all()
+        assert len(first_replays) == 4
+        for replay in first_replays:
+            replay.status = "DONE"
+            session.add(replay)
+        await session.commit()
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        replay_count = (
+            await session.execute(
+                select(func.count()).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.key.like("%_REPLAY_%"),
+                )
+            )
+        ).scalar_one()
+        assert replay_count == 4
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert isinstance(run.summary, dict)
+        replay_sources = run.summary.get("validation_replay_sources")
+        assert isinstance(replay_sources, list)
+        assert str(recovery_item_id) in replay_sources
+
+
+@pytest.mark.anyio
 async def test_scheduler_marks_linked_task_done_when_run_completes(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
@@ -2488,6 +2587,72 @@ async def test_scheduler_pauses_run_when_budget_is_exhausted(monkeypatch, runtim
         events = (
             await session.execute(
                 select(RunEvent).where(RunEvent.run_id == run_id, RunEvent.event_type == "RUN_BUDGET_PAUSED")
+            )
+        ).scalars().all()
+        assert events
+
+
+@pytest.mark.anyio
+async def test_scheduler_pauses_run_when_spend_hard_limit_reached(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_RUN_SPEND_HARD_LIMIT_CENTS", "5")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Spend hard-limit scheduler project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="RUNNING",
+            executor="codex",
+            summary={
+                "execution_contract": {
+                    "budget": {
+                        "used_cost_cents": 6.25,
+                    }
+                }
+            },
+        )
+        session.add(run)
+        await session.flush()
+
+        # Ensure the run has at least one work item so scheduler evaluates lifecycle paths.
+        session.add(
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="PLAN_DAG",
+                key="PLAN_DAG",
+                status="DONE",
+                priority=1,
+                executor="codex",
+                payload={},
+            )
+        )
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "PAUSED"
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("goal_state") == "NEEDS_HUMAN_INPUT"
+        assert isinstance(run.summary.get("spend_pause"), dict)
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id, RunEvent.event_type == "RUN_SPEND_PAUSED")
             )
         ).scalars().all()
         assert events

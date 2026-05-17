@@ -1080,12 +1080,27 @@
       </div>
     </el-dialog>
 
-    <el-dialog v-model="showTasksDialog" title="Tasks" width="640px">
+    <el-dialog
+      v-model="showTasksDialog"
+      title="Tasks"
+      :width="tasksDialogFullscreen ? '96vw' : '92vw'"
+      :top="tasksDialogFullscreen ? '2vh' : '4vh'"
+      :fullscreen="tasksDialogFullscreen"
+      class="tasks-dialog"
+      append-to-body
+      destroy-on-close
+    >
       <div class="mb-3 flex items-center justify-between gap-3">
         <div class="text-xs text-slate-500">
           Create tasks manually or from approved requirements. Use Run All to execute in deterministic order.
         </div>
         <div class="flex items-center gap-2">
+          <el-button size="small" plain @click="openTasksPage">
+            Open Full Page
+          </el-button>
+          <el-button size="small" plain @click="tasksDialogFullscreen = !tasksDialogFullscreen">
+            {{ tasksDialogFullscreen ? "Exit Fullscreen" : "Fullscreen" }}
+          </el-button>
           <el-button type="primary" size="small" plain @click="openCreateTaskDialog">
             Create Task
           </el-button>
@@ -1157,6 +1172,7 @@
         ref="tasksTableRef"
         :data="filteredTasks"
         size="small"
+        max-height="65vh"
         row-key="id"
         :reserve-selection="true"
         @selection-change="onTaskSelectionChange"
@@ -1794,6 +1810,7 @@ const runsLoading = ref(false);
 const runError = ref("");
 const runSelectedLoading = ref(false);
 const selectedTaskIds = ref<string[]>([]);
+const tasksDialogFullscreen = ref(false);
 const runUnblockLoading = ref<Record<string, boolean>>({});
 const runResumeLoading = ref<Record<string, boolean>>({});
 const attemptFilter = ref<"all" | "initial" | "retry" | "noop">("all");
@@ -2684,6 +2701,11 @@ async function submitCreateDocument() {
 async function openTasksDialog() {
   showTasksDialog.value = true;
   await loadTasks();
+}
+
+async function openTasksPage() {
+  if (!projectId.value) return;
+  await router.push(`/projects/${projectId.value}/tasks`);
 }
 
 async function loadTasks() {
@@ -4143,6 +4165,10 @@ onMounted(async () => {
   await loadWorkItems();
   await loadRunEvents();
   await hydrateGitHubInstallFromRoute();
+  if (String(route.name || "") === "project-tasks") {
+    tasksDialogFullscreen.value = true;
+    await openTasksDialog();
+  }
   syncOverviewPolling();
 });
 
@@ -4228,6 +4254,12 @@ watch(
 .project-actions-grid::-webkit-scrollbar-thumb {
   border-radius: 9999px;
   background: linear-gradient(180deg, rgba(100, 116, 139, 0.35), rgba(148, 163, 184, 0.5));
+}
+
+:deep(.tasks-dialog .el-dialog__body) {
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  padding-top: 0.5rem;
 }
 
 @media (max-width: 1024px) {

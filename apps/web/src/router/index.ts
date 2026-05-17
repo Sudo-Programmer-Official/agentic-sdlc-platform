@@ -46,6 +46,7 @@ const routes: RouteRecordRaw[] = [
   { path: "/__e2e__/smoke", name: "e2e-smoke", component: E2ESmokeHarness, meta: { layout: "minimal" } },
   { path: "/projects/:projectId/operator", name: "operator-dashboard", component: OperatorDashboard, meta: { requiresAuth: true } },
   { path: "/projects/:projectId", name: "project-overview", component: ProjectOverview, meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/tasks", name: "project-tasks", component: ProjectOverview, meta: { requiresAuth: true } },
   { path: "/projects/:projectId/environments", name: "project-environment-center", component: ProjectEnvironmentCenter, meta: { requiresAuth: true } },
   { path: "/projects/:projectId/requirements", name: "requirements", component: Requirements, meta: { requiresAuth: true } },
   { path: "/projects/:projectId/run", name: "mission-control", component: MissionControl, meta: { requiresAuth: true } },

@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-col gap-3 p-3 md:p-4 lg:flex-row lg:items-center lg:justify-between">
+  <div class="flex flex-col gap-3 p-3 md:p-4 xl:flex-row xl:items-center xl:justify-between">
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.28em]" style="color: var(--text-soft);">
         <span>{{ headerLabel }}</span>
@@ -74,8 +74,8 @@
       </div>
     </div>
 
-    <div class="flex w-full min-w-0 flex-col gap-3 lg:w-auto lg:flex-1 lg:flex-row lg:items-center lg:justify-end">
-      <label class="search-shell w-full lg:max-w-[24rem]">
+    <div class="flex w-full min-w-0 flex-col gap-3 xl:w-auto xl:flex-1 xl:flex-row xl:flex-wrap xl:items-center xl:justify-end">
+      <label class="search-shell w-full xl:max-w-[20rem]">
         <AppIcon name="search" />
         <input
           v-model="searchText"
@@ -87,7 +87,7 @@
 
       <el-select
         v-model="selectedWorkspace"
-        class="w-full sm:min-w-[220px] lg:w-[14rem]"
+        class="w-full sm:min-w-[220px] xl:w-[14rem]"
         placeholder="Workspace"
         filterable
         clearable
@@ -103,7 +103,7 @@
 
       <el-select
         v-model="selectedProject"
-        class="w-full sm:min-w-[220px] lg:w-[18rem]"
+        class="w-full sm:min-w-[220px] xl:w-[18rem]"
         placeholder="Switch project"
         filterable
         clearable

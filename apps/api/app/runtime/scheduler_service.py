@@ -26,6 +26,7 @@ STALL_EVENT_THROTTLE_SECONDS = 60
 STALL_RECOVERY_MAX_ATTEMPTS = 2
 ACTIVE_STALL_PAUSE_SECONDS = 600
 BUDGET_WARNING_EVENT_THROTTLE_SECONDS = 120
+SPEND_WARNING_EVENT_THROTTLE_SECONDS = 120
 MAX_IDENTICAL_TEST_FAILURES = 3
 AUTO_PHASE_MAX_FILES = 6
 AUTO_PHASE_DECOMPOSE_MIN_FILES = 7
@@ -736,6 +737,74 @@ async def _maybe_emit_budget_warning(session, run: Run) -> None:
     )
 
 
+async def _maybe_emit_run_spend_warning(session, run: Run) -> None:
+    summary = dict(run.summary or {})
+    contract = summary.get("execution_contract") if isinstance(summary.get("execution_contract"), dict) else {}
+    budget = contract.get("budget") if isinstance(contract.get("budget"), dict) else {}
+    used_cost_cents = float(budget.get("used_cost_cents") or 0.0)
+    soft_limit = max(0.0, float(get_settings().runtime_run_spend_soft_limit_cents))
+    if soft_limit <= 0.0 or used_cost_cents < soft_limit:
+        return
+    now_ts = datetime.now(timezone.utc)
+    latest_warning_ts = await _latest_event_ts(session, run, "RUN_SPEND_WARNING")
+    if latest_warning_ts is not None:
+        if latest_warning_ts.tzinfo is None:
+            latest_warning_ts = latest_warning_ts.replace(tzinfo=timezone.utc)
+        if (now_ts - latest_warning_ts).total_seconds() < SPEND_WARNING_EVENT_THROTTLE_SECONDS:
+            return
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_SPEND_WARNING",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "used_cost_cents": round(used_cost_cents, 4),
+            "soft_limit_cents": soft_limit,
+        },
+    )
+
+
+async def _pause_run_for_spend_guard(session, run: Run) -> bool:
+    from app.services.state_guard import update_run_status
+
+    summary = dict(run.summary or {})
+    contract = summary.get("execution_contract") if isinstance(summary.get("execution_contract"), dict) else {}
+    budget = contract.get("budget") if isinstance(contract.get("budget"), dict) else {}
+    used_cost_cents = float(budget.get("used_cost_cents") or 0.0)
+    hard_limit = max(0.0, float(get_settings().runtime_run_spend_hard_limit_cents))
+    if hard_limit <= 0.0 or used_cost_cents < hard_limit:
+        return False
+    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+    if not ok:
+        return False
+    summary["goal_state"] = "NEEDS_HUMAN_INPUT"
+    summary["spend_pause"] = {
+        "reason": "run_spend_hard_limit_reached",
+        "paused_at": datetime.now(timezone.utc).isoformat(),
+        "used_cost_cents": round(used_cost_cents, 4),
+        "hard_limit_cents": hard_limit,
+    }
+    run.summary = summary
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_SPEND_PAUSED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "reason": "run_spend_hard_limit_reached",
+            "used_cost_cents": round(used_cost_cents, 4),
+            "hard_limit_cents": hard_limit,
+        },
+        message="Paused run: hard run-spend limit reached.",
+    )
+    return True
+
+
 async def _pause_run_for_budget(session, run: Run, *, failed_items: list[WorkItem]) -> bool:
     from app.services.state_guard import update_run_status
 
@@ -1087,6 +1156,22 @@ async def _requeue_validation_after_recovery(session, run: Run) -> bool:
     if latest_recovery_code is None:
         return False
 
+    summary = dict(run.summary or {})
+    replayed_sources = summary.get("validation_replay_sources")
+    if not isinstance(replayed_sources, list):
+        replayed_sources = []
+    replayed_source_ids = {
+        str(source_id).strip()
+        for source_id in replayed_sources
+        if str(source_id).strip()
+    }
+    latest_recovery_id = str(latest_recovery_code.id)
+    if latest_recovery_id in replayed_source_ids:
+        return False
+    replay_limit = max(0, int(get_settings().runtime_validation_replay_max_per_run))
+    if replay_limit > 0 and len(replayed_source_ids) >= replay_limit:
+        return False
+
     predecessor_id: uuid.UUID | None = latest_recovery_code.id
     created: list[WorkItem] = []
     for item_type in validation_types:
@@ -1139,13 +1224,14 @@ async def _requeue_validation_after_recovery(session, run: Run) -> bool:
     if not created:
         return False
 
-    summary = dict(run.summary or {})
     summary["validation_replay"] = {
         "reason": "recovery_completed_before_validation",
-        "source_work_item_id": str(latest_recovery_code.id),
+        "source_work_item_id": latest_recovery_id,
         "created_work_item_ids": [str(item.id) for item in created],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    replayed_source_ids.add(latest_recovery_id)
+    summary["validation_replay_sources"] = sorted(replayed_source_ids)
     run.summary = summary
     session.add(run)
     await record_event(
@@ -1239,6 +1325,9 @@ async def tick(session):
             if is_blocking_failure(item)
         )
         await _maybe_emit_budget_warning(session, run)
+        await _maybe_emit_run_spend_warning(session, run)
+        if await _pause_run_for_spend_guard(session, run):
+            continue
         recovery_pending = await has_pending_recovery_work(session, run.id)
         if recovery_pending:
             await sync_run_recovery_latch(session, run.id)

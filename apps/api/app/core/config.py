@@ -141,6 +141,9 @@ class Settings(BaseSettings):
     runtime_never_fail_runs: bool = False
     runtime_goal_orchestration_enabled: bool = False
     runtime_goal_max_recovery_cycles: int = 6
+    runtime_validation_replay_max_per_run: int = 1
+    runtime_run_spend_soft_limit_cents: float = 200.0
+    runtime_run_spend_hard_limit_cents: float = 500.0
     runtime_recovery_max_attempts_per_work_item: int = 4
     runtime_recovery_max_attempts_per_failure_type: int = 6
     runtime_recovery_max_attempts_per_run: int = 24

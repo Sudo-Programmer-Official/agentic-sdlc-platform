@@ -1307,6 +1307,90 @@ async def test_external_scheduler_terminalizes_stalled_run_after_90_seconds_with
 
 
 @pytest.mark.anyio
+async def test_external_scheduler_degrades_stalled_run_when_never_fail_enabled(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    monkeypatch.setattr(scheduler_module, "STALL_TIMEOUT_SECONDS", 90)
+    monkeypatch.setattr(scheduler_module, "STALL_RECOVERY_MAX_ATTEMPTS", 1)
+
+    stale_anchor = datetime.now(timezone.utc) - timedelta(seconds=95)
+
+    async def _stale_progress_ts(_session, _run):
+        return stale_anchor
+
+    monkeypatch.setattr(scheduler_module, "_latest_progress_ts", _stale_progress_ts)
+
+    async with runtime_db() as session:
+        project = Project(name="Never fail stalled run terminalization project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        agent = Agent(
+            tenant_id=tenant_id,
+            name="runtime-worker",
+            kind="worker",
+            executors=["dummy"],
+            capabilities=[],
+            max_concurrency=1,
+            status="ACTIVE",
+            last_heartbeat_at=datetime.now(timezone.utc),
+        )
+        session.add(agent)
+        await session.flush()
+
+        queued_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="QUEUED",
+            priority=6,
+            executor="test",
+            depends_on_count=0,
+            required_capabilities=["test"],
+        )
+        session.add(queued_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+        assert run.finished_at is not None
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("degraded_completion") is True
+        assert run.summary.get("degraded_reason") == "stalled_no_progress"
+
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        assert any(event.event_type == "RUN_STALLED" for event in events)
+        assert any(event.event_type == "RUN_STALL_RECOVERY_ATTEMPT" for event in events)
+        assert any(
+            event.event_type == "RUN_DEGRADED" and (event.payload or {}).get("reason") == "stalled_no_progress"
+            for event in events
+        )
+
+
+@pytest.mark.anyio
 async def test_external_scheduler_does_not_mark_terminal_failure_as_stall(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("OPENAI_API_KEY", "")
@@ -1394,6 +1478,75 @@ async def test_external_scheduler_does_not_mark_terminal_failure_as_stall(monkey
         assert "RUN_STALLED" not in event_types
         assert "RUN_STALL_RECOVERY_ATTEMPT" not in event_types
         assert any(event.event_type == "RUN_FAILED" for event in events)
+
+
+@pytest.mark.anyio
+async def test_scheduler_normalizes_legacy_topology_capability_requirement(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Topology capability normalization project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        plan_dag = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG",
+            status="DONE",
+            priority=10,
+            executor="codex",
+            required_capabilities=["plan"],
+        )
+        topology = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_BACKEND_TOPOLOGY",
+            key="PLAN_BACKEND_TOPOLOGY",
+            status="QUEUED",
+            priority=9,
+            executor="codex",
+            required_capabilities=["plan", "capability_governance"],
+        )
+        session.add_all([plan_dag, topology])
+        await session.flush()
+        session.add(
+            WorkItemEdge(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                from_work_item_id=plan_dag.id,
+                to_work_item_id=topology.id,
+            )
+        )
+        await session.commit()
+        run_id = run.id
+        topology_id = topology.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        topology = await session.get(WorkItem, topology_id)
+        assert topology is not None
+        assert topology.required_capabilities == ["plan"]
+
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
+            )
+        ).scalars().all()
+        assert any(event.event_type == "WORK_ITEM_REQUIREMENTS_NORMALIZED" for event in events)
 
 
 @pytest.mark.anyio
@@ -2408,6 +2561,213 @@ async def test_scheduler_replay_validation_is_idempotent_per_recovery_source(mon
         replay_sources = run.summary.get("validation_replay_sources")
         assert isinstance(replay_sources, list)
         assert str(recovery_item_id) in replay_sources
+
+
+@pytest.mark.anyio
+async def test_scheduler_replays_execution_after_plan_recovery(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Execution replay after plan recovery project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        recovery_plan = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG_RECOVERY_1",
+            status="DONE",
+            priority=10,
+            executor="codex",
+            payload={"recovery_action": "goal_recovery_retry"},
+        )
+        session.add(recovery_plan)
+        await session.flush()
+        recovery_plan_id = recovery_plan.id
+
+        for stage_type, stage_key, stage_executor in (
+            ("PLAN_BACKEND_TOPOLOGY", "PLAN_BACKEND_TOPOLOGY", "codex"),
+            ("GENERATE_ROUTE", "GENERATE_ROUTE", "codex"),
+            ("GENERATE_SERVICE", "GENERATE_SERVICE", "codex"),
+            ("GENERATE_REPOSITORY", "GENERATE_REPOSITORY", "codex"),
+            ("GENERATE_CAPABILITY_BINDING", "GENERATE_CAPABILITY_BINDING", "codex"),
+            ("WRITE_TESTS", "WRITE_TESTS", "test"),
+            ("REVIEW_DIFF", "REVIEW_DIFF", "review"),
+            ("RUN_TESTS", "RUN_TESTS", "test"),
+            ("REVIEW_INTEGRATION", "REVIEW_INTEGRATION", "review"),
+        ):
+            session.add(
+                WorkItem(
+                    project_id=project.id,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                    type=stage_type,
+                    key=stage_key,
+                    status="CANCELED",
+                    priority=8,
+                    executor=stage_executor,
+                    payload={"files": ["app.py"]},
+                )
+            )
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        assert isinstance(run.summary, dict)
+        replay = run.summary.get("execution_replay")
+        assert isinstance(replay, dict)
+        assert replay.get("reason") == "plan_recovery_completed_before_execution"
+        assert replay.get("source_work_item_id") == str(recovery_plan_id)
+
+        replay_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id, WorkItem.status == "QUEUED").order_by(WorkItem.created_at.asc())
+            )
+        ).scalars().all()
+        replay_types = [item.type for item in replay_items]
+        assert replay_types == [
+            "PLAN_BACKEND_TOPOLOGY",
+            "GENERATE_ROUTE",
+            "GENERATE_SERVICE",
+            "GENERATE_REPOSITORY",
+            "GENERATE_CAPABILITY_BINDING",
+            "WRITE_TESTS",
+            "REVIEW_DIFF",
+            "RUN_TESTS",
+            "REVIEW_INTEGRATION",
+        ]
+        for item in replay_items:
+            assert item.payload.get("recovery_action") == "replay_execution_after_plan_recovery"
+            assert item.payload.get("recovery_source_id") == str(recovery_plan_id)
+
+        edges = (
+            await session.execute(
+                select(WorkItemEdge).where(WorkItemEdge.run_id == run_id)
+            )
+        ).scalars().all()
+        chained_pairs = {(str(edge.from_work_item_id), str(edge.to_work_item_id)) for edge in edges}
+        expected_first = replay_items[0]
+        assert (str(recovery_plan_id), str(expected_first.id)) in chained_pairs
+
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_EXECUTION_REPLAY_QUEUED" in event_types
+        assert "RUN_COMPLETED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_scheduler_replays_execution_after_backend_recovery(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Execution replay after backend recovery project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        recovery_backend = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="GENERATE_SERVICE",
+            key="GENERATE_SERVICE_RECOVERY_1",
+            status="DONE",
+            priority=10,
+            executor="codex",
+            payload={"recovery_action": "goal_recovery_retry"},
+        )
+        session.add(recovery_backend)
+        await session.flush()
+        recovery_backend_id = recovery_backend.id
+
+        for stage_type, stage_key, stage_executor in (
+            ("GENERATE_REPOSITORY", "GENERATE_REPOSITORY", "codex"),
+            ("GENERATE_CAPABILITY_BINDING", "GENERATE_CAPABILITY_BINDING", "codex"),
+            ("WRITE_TESTS", "WRITE_TESTS", "test"),
+            ("REVIEW_DIFF", "REVIEW_DIFF", "review"),
+            ("RUN_TESTS", "RUN_TESTS", "test"),
+            ("REVIEW_INTEGRATION", "REVIEW_INTEGRATION", "review"),
+        ):
+            session.add(
+                WorkItem(
+                    project_id=project.id,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                    type=stage_type,
+                    key=stage_key,
+                    status="CANCELED",
+                    priority=8,
+                    executor=stage_executor,
+                    payload={"files": ["app.py"]},
+                )
+            )
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        assert isinstance(run.summary, dict)
+        replay = run.summary.get("execution_replay")
+        assert isinstance(replay, dict)
+        assert replay.get("reason") == "backend_recovery_completed_with_canceled_descendants"
+        assert replay.get("source_work_item_id") == str(recovery_backend_id)
+
+        replay_items = (
+            await session.execute(
+                select(WorkItem).where(WorkItem.run_id == run_id, WorkItem.status == "QUEUED").order_by(WorkItem.created_at.asc())
+            )
+        ).scalars().all()
+        replay_types = [item.type for item in replay_items]
+        assert replay_types == [
+            "GENERATE_REPOSITORY",
+            "GENERATE_CAPABILITY_BINDING",
+            "WRITE_TESTS",
+            "REVIEW_DIFF",
+            "RUN_TESTS",
+            "REVIEW_INTEGRATION",
+        ]
+        for item in replay_items:
+            assert item.payload.get("recovery_action") == "replay_execution_after_backend_recovery"
+            assert item.payload.get("recovery_source_id") == str(recovery_backend_id)
+
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_EXECUTION_REPLAY_QUEUED" in event_types
+        assert "RUN_COMPLETED" not in event_types
 
 
 @pytest.mark.anyio

@@ -123,6 +123,8 @@ class Settings(BaseSettings):
     codex_frontend_retry_max_patch_lines: int = 3_500
     codex_frontend_retry_completion_boost_tokens: int = 3_200
     codex_frontend_retry_completion_cap_tokens: int = 6_000
+    codex_bypass_operator_confirmation_required: bool = False
+    codex_bypass_app_py_patch_ratio_limit: bool = False
     codex_redaction_enabled: bool = True
     codex_max_run_tokens: int = 400_000
     codex_max_run_cost_cents: float = 120.0

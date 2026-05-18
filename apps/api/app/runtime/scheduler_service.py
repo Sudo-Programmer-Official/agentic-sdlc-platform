@@ -24,6 +24,8 @@ RUN_PROGRESS_EVENT_TYPES = {"WORK_ITEM_CLAIMED", "WORK_ITEM_DONE", "WORK_ITEM_FA
 STALL_TIMEOUT_SECONDS = 90
 STALL_EVENT_THROTTLE_SECONDS = 60
 STALL_RECOVERY_MAX_ATTEMPTS = 2
+STALL_PAUSE_AUTO_RESUME_MAX_ATTEMPTS = 8
+STALL_PAUSE_AUTO_RESUME_COOLDOWN_SECONDS = 10
 ACTIVE_STALL_PAUSE_SECONDS = 600
 BUDGET_WARNING_EVENT_THROTTLE_SECONDS = 120
 SPEND_WARNING_EVENT_THROTTLE_SECONDS = 120
@@ -243,6 +245,101 @@ async def _latest_event_ts(session, run: Run, event_type: str) -> datetime | Non
     return await session.scalar(
         select(func.max(RunEvent.ts)).where(RunEvent.run_id == run.id, RunEvent.event_type == event_type)
     )
+
+
+async def _normalize_topology_planning_capability_requirements(session, run: Run) -> None:
+    queued_topology_items = (
+        await session.execute(
+            select(WorkItem).where(
+                WorkItem.run_id == run.id,
+                WorkItem.type == "PLAN_BACKEND_TOPOLOGY",
+                WorkItem.status == "QUEUED",
+            )
+        )
+    ).scalars().all()
+    if not queued_topology_items:
+        return
+    for item in queued_topology_items:
+        caps = list(item.required_capabilities or [])
+        if "capability_governance" not in caps:
+            continue
+        normalized = [cap for cap in caps if cap != "capability_governance"]
+        if "plan" not in normalized:
+            normalized.append("plan")
+        item.required_capabilities = normalized
+        session.add(item)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            work_item_id=item.id,
+            event_type="WORK_ITEM_REQUIREMENTS_NORMALIZED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            message="Normalized topology planning capability requirements for worker compatibility.",
+            payload={
+                "work_item_id": str(item.id),
+                "before": caps,
+                "after": normalized,
+                "reason": "legacy_capability_governance_requirement",
+            },
+        )
+
+
+async def _maybe_auto_resume_stall_paused_run(session, run: Run) -> bool:
+    from app.services.state_guard import update_run_status
+
+    settings = get_settings()
+    if not settings.runtime_never_fail_runs:
+        return False
+    if str(run.status or "").upper() != "PAUSED":
+        return False
+
+    summary = dict(run.summary or {})
+    recovery_pause = summary.get("recovery_pause") if isinstance(summary.get("recovery_pause"), dict) else {}
+    reason = str(recovery_pause.get("reason") or "").strip().lower()
+    if reason not in {"stalled_no_progress", "stalled_no_active_workers", "active_work_stalled_no_progress"}:
+        return False
+
+    now_ts = datetime.now(timezone.utc)
+    attempts = int(summary.get("stall_pause_auto_resume_attempts") or 0)
+    if attempts >= STALL_PAUSE_AUTO_RESUME_MAX_ATTEMPTS:
+        return False
+
+    updated_at = run.updated_at
+    if updated_at is not None and updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    if updated_at is not None:
+        elapsed = (now_ts - updated_at).total_seconds()
+        if elapsed < STALL_PAUSE_AUTO_RESUME_COOLDOWN_SECONDS:
+            return False
+
+    ok = await update_run_status(session, run.id, ["PAUSED"], "QUEUED", set_finished=False)
+    if not ok:
+        return False
+
+    summary["stall_pause_auto_resume_attempts"] = attempts + 1
+    summary["stall_pause_last_auto_resumed_at"] = now_ts.isoformat()
+    summary["goal_state"] = "ACTIVE"
+    run.summary = summary
+    run.finished_at = None
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_AUTO_RESUMED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        message="Auto-resumed paused run to continue downstream execution.",
+        payload={
+            "reason": reason,
+            "attempt": attempts + 1,
+            "max_attempts": STALL_PAUSE_AUTO_RESUME_MAX_ATTEMPTS,
+            "cooldown_seconds": STALL_PAUSE_AUTO_RESUME_COOLDOWN_SECONDS,
+        },
+    )
+    return True
 
 
 def _work_item_required_and_criticality(work_item: WorkItem) -> tuple[bool, str]:
@@ -1348,6 +1445,298 @@ async def _requeue_validation_after_recovery(session, run: Run) -> bool:
     return True
 
 
+async def _requeue_execution_after_plan_recovery(session, run: Run) -> bool:
+    work_items = (
+        await session.execute(
+            select(WorkItem)
+            .where(WorkItem.run_id == run.id)
+            .order_by(WorkItem.created_at.asc())
+        )
+    ).scalars().all()
+    if not work_items:
+        return False
+
+    by_type: dict[str, list[WorkItem]] = {}
+    for item in work_items:
+        by_type.setdefault(item.type, []).append(item)
+
+    replay_types = [
+        "PLAN_BACKEND_TOPOLOGY",
+        "GENERATE_ROUTE",
+        "GENERATE_SERVICE",
+        "GENERATE_REPOSITORY",
+        "GENERATE_CAPABILITY_BINDING",
+        "WRITE_TESTS",
+        "REVIEW_DIFF",
+        "RUN_TESTS",
+        "REVIEW_INTEGRATION",
+    ]
+
+    has_live_replay_types = any(
+        any(item.status in {"QUEUED", "RUNNING", "CLAIMED"} for item in by_type.get(item_type, []))
+        for item_type in replay_types
+    )
+    if has_live_replay_types:
+        return False
+    if not any(any(item.status == "CANCELED" for item in by_type.get(item_type, [])) for item_type in replay_types):
+        return False
+
+    latest_recovery_plan = next(
+        (
+            item
+            for item in reversed(work_items)
+            if item.type == "PLAN_DAG"
+            and item.status == "DONE"
+            and isinstance(item.payload, dict)
+            and str(item.payload.get("recovery_action") or "") == "goal_recovery_retry"
+        ),
+        None,
+    )
+    if latest_recovery_plan is None:
+        return False
+
+    summary = dict(run.summary or {})
+    replayed_sources = summary.get("execution_replay_sources")
+    if not isinstance(replayed_sources, list):
+        replayed_sources = []
+    replayed_source_ids = {
+        str(source_id).strip()
+        for source_id in replayed_sources
+        if str(source_id).strip()
+    }
+    latest_recovery_id = str(latest_recovery_plan.id)
+    if latest_recovery_id in replayed_source_ids:
+        return False
+
+    predecessor_id: uuid.UUID | None = latest_recovery_plan.id
+    created: list[WorkItem] = []
+    for item_type in replay_types:
+        template = next((item for item in reversed(by_type.get(item_type, [])) if item.status == "CANCELED"), None)
+        if template is None:
+            continue
+        payload = dict(template.payload or {})
+        payload["recovery_action"] = "replay_execution_after_plan_recovery"
+        payload["recovery_source_id"] = latest_recovery_id
+        replay = WorkItem(
+            project_id=run.project_id,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            type=template.type,
+            key=f"{template.key or template.type}_REPLAY_{uuid.uuid4().hex[:4]}",
+            status="QUEUED",
+            priority=max(template.priority, 1),
+            executor=template.executor,
+            attempt=0,
+            max_attempts=max(template.max_attempts, 1),
+            required_capabilities=list(template.required_capabilities or []),
+            payload=payload,
+            depends_on_count=1 if predecessor_id else 0,
+        )
+        session.add(replay)
+        await session.flush()
+        await link_run_to_work_item(session, replay)
+        if predecessor_id:
+            session.add(
+                WorkItemEdge(
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    from_work_item_id=predecessor_id,
+                    to_work_item_id=replay.id,
+                )
+            )
+        predecessor_id = replay.id
+        created.append(replay)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            work_item_id=replay.id,
+            event_type="WORK_ITEM_CREATED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            payload={
+                "work_item_id": str(replay.id),
+                "type": replay.type,
+                "reason": "replay_execution_after_plan_recovery",
+            },
+        )
+
+    if not created:
+        return False
+
+    summary["execution_replay"] = {
+        "reason": "plan_recovery_completed_before_execution",
+        "source_work_item_id": latest_recovery_id,
+        "created_work_item_ids": [str(item.id) for item in created],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    replayed_source_ids.add(latest_recovery_id)
+    summary["execution_replay_sources"] = sorted(replayed_source_ids)
+    run.summary = summary
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_EXECUTION_REPLAY_QUEUED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "reason": "plan_recovery_completed_before_execution",
+            "source_work_item_id": latest_recovery_id,
+            "created_work_item_ids": [str(item.id) for item in created],
+        },
+    )
+    return True
+
+
+async def _requeue_execution_after_backend_recovery(session, run: Run) -> bool:
+    work_items = (
+        await session.execute(
+            select(WorkItem)
+            .where(WorkItem.run_id == run.id)
+            .order_by(WorkItem.created_at.asc())
+        )
+    ).scalars().all()
+    if not work_items:
+        return False
+
+    by_type: dict[str, list[WorkItem]] = {}
+    for item in work_items:
+        by_type.setdefault(item.type, []).append(item)
+
+    backend_stages = [
+        "GENERATE_ROUTE",
+        "GENERATE_SERVICE",
+        "GENERATE_REPOSITORY",
+        "GENERATE_CAPABILITY_BINDING",
+    ]
+    validation_stages = ["WRITE_TESTS", "REVIEW_DIFF", "RUN_TESTS", "REVIEW_INTEGRATION"]
+
+    latest_backend_recovery = next(
+        (
+            item
+            for item in reversed(work_items)
+            if item.type in backend_stages
+            and item.status == "DONE"
+            and isinstance(item.payload, dict)
+            and str(item.payload.get("recovery_action") or "") in {
+                "goal_recovery_retry",
+                "replay_execution_after_plan_recovery",
+                "replay_execution_after_backend_recovery",
+            }
+        ),
+        None,
+    )
+    if latest_backend_recovery is None:
+        return False
+
+    source_stage_index = backend_stages.index(latest_backend_recovery.type)
+    replay_types = backend_stages[source_stage_index + 1 :] + validation_stages
+    if not replay_types:
+        return False
+
+    has_live_replay_types = any(
+        any(item.status in {"QUEUED", "RUNNING", "CLAIMED"} for item in by_type.get(item_type, []))
+        for item_type in replay_types
+    )
+    if has_live_replay_types:
+        return False
+    if not any(any(item.status == "CANCELED" for item in by_type.get(item_type, [])) for item_type in replay_types):
+        return False
+
+    summary = dict(run.summary or {})
+    replayed_sources = summary.get("execution_replay_sources")
+    if not isinstance(replayed_sources, list):
+        replayed_sources = []
+    replayed_source_ids = {str(source_id).strip() for source_id in replayed_sources if str(source_id).strip()}
+    latest_recovery_id = str(latest_backend_recovery.id)
+    replay_marker = f"backend:{latest_recovery_id}"
+    if replay_marker in replayed_source_ids:
+        return False
+
+    predecessor_id: uuid.UUID | None = latest_backend_recovery.id
+    created: list[WorkItem] = []
+    for item_type in replay_types:
+        template = next((item for item in reversed(by_type.get(item_type, [])) if item.status == "CANCELED"), None)
+        if template is None:
+            continue
+        payload = dict(template.payload or {})
+        payload["recovery_action"] = "replay_execution_after_backend_recovery"
+        payload["recovery_source_id"] = latest_recovery_id
+        replay = WorkItem(
+            project_id=run.project_id,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            type=template.type,
+            key=f"{template.key or template.type}_REPLAY_{uuid.uuid4().hex[:4]}",
+            status="QUEUED",
+            priority=max(template.priority, 1),
+            executor=template.executor,
+            attempt=0,
+            max_attempts=max(template.max_attempts, 1),
+            required_capabilities=list(template.required_capabilities or []),
+            payload=payload,
+            depends_on_count=1 if predecessor_id else 0,
+        )
+        session.add(replay)
+        await session.flush()
+        await link_run_to_work_item(session, replay)
+        if predecessor_id:
+            session.add(
+                WorkItemEdge(
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    from_work_item_id=predecessor_id,
+                    to_work_item_id=replay.id,
+                )
+            )
+        predecessor_id = replay.id
+        created.append(replay)
+        await record_event(
+            session,
+            project_id=run.project_id,
+            run_id=run.id,
+            work_item_id=replay.id,
+            event_type="WORK_ITEM_CREATED",
+            actor_type="SYSTEM",
+            tenant_id=run.tenant_id,
+            payload={
+                "work_item_id": str(replay.id),
+                "type": replay.type,
+                "reason": "replay_execution_after_backend_recovery",
+            },
+        )
+
+    if not created:
+        return False
+
+    summary["execution_replay"] = {
+        "reason": "backend_recovery_completed_with_canceled_descendants",
+        "source_work_item_id": latest_recovery_id,
+        "created_work_item_ids": [str(item.id) for item in created],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    replayed_source_ids.add(replay_marker)
+    summary["execution_replay_sources"] = sorted(replayed_source_ids)
+    run.summary = summary
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_EXECUTION_REPLAY_QUEUED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        payload={
+            "reason": "backend_recovery_completed_with_canceled_descendants",
+            "source_work_item_id": latest_recovery_id,
+            "created_work_item_ids": [str(item.id) for item in created],
+        },
+    )
+    return True
+
+
 async def tick(session):
     settings = get_settings()
 
@@ -1357,11 +1746,16 @@ async def tick(session):
     # finalize runs
     runs = (
         await session.execute(
-            select(Run).where(Run.status.in_(["RUNNING", "QUEUED"]))
+            select(Run).where(Run.status.in_(["RUNNING", "QUEUED", "PAUSED"]))
         )
     ).scalars().all()
     from app.services.state_guard import update_run_status
     for run in runs:
+        if str(run.status or "").upper() == "PAUSED":
+            await _maybe_auto_resume_stall_paused_run(session, run)
+            continue
+        await _normalize_topology_planning_capability_requirements(session, run)
+
         run_summary = dict(run.summary or {})
         if "goal_state" not in run_summary:
             run_summary["goal_state"] = "ACTIVE"
@@ -1552,35 +1946,9 @@ async def tick(session):
                     if recovery_pending:
                         continue
                     if settings.runtime_never_fail_runs:
-                        ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+                        ok = await _finalize_run_degraded(session, run, reason="stalled_no_active_workers")
                         if not ok:
                             continue
-                        summary = dict(run.summary or {})
-                        summary["goal_state"] = "NEEDS_HUMAN_INPUT"
-                        summary["recovery_pause"] = {
-                            "reason": "stalled_no_active_workers",
-                            "paused_at": datetime.now(timezone.utc).isoformat(),
-                            "queued_count": int(queued),
-                            "runnable_queued_count": int(len(runnable_items)),
-                            "active_worker_count": 0,
-                        }
-                        run.summary = summary
-                        session.add(run)
-                        await record_event(
-                            session,
-                            project_id=run.project_id,
-                            run_id=run.id,
-                            event_type="RUN_STALL_PAUSED",
-                            actor_type="SYSTEM",
-                            tenant_id=run.tenant_id,
-                            message="Paused run: no active workers available; downstream work preserved for recovery.",
-                            payload={
-                                "reason": "stalled_no_active_workers",
-                                "queued_count": int(queued),
-                                "runnable_queued_count": int(len(runnable_items)),
-                                "active_worker_count": 0,
-                            },
-                        )
                     else:
                         await _cancel_terminally_blocked_items(session, run)
                         await _mark_run_failed(session, run, reason="stalled_no_active_workers")
@@ -1613,37 +1981,9 @@ async def tick(session):
                     continue
 
                 if settings.runtime_never_fail_runs:
-                    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+                    ok = await _finalize_run_degraded(session, run, reason="stalled_no_progress")
                     if not ok:
                         continue
-                    summary = dict(run.summary or {})
-                    summary["goal_state"] = "NEEDS_HUMAN_INPUT"
-                    summary["recovery_pause"] = {
-                        "reason": "stalled_no_progress",
-                        "paused_at": datetime.now(timezone.utc).isoformat(),
-                        "stalled_for_seconds": int(stalled_for),
-                        "stall_recovery_attempts": int(attempts),
-                        "queued_count": int(queued),
-                        "runnable_queued_count": int(len(runnable_after_reclaim)),
-                    }
-                    run.summary = summary
-                    session.add(run)
-                    await record_event(
-                        session,
-                        project_id=run.project_id,
-                        run_id=run.id,
-                        event_type="RUN_STALL_PAUSED",
-                        actor_type="SYSTEM",
-                        tenant_id=run.tenant_id,
-                        message="Paused run: stall recovery attempts exhausted; downstream work preserved for resume/recovery.",
-                        payload={
-                            "reason": "stalled_no_progress",
-                            "stalled_for_seconds": int(stalled_for),
-                            "stall_recovery_attempts": int(attempts),
-                            "queued_count": int(queued),
-                            "runnable_queued_count": int(len(runnable_after_reclaim)),
-                        },
-                    )
                 else:
                     await _cancel_terminally_blocked_items(session, run)
                     await _mark_run_failed(session, run, reason="stalled_no_progress")
@@ -1682,6 +2022,10 @@ async def tick(session):
                 if not ok:
                     continue
         elif failed_non_superseded == 0 and active == 0 and queued == 0:
+            if await _requeue_execution_after_plan_recovery(session, run):
+                continue
+            if await _requeue_execution_after_backend_recovery(session, run):
+                continue
             if await _requeue_validation_after_recovery(session, run):
                 continue
             locked = await session.scalar(

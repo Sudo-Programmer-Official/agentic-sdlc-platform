@@ -398,7 +398,8 @@ async def generate_template_dag(
     )
     default_caps = {
         "plan": ["plan"],
-        "plan_backend_topology": ["plan", "capability_governance"],
+        # Keep topology planning executable by standard worker profiles.
+        "plan_backend_topology": ["plan"],
         "code": ["code"],
         "test": ["test"],
         "test_run": ["test"],

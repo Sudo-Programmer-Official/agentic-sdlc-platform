@@ -544,6 +544,22 @@ async function confirmAndContinueFromDialog() {
   if (!operatorApprovalRunId.value) return;
   operatorConfirmLoading.value = true;
   try {
+    if (projectContext.projectId) {
+      try {
+        const runs = await listRuns(projectContext.projectId);
+        const current = Array.isArray(runs)
+          ? runs.find((run: any) => String(run?.id || "") === String(operatorApprovalRunId.value))
+          : null;
+        const status = String(current?.status || "").toUpperCase();
+        if (["COMPLETED", "FAILED", "CANCELED", "DONE"].includes(status)) {
+          operatorApprovalDialogVisible.value = false;
+          await checkOperatorApprovalState();
+          return;
+        }
+      } catch {
+        // Fall through to existing API paths when preflight status check is unavailable.
+      }
+    }
     await confirmAndContinueRun(operatorApprovalRunId.value);
     operatorApprovalDialogVisible.value = false;
     await checkOperatorApprovalState();

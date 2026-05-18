@@ -25,7 +25,6 @@ from app.runtime.schemas.executor_io import CodexPlan
 from app.runtime.llm.openai_client import OpenAIClient
 from app.runtime.tools.repo_tools import RepoTools
 from app.core.config import get_settings
-from app.runtime.tools.redaction import SECRET_PATTERNS
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
 from app.services.patch_verification import build_run_patch_plan_and_verification
 from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_context, compact_graph_context
@@ -137,6 +136,30 @@ _DEFAULT_LANDING_SECTIONS = [
     "CTASection",
     "FooterSection",
 ]
+_PROBABLE_SECRET_LEAK_PATTERNS = [
+    re.compile(r"-----BEGIN (?:RSA |DSA |EC )?PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"(?im)^\s*(OPENAI_API_KEY|DATABASE_URL|AWS_SECRET_ACCESS_KEY)\s*[:=]\s*['\"]?[^'\"\\s]{8,}"),
+    re.compile(r"(?im)^\s*authorization\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9._\\-]{8,}", re.IGNORECASE),
+    re.compile(r"(?i)(api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*['\"][^'\"]{8,}['\"]"),
+]
+
+
+def _contains_probable_secret_leak(text: str) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
+    return any(pattern.search(text) for pattern in _PROBABLE_SECRET_LEAK_PATTERNS)
+
+
+def _added_patch_payload(patch: str) -> str:
+    if not isinstance(patch, str) or not patch:
+        return ""
+    lines: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("+++"):
+            continue
+        if line.startswith("+"):
+            lines.append(line[1:])
+    return "\n".join(lines)
 
 
 def _verification_from_action_scope(
@@ -193,11 +216,23 @@ def _should_block_for_operator_confirmation(
     findings = list(verification.findings or [])
     finding_codes = {str(finding.code or "").strip().lower() for finding in findings}
     has_high_severity = any((finding.severity or "").lower() == "high" for finding in findings)
+    action_paths = {
+        str(action.path).strip()
+        for action in actions
+        if str(getattr(action, "path", "")).strip()
+    }
     # Enforce safe happy-path thresholds:
     # - <= 6 bounded files can proceed without manual confirmation.
     # - 7+ files require phased decomposition/review before mutating.
     file_count = max(0, int(verification.file_count or 0))
     if file_count > 6:
+        if (
+            normalized_state in {"GENESIS", "EARLY_BUILD"}
+            and action_paths
+            and len(action_paths) <= 2
+            and finding_codes.issubset({"missing_tests", "file_cap_exceeded", "scope_from_actions", ""})
+        ):
+            return False
         return True
     # In GENESIS/EARLY_BUILD, bounded medium-risk scaffolds with only missing-tests warning should continue.
     if (
@@ -412,6 +447,14 @@ def _is_bootstrap_or_genesis_scope(work_item: WorkItem) -> bool:
         or repository_state in {"GENESIS", "EARLY_BUILD"}
         or recovery_reason == "bootstrap_mode_retry"
     )
+
+
+def _should_block_on_human_review_for_work_item(work_item: WorkItem) -> bool:
+    if work_item.type in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        return False
+    if _is_bootstrap_or_genesis_scope(work_item):
+        return False
+    return True
 
 
 def _allow_adjacent_scope_expansion(
@@ -749,6 +792,25 @@ class CodexExecutor(TaskExecutor):
         except (TypeError, ValueError):
             prior_failures = 0
         return prior_failures > 0
+
+    def _should_bypass_patch_ratio_limit(self, rel_path: str) -> bool:
+        if not bool(getattr(self.settings, "codex_bypass_app_py_patch_ratio_limit", False)):
+            return False
+        return str(rel_path or "").strip().lower() == "app.py"
+
+    def _maybe_bypass_operator_confirmation(
+        self,
+        decision: MutationGovernanceDecision,
+    ) -> MutationGovernanceDecision:
+        if not bool(getattr(self.settings, "codex_bypass_operator_confirmation_required", False)):
+            return decision
+        if not decision.requires_confirmation:
+            return decision
+        return MutationGovernanceDecision(
+            requires_confirmation=False,
+            mutation_class=decision.mutation_class,
+            reason="operator_confirmation_bypassed_by_flag",
+        )
 
     def _max_patch_lines_for(self, work_item: WorkItem) -> int:
         default_limit = int(self.max_patch_lines)
@@ -1193,14 +1255,9 @@ class CodexExecutor(TaskExecutor):
             work_item=work_item,
             contract=contract,
         )
-        # Planning/review stages are analysis-only and should not be blocked by
-        # human-review gating that is intended for mutation-capable stages.
-        should_block_on_human_review = work_item.type not in {
-            "PLAN_DAG",
-            "PLAN_BACKEND_TOPOLOGY",
-            "REVIEW_DIFF",
-            "REVIEW_INTEGRATION",
-        }
+        # Planning/review stages and bootstrap/genesis scopes should not hard-stop
+        # on human-review gating; bootstrap flows must converge end-to-end.
+        should_block_on_human_review = _should_block_on_human_review_for_work_item(work_item)
         prepared = await self._job_manager.prepare_job(
             job_request,
             system_prompt=system_prompt,
@@ -1677,7 +1734,9 @@ class CodexExecutor(TaskExecutor):
                 target_files=target_files,
                 changed_files=patch_guard.touched_files,
                 operator_confirmation_required=operator_confirmation_required,
+                repository_state=repository_state,
             )
+            governance_decision = self._maybe_bypass_operator_confirmation(governance_decision)
             confirmation_granted = _has_operator_confirmation_grant(work_item)
             if confirmation_granted and governance_decision.requires_confirmation:
                 governance_decision = MutationGovernanceDecision(
@@ -1843,9 +1902,8 @@ class CodexExecutor(TaskExecutor):
                     if current_action.type == "write_file":
                         if not current_action.path or current_action.content is None:
                             raise ValueError("write_file requires path and content")
-                        for pat in SECRET_PATTERNS:
-                            if pat.lower() in current_action.content.lower():
-                                raise ValueError("secret_pattern_detected_in_output")
+                        if _contains_probable_secret_leak(current_action.content):
+                            raise ValueError("secret_pattern_detected_in_output")
                         b = current_action.content.encode()
                         total_written += len(b)
                         if total_written > self.settings.codex_max_write_bytes_total:
@@ -1860,10 +1918,8 @@ class CodexExecutor(TaskExecutor):
                     elif current_action.type == "apply_patch":
                         if not current_action.patch:
                             raise ValueError("apply_patch requires patch")
-                        lower_patch = current_action.patch.lower()
-                        for pat in SECRET_PATTERNS:
-                            if pat.lower() in lower_patch:
-                                raise ValueError("secret_pattern_detected_in_output")
+                        if _contains_probable_secret_leak(_added_patch_payload(current_action.patch)):
+                            raise ValueError("secret_pattern_detected_in_output")
                         invalid_headers = self._invalid_patch_hunk_headers(current_action.patch)
                         if invalid_headers:
                             raise ValueError(
@@ -1890,6 +1946,8 @@ class CodexExecutor(TaskExecutor):
                             raise ValueError("Patch changes too many lines")
                         per_file_changes = self._parse_patch_file_stats(current_action.patch)
                         for rel_path, stats in per_file_changes.items():
+                            if self._should_bypass_patch_ratio_limit(rel_path):
+                                continue
                             if self._patch_change_ratio(
                                 work_item,
                                 rel_path,

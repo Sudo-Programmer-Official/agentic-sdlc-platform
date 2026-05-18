@@ -12,7 +12,9 @@ from app.db.models import AIJobRun
 from app.db.models import Project, Run, WorkItem
 from app.runtime.context import RunContext
 from app.runtime.codex_executor import (
+    _added_patch_payload,
     _allow_adjacent_scope_expansion,
+    _contains_probable_secret_leak,
     _derive_backend_topology_plan,
     _build_design_token_rewrite_map,
     _derive_frontend_topology_plan,
@@ -22,6 +24,7 @@ from app.runtime.codex_executor import (
     _is_bootstrap_or_genesis_scope,
     _normalize_frontend_design_tokens,
     _operator_confirmation_next_action,
+    _should_block_on_human_review_for_work_item,
     _should_block_for_operator_confirmation,
     _is_static_frontend_scope,
     _stage_scope_violations,
@@ -32,6 +35,7 @@ from app.runtime.codex_executor import (
     CodexExecutor,
 )
 from app.runtime.execution_contract import build_execution_contract
+from app.runtime.mutation_governance import MutationGovernanceDecision
 from app.runtime.patch_guard import evaluate_patch_guard
 from app.runtime.frontend_topology import validate_frontend_topology
 from app.runtime.component_capability_protocol import resolve_component_capability
@@ -303,6 +307,65 @@ def test_operator_confirmation_gate_genesis_still_blocks_high_severity():
         ],
     )
     actions = [Action(type="write_file", path="apps/api/app/runtime/codex_executor.py", content="x")]
+    assert _should_block_for_operator_confirmation(
+        verification,
+        actions,
+        repository_state="GENESIS",
+    ) is True
+
+
+def test_operator_confirmation_gate_genesis_allows_bounded_actions_when_only_file_cap_exceeded():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="HIGH",
+        file_count=9,
+        findings=[
+            RunPatchVerificationFinding(
+                code="missing_tests",
+                severity="warning",
+                title="No nearby tests detected",
+                detail="No nearby tests detected.",
+                files=[],
+            ),
+            RunPatchVerificationFinding(
+                code="file_cap_exceeded",
+                severity="high",
+                title="Patch exceeds normal file budget",
+                detail="Planned scope exceeds normal autonomous cap.",
+                files=["app.py"],
+            ),
+        ],
+    )
+    actions = [Action(type="apply_patch", path="app.py", patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b\n")]
+    assert _should_block_for_operator_confirmation(
+        verification,
+        actions,
+        repository_state="GENESIS",
+    ) is False
+
+
+def test_operator_confirmation_gate_genesis_still_blocks_wide_actions_when_file_cap_exceeded():
+    verification = RunPatchVerificationSummary(
+        status="REQUIRES_CONFIRMATION",
+        requires_confirmation=True,
+        risk_level="HIGH",
+        file_count=9,
+        findings=[
+            RunPatchVerificationFinding(
+                code="file_cap_exceeded",
+                severity="high",
+                title="Patch exceeds normal file budget",
+                detail="Planned scope exceeds normal autonomous cap.",
+                files=["app.py"],
+            ),
+        ],
+    )
+    actions = [
+        Action(type="apply_patch", path="a.py", patch="--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n"),
+        Action(type="apply_patch", path="b.py", patch="--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-a\n+b\n"),
+        Action(type="apply_patch", path="c.py", patch="--- a/c.py\n+++ b/c.py\n@@ -1 +1 @@\n-a\n+b\n"),
+    ]
     assert _should_block_for_operator_confirmation(
         verification,
         actions,
@@ -1126,6 +1189,37 @@ def test_bootstrap_scope_detects_genesis_setup_and_early_build_state():
     assert _is_bootstrap_or_genesis_scope(SimpleNamespace(payload={"repository_state": "EARLY_BUILD"}))
 
 
+def test_human_review_blocking_skips_bootstrap_and_review_stages():
+    assert _should_block_on_human_review_for_work_item(
+        SimpleNamespace(type="GENERATE_ROUTE", payload={"task_source": "genesis"})
+    ) is False
+    assert _should_block_on_human_review_for_work_item(
+        SimpleNamespace(type="REVIEW_DIFF", payload={})
+    ) is False
+    assert _should_block_on_human_review_for_work_item(
+        SimpleNamespace(type="GENERATE_ROUTE", payload={"task_source": "feature"})
+    ) is True
+
+
+def test_secret_leak_detector_avoids_common_testing_terms_but_flags_real_secret_assignments():
+    assert _contains_probable_secret_leak("def test_token_refresh_flow():\n    assert True\n") is False
+    assert _contains_probable_secret_leak("OPENAI_API_KEY='sk-test-1234567890'") is True
+
+
+def test_added_patch_payload_only_scans_added_lines():
+    patch = (
+        "diff --git a/test_app.py b/test_app.py\n"
+        "--- a/test_app.py\n"
+        "+++ b/test_app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-OPENAI_API_KEY='sk-old-secret'\n"
+        "+assert token is not None\n"
+    )
+    payload = _added_patch_payload(patch)
+    assert "OPENAI_API_KEY" not in payload
+    assert "assert token is not None" in payload
+
+
 def test_adjacent_scope_expansion_allows_dependency_file_in_genesis_repair():
     work_item = SimpleNamespace(type="FIX_TEST_FAILURE", payload={"repository_state": "GENESIS"})
     assert _allow_adjacent_scope_expansion(work_item=work_item, extra_files=["requirements.txt"])
@@ -1339,6 +1433,32 @@ def test_patch_ratio_for_backend_genesis_scope_is_unbounded():
     )
 
     assert executor._patch_ratio_for(work_item) == float("inf")
+
+
+def test_patch_ratio_bypass_flag_applies_only_to_app_py():
+    executor = CodexExecutor()
+    executor.settings.codex_bypass_app_py_patch_ratio_limit = True
+    assert executor._should_bypass_patch_ratio_limit("app.py") is True
+    assert executor._should_bypass_patch_ratio_limit("apps/api/app/main.py") is False
+    assert executor._should_bypass_patch_ratio_limit("index.html") is False
+
+
+def test_operator_confirmation_bypass_flag_overrides_required_confirmation():
+    executor = CodexExecutor()
+    decision = MutationGovernanceDecision(
+        requires_confirmation=True,
+        mutation_class="STRUCTURAL_OR_BROAD_MUTATION",
+        reason="operator_confirmation_required_by_verifier",
+    )
+
+    executor.settings.codex_bypass_operator_confirmation_required = False
+    kept = executor._maybe_bypass_operator_confirmation(decision)
+    assert kept.requires_confirmation is True
+
+    executor.settings.codex_bypass_operator_confirmation_required = True
+    bypassed = executor._maybe_bypass_operator_confirmation(decision)
+    assert bypassed.requires_confirmation is False
+    assert bypassed.reason == "operator_confirmation_bypassed_by_flag"
 
 
 def test_patch_guard_uses_apply_patch_path_when_diff_headers_are_missing():

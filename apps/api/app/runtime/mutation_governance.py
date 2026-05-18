@@ -26,6 +26,7 @@ def evaluate_mutation_governance(
     target_files: list[str],
     changed_files: list[str],
     operator_confirmation_required: bool,
+    repository_state: str | None = None,
 ) -> MutationGovernanceDecision:
     if not operator_confirmation_required:
         return MutationGovernanceDecision(
@@ -51,6 +52,20 @@ def evaluate_mutation_governance(
             reason="safe_bootstrap_frontend_mutation",
         )
 
+    normalized_state = (repository_state or "").strip().upper()
+    safe_bootstrap_backend_mutation = (
+        normalized_state in {"GENESIS", "EARLY_BUILD"}
+        and work_item_type in {"GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING", "CODE_BACKEND"}
+        and 0 < len(scope_files) <= 2
+        and not contains_sensitive_paths(scope_files)
+    )
+    if safe_bootstrap_backend_mutation:
+        return MutationGovernanceDecision(
+            requires_confirmation=False,
+            mutation_class="SAFE_BACKEND_SCAFFOLD",
+            reason="safe_bootstrap_backend_mutation",
+        )
+
     if contains_sensitive_paths(scope_files):
         return MutationGovernanceDecision(
             requires_confirmation=True,
@@ -63,4 +78,3 @@ def evaluate_mutation_governance(
         mutation_class="STRUCTURAL_OR_BROAD_MUTATION",
         reason="operator_confirmation_required_by_verifier",
     )
-

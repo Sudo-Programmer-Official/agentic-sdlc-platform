@@ -409,3 +409,79 @@ async def test_llm_task_generator_uses_named_json_schema_response_format(monkeyp
             "schema": TASK_SCHEMA,
         },
     }
+
+
+@pytest.mark.anyio
+async def test_force_regenerate_requirements_graph_preserves_genesis_setup_tasks(db_session, monkeypatch):
+    session, tenant_id = db_session
+    project = Project(name="Force Preserve Genesis", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    document = Document(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        type="requirements_graph",
+        version=2,
+        title="Approved requirements graph v2",
+        body="{}",
+    )
+    session.add(document)
+    await session.flush()
+
+    genesis_task = Task(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        document_id=document.id,
+        generated_from_document_version=document.version,
+        title="initialize monorepo",
+        description="setup",
+        category="func",
+        status="PENDING",
+        source="ai",
+        source_type="genesis_setup",
+        source_node_id="genesis.foundation",
+    )
+    stale_feature_task = Task(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        document_id=document.id,
+        generated_from_document_version=document.version,
+        title="Build Hero Section",
+        description="stale",
+        category="func",
+        status="PENDING",
+        source="ai",
+        source_type="requirement_propagation",
+        source_node_id="req",
+    )
+    session.add_all([genesis_task, stale_feature_task])
+    await session.commit()
+
+    async def fake_generate(self, title, body, payload):
+        return (
+            [GeneratedTask(title="Fresh task", description="new", category="func", confidence=0.9)],
+            {"ai_model_name": "test-model", "ai_prompt_hash": "abc123"},
+        )
+
+    async def fake_health(project_id, session):
+        return {"graph_cycles_detected": False}
+
+    async def fake_lifecycle(project_id, session):
+        return {"health_index": 100}
+
+    monkeypatch.setattr(generation_module.LLMTaskGenerator, "generate", fake_generate)
+    monkeypatch.setattr(generation_module, "project_health", fake_health)
+    monkeypatch.setattr(generation_module, "lifecycle_score", fake_lifecycle)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            f"/api/v1/projects/{project.id}/documents/{document.id}/generate-tasks?force=true",
+            json={},
+        )
+
+    assert resp.status_code == 201
+    await session.refresh(genesis_task)
+    await session.refresh(stale_feature_task)
+    assert genesis_task.status == "PENDING"
+    assert stale_feature_task.status == "DEPRECATED"

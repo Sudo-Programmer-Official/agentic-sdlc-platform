@@ -21,6 +21,17 @@ _FRONTEND_SUFFIXES = {".html", ".css", ".scss", ".sass", ".less", ".vue", ".tsx"
 _FORBIDDEN_ARTIFACT_PATH_PARTS = {"__pycache__", ".pytest_cache"}
 _FORBIDDEN_ARTIFACT_SUFFIXES = {".pyc", ".pyo"}
 _MAX_PROJECT_VIOLATION_RECORDS = 64
+_INLINE_SECRET_RE = re.compile(r"(api[_-]?key|secret|token)\s*[:=]\s*[\"'][^\"']{8,}[\"']", re.IGNORECASE)
+_RAW_WEBHOOK_URL_RE = re.compile(r"https?://[^\"'\\s]*webhook[^\"'\\s]*", re.IGNORECASE)
+_DIRECT_PROVIDER_RE = re.compile(r"(supabase\\.co|firebaseio\\.com|clerk\\.com|cognito-idp\\.|hubspot\\.com)", re.IGNORECASE)
+_DIRECT_DB_CREDENTIAL_RE = re.compile(r"(postgres(ql)?://|mysql://|mongodb(\\+srv)?:\\/\\/)", re.IGNORECASE)
+_BACKEND_COMPOSITION_WORK_ITEM_TYPES = {
+    "CODE_BACKEND",
+    "GENERATE_ROUTE",
+    "GENERATE_SERVICE",
+    "GENERATE_REPOSITORY",
+    "GENERATE_CAPABILITY_BINDING",
+}
 
 
 def _normalize_path(path: str) -> str:
@@ -458,6 +469,8 @@ def evaluate_patch_guard(
     safe_paths: list[str] | None = None,
     contract: ExecutionContract | dict | None = None,
     project_contract: dict[str, Any] | None = None,
+    work_item_type: str | None = None,
+    work_item_payload: dict[str, Any] | None = None,
 ) -> PatchGuardDecision:
     resolved_contract = coerce_execution_contract(contract)
     resolved_allowed_files = (
@@ -532,6 +545,91 @@ def evaluate_patch_guard(
             violations.extend(contract_check.violations)
         else:
             project_warnings.extend(contract_check.violations)
+    added_lines_by_file = _extract_added_lines(actions)
+    capability_violations: list[str] = []
+    for path, lines in added_lines_by_file.items():
+        if _is_test_file(path):
+            continue
+        for line in lines:
+            if _DIRECT_PROVIDER_RE.search(line):
+                capability_violations.append(f"{path}: hardcoded provider URL/domain detected")
+                break
+            if _RAW_WEBHOOK_URL_RE.search(line):
+                capability_violations.append(f"{path}: raw webhook URL detected")
+                break
+            if _DIRECT_DB_CREDENTIAL_RE.search(line):
+                capability_violations.append(f"{path}: direct DB credential URI detected")
+                break
+            if _INLINE_SECRET_RE.search(line):
+                capability_violations.append(f"{path}: inline API secret/token detected")
+                break
+    if capability_violations:
+        violations.append(
+            "Capability governance violation: generated code must reference logical capabilities via runtime resolver. "
+            + "; ".join(list(dict.fromkeys(capability_violations))[:8])
+        )
+    item_type = str(work_item_type or "").strip().upper()
+    payload = work_item_payload if isinstance(work_item_payload, dict) else {}
+    topology = payload.get("backend_topology_plan") if isinstance(payload.get("backend_topology_plan"), dict) else None
+    if item_type in _BACKEND_COMPOSITION_WORK_ITEM_TYPES and isinstance(topology, dict):
+        planned_files = [
+            _normalize_path(path)
+            for path in (topology.get("planned_files") or [])
+            if isinstance(path, str) and path.strip()
+        ]
+        if planned_files:
+            unplanned = [path for path in touched_files if path not in planned_files]
+            if unplanned:
+                violations.append(
+                    f"{item_type} may only modify backend topology planned files: " + ", ".join(unplanned[:8])
+                )
+        route_files = {_normalize_path(path) for path in (topology.get("routes") or []) if isinstance(path, str) and path.strip()}
+        repo_files = {_normalize_path(path) for path in (topology.get("repositories") or []) if isinstance(path, str) and path.strip()}
+        service_files = {_normalize_path(path) for path in (topology.get("services") or []) if isinstance(path, str) and path.strip()}
+        capability_module_files = {_normalize_path(path) for path in (topology.get("capability_modules") or []) if isinstance(path, str) and path.strip()}
+        allowed_capabilities = {
+            str(item).strip().lower()
+            for item in (topology.get("allowed_capabilities") or [])
+            if isinstance(item, str) and item.strip()
+        }
+        lines_by_file = _extract_added_lines(actions)
+        route_db_hits: list[str] = []
+        layer_contract_hits: list[str] = []
+        disallowed_cap_hits: list[str] = []
+        for path, lines in lines_by_file.items():
+            lowered_lines = "\n".join(lines).lower()
+            if path in route_files:
+                if any(token in lowered_lines for token in ("session.execute(", "create_engine(", "select(", "insert(", "update(", "delete(")):
+                    route_db_hits.append(path)
+                if "resolve_capability(" in lowered_lines:
+                    layer_contract_hits.append(f"{path} route resolved capability directly")
+                if any(token in lowered_lines for token in ("retry", "backoff", "while true", "for attempt in")):
+                    layer_contract_hits.append(f"{path} route contains retry/orchestration logic")
+                if not any(token in lowered_lines for token in ("service.", "_service", "service_", "service(")):
+                    layer_contract_hits.append(f"{path} route missing service delegation")
+            if path in repo_files and any(token in lowered_lines for token in ("@router.", "apirouter(", "router =")):
+                layer_contract_hits.append(f"{path} repository contains route handler logic")
+            if path in repo_files and "resolve_capability(" in lowered_lines:
+                layer_contract_hits.append(f"{path} repository resolved capability directly")
+            if path in repo_files and any(token in lowered_lines for token in ("retry", "backoff", "while true", "for attempt in")):
+                layer_contract_hits.append(f"{path} repository contains business retry/orchestration logic")
+            if path in service_files and any(token in lowered_lines for token in ("@router.", "apirouter(", "router =")):
+                layer_contract_hits.append(f"{path} service contains route handler logic")
+            if path in capability_module_files and any(token in lowered_lines for token in ("@router.", "apirouter(", "router =")):
+                layer_contract_hits.append(f"{path} capability module contains route handler logic")
+            if path in capability_module_files and any(token in lowered_lines for token in ("session.execute(", "create_engine(", "select(", "insert(", "update(", "delete(")):
+                layer_contract_hits.append(f"{path} capability module contains direct DB logic")
+            for line in lines:
+                if "resolve_capability(" in line:
+                    for quoted in re.findall(r"[\"']([a-z0-9_\\-]+)[\"']", line.lower()):
+                        if allowed_capabilities and quoted not in allowed_capabilities:
+                            disallowed_cap_hits.append(f"{path}:{quoted}")
+        if route_db_hits:
+            violations.append("Routes must not include DB logic: " + ", ".join(route_db_hits[:8]))
+        if layer_contract_hits:
+            violations.append("Backend topology layer contract violated: " + "; ".join(list(dict.fromkeys(layer_contract_hits))[:8]))
+        if disallowed_cap_hits:
+            violations.append(f"{item_type} used capabilities outside planned allowlist: " + ", ".join(disallowed_cap_hits[:8]))
 
     return PatchGuardDecision(
         touched_files=touched_files,

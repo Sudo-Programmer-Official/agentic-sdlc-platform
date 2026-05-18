@@ -53,6 +53,18 @@ class RepoPreflightResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class RepoBootstrapResult:
+    ok: bool
+    created: bool
+    provider: str
+    repo_url: str
+    default_branch: str
+    commit_sha: str | None = None
+    message: str = ""
+    error: str | None = None
+
+
 @lru_cache(maxsize=1)
 def _lazy_github_adapter_from_env() -> GitHubAppAdapter | None:
     return build_github_adapter(InMemoryGitHubIntegrationStore())
@@ -672,3 +684,82 @@ def preflight_repo_access(
             git_binary=git_binary_path(),
             error=str(exc),
         )
+
+
+def bootstrap_repo_remote(
+    *,
+    provider: str,
+    repo_url: str,
+    default_branch: str,
+    repo_full_name: str | None = None,
+    installation_id: int | None = None,
+    auth_strategy: str | None = None,
+    readme_title: str | None = None,
+    commit_message: str = "chore(repo): bootstrap repository",
+) -> RepoBootstrapResult:
+    normalized_provider = _normalize_provider(provider)
+    base_branch = (default_branch or "main").strip() or "main"
+    access = resolve_repo_runtime_access(
+        provider=normalized_provider,
+        repo_url=repo_url,
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
+        auth_strategy=auth_strategy,
+    )
+    try:
+        existing_heads = _run_git(["ls-remote", "--heads", access.transport_url], git_config=access.git_config)
+    except Exception as exc:
+        return RepoBootstrapResult(
+            ok=False,
+            created=False,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            message="Could not inspect remote repository heads.",
+            error=str(exc),
+        )
+
+    if existing_heads.strip():
+        return RepoBootstrapResult(
+            ok=True,
+            created=False,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            message="Repository already has commits; bootstrap skipped.",
+        )
+
+    root = Path(tempfile.mkdtemp(prefix="agentic-sdlc-repo-bootstrap-"))
+    repo_dir = root / "repo"
+    try:
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        _run_git(["init", "-b", base_branch], cwd=repo_dir)
+        readme = repo_dir / "README.md"
+        title = (readme_title or "").strip() or "Project Bootstrap"
+        readme.write_text(f"# {title}\n", encoding="utf-8")
+        _run_git(["add", "README.md"], cwd=repo_dir)
+        _run_git(["commit", "-m", (commit_message or "chore(repo): bootstrap repository").strip()], cwd=repo_dir)
+        commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo_dir)
+        _run_git(["remote", "add", "origin", access.transport_url], cwd=repo_dir)
+        _run_git(["push", "-u", "origin", base_branch], cwd=repo_dir, git_config=access.git_config)
+        return RepoBootstrapResult(
+            ok=True,
+            created=True,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            commit_sha=commit_sha,
+            message="Repository initialized with README and first commit.",
+        )
+    except Exception as exc:
+        return RepoBootstrapResult(
+            ok=False,
+            created=False,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            message="Failed to bootstrap repository.",
+            error=str(exc),
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

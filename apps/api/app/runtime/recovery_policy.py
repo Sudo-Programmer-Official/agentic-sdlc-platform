@@ -35,6 +35,24 @@ RECOVERY_TIER_BY_FAILURE_CLASS: dict[str, str] = {
 }
 
 
+def _run_tests_failure_signature(item: WorkItem) -> str:
+    result = item.result if isinstance(item.result, dict) else {}
+    stdout = str(result.get("stdout") or "")
+    stderr = str(result.get("stderr") or "")
+    message = str(result.get("message") or "")
+    last_error = str(item.last_error or "")
+    return "\n".join(
+        part.strip().lower()
+        for part in (
+            stdout[:600],
+            stderr[:300],
+            message[:180],
+            last_error[:180],
+        )
+        if part
+    )
+
+
 @dataclass(frozen=True)
 class RecoveryRule:
     when_status: str
@@ -54,6 +72,42 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         ),
     },
     "CODE_BACKEND": {
+        "max_retries": 3,
+        "rules": (
+            RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "output_contract_invalid", "retry"),
+            RecoveryRule("FAILED", "patch_size_violation", "retry"),
+            RecoveryRule("FAILED", "transient", "retry"),
+        ),
+    },
+    "GENERATE_ROUTE": {
+        "max_retries": 3,
+        "rules": (
+            RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "output_contract_invalid", "retry"),
+            RecoveryRule("FAILED", "patch_size_violation", "retry"),
+            RecoveryRule("FAILED", "transient", "retry"),
+        ),
+    },
+    "GENERATE_SERVICE": {
+        "max_retries": 3,
+        "rules": (
+            RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "output_contract_invalid", "retry"),
+            RecoveryRule("FAILED", "patch_size_violation", "retry"),
+            RecoveryRule("FAILED", "transient", "retry"),
+        ),
+    },
+    "GENERATE_REPOSITORY": {
+        "max_retries": 3,
+        "rules": (
+            RecoveryRule("FAILED", "patch_apply_failure", "retry"),
+            RecoveryRule("FAILED", "output_contract_invalid", "retry"),
+            RecoveryRule("FAILED", "patch_size_violation", "retry"),
+            RecoveryRule("FAILED", "transient", "retry"),
+        ),
+    },
+    "GENERATE_CAPABILITY_BINDING": {
         "max_retries": 3,
         "rules": (
             RecoveryRule("FAILED", "patch_apply_failure", "retry"),
@@ -88,6 +142,12 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
 
 RECOVERY_TERMINAL_STATUSES = {"QUEUED", "RUNNING", "CLAIMED"}
 MAX_SAME_FAILURE_SIGNATURE_RETRIES = 2
+BACKEND_MODULE_TYPES = {
+    "GENERATE_ROUTE",
+    "GENERATE_SERVICE",
+    "GENERATE_REPOSITORY",
+    "GENERATE_CAPABILITY_BINDING",
+}
 
 
 def _unique_paths(values: list[str]) -> list[str]:
@@ -105,6 +165,44 @@ def _coerce_path_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return _unique_paths([item for item in value if isinstance(item, str) and item.strip()])
+
+
+def _backend_recovery_context(work_item: WorkItem) -> dict[str, Any] | None:
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    topology = payload.get("backend_topology_plan") if isinstance(payload.get("backend_topology_plan"), dict) else None
+    if not isinstance(topology, dict):
+        return None
+    type_to_node = {
+        "GENERATE_ROUTE": "route",
+        "GENERATE_SERVICE": "service",
+        "GENERATE_REPOSITORY": "repository",
+        "GENERATE_CAPABILITY_BINDING": "capability_binding",
+    }
+    module_node = type_to_node.get(str(work_item.type or "").strip().upper())
+    if not module_node:
+        return None
+    dependency_graph = topology.get("dependency_graph") if isinstance(topology.get("dependency_graph"), dict) else {}
+    edge_hint: dict[str, Any] = {}
+    if module_node == "route":
+        edge_hint = {"edge": "route_to_service", "targets": list((dependency_graph.get("route_to_service") or {}).values())[0] if isinstance(dependency_graph.get("route_to_service"), dict) and dependency_graph.get("route_to_service") else []}
+    elif module_node == "service":
+        edge_hint = {
+            "edge": "service_to_repository",
+            "targets": list((dependency_graph.get("service_to_repository") or {}).values())[0] if isinstance(dependency_graph.get("service_to_repository"), dict) and dependency_graph.get("service_to_repository") else [],
+            "capabilities": list((dependency_graph.get("service_to_capabilities") or {}).values())[0] if isinstance(dependency_graph.get("service_to_capabilities"), dict) and dependency_graph.get("service_to_capabilities") else [],
+        }
+    elif module_node == "repository":
+        edge_hint = {"edge": "service_to_repository", "role": "dependency_target"}
+    elif module_node == "capability_binding":
+        edge_hint = {"edge": "service_to_capabilities", "role": "dependency_target"}
+    return {
+        "planner_stage": topology.get("planner_stage"),
+        "module": topology.get("module"),
+        "module_node": module_node,
+        "work_item_type": work_item.type,
+        "retry_scope": "module_only",
+        "dependency_graph_edge": edge_hint,
+    }
 
 
 def _looks_like_test_path(value: str) -> bool:
@@ -212,6 +310,7 @@ def classify_failure(work_item: WorkItem) -> str:
             "patch repair output was invalid",
             "output_contract_invalid",
             "unterminated string starting at",
+            "structural contract violation",
         )
     ):
         return "output_contract_invalid"
@@ -312,6 +411,7 @@ async def _emit_recovery_event(
     recovery_type: str | None = None,
     message: str | None = None,
 ) -> None:
+    recovery_context = _backend_recovery_context(work_item)
     await record_event(
         session,
         project_id=work_item.project_id,
@@ -327,6 +427,7 @@ async def _emit_recovery_event(
             "recovery_action": action,
             "recovery_work_item_id": str(recovery_work_item_id) if recovery_work_item_id else None,
             "recovery_type": recovery_type,
+            "recovery_context": recovery_context,
         },
         tenant_id=work_item.tenant_id,
     )
@@ -437,11 +538,43 @@ async def _spawn_test_retry(session: AsyncSession, source_work_item: WorkItem) -
         failed_tests,
         key=lambda item: item.created_at,
     )
+    signature = _run_tests_failure_signature(latest_failed)
+    retry_cap = max(1, int(get_settings().runtime_test_retry_max_per_signature))
+    prior_same_signature_retries = 0
+    if signature:
+        prior_same_signature_retries = sum(
+            1
+            for item in failed_tests
+            if isinstance(item.payload, dict)
+            and str(item.payload.get("recovery_action") or "") == "spawn_retry_node"
+            and str(item.payload.get("recovery_retry_signature") or "") == signature
+        )
+        if prior_same_signature_retries >= retry_cap:
+            await record_event(
+                session,
+                project_id=source_work_item.project_id,
+                run_id=source_work_item.run_id,
+                work_item_id=source_work_item.id,
+                event_type="RUN_CONVERGENCE_STOPPED",
+                actor_type="SYSTEM",
+                tenant_id=source_work_item.tenant_id,
+                payload={
+                    "work_item_id": str(source_work_item.id),
+                    "reason": "test_retry_signature_cap_reached",
+                    "failure_signature": signature,
+                    "retry_cap": retry_cap,
+                },
+                message="Recovery halted: identical RUN_TESTS failure signature reached retry cap.",
+            )
+            return None
+
     retry_payload = dict(latest_failed.payload or {})
     retry_payload.update(
         {
             "recovery_source_id": str(source_work_item.id),
             "recovery_action": "spawn_retry_node",
+            "recovery_retry_signature": signature,
+            "recovery_retry_count": prior_same_signature_retries + 1,
         }
     )
     test = WorkItem(
@@ -578,6 +711,8 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         switched_action: str | None = None
         if failure_signature.startswith("validation_drift:design_token_missing:"):
             switched_action = "retry_with_design_token_normalization"
+        elif failure_signature.startswith("validation_drift:frontend_topology_inline_css:"):
+            switched_action = "retry_with_design_token_normalization"
         elif failure_signature.startswith("scope_violation:patch_too_large:"):
             switched_action = "retry_with_write_file"
         if switched_action and switched_action != recovery_action:
@@ -598,7 +733,10 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
                     "reason": "repeated_failure_signature",
                 },
             )
-    if same_signature_count >= MAX_SAME_FAILURE_SIGNATURE_RETRIES:
+    allow_extended_frontend_topology_retries = failure_signature.startswith(
+        "validation_drift:frontend_topology_inline_css:"
+    )
+    if same_signature_count >= MAX_SAME_FAILURE_SIGNATURE_RETRIES and not allow_extended_frontend_topology_retries:
         _merge_result_metadata(
             work_item,
             failure_class=failure_class,
@@ -711,7 +849,11 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
                 work_item_id=work_item.id,
                 event_type="WORK_ITEM_RETRIED",
                 actor_type="SYSTEM",
-                payload={"work_item_id": str(work_item.id), "attempt": work_item.attempt},
+                payload={
+                    "work_item_id": str(work_item.id),
+                    "attempt": work_item.attempt,
+                    "recovery_context": _backend_recovery_context(work_item),
+                },
                 tenant_id=work_item.tenant_id,
             )
             await _emit_recovery_event(
@@ -762,6 +904,8 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         outcome = {"action": "block_run"}
 
     succeeded = bool(outcome and (outcome.get("action") != "block_run"))
+    if succeeded and outcome and outcome.get("action") in {"spawn_fix_node", "spawn_retry_node"}:
+        succeeded = outcome.get("created") is not None
     await runtime_recovery.complete_attempt(
         recovery_attempt,
         succeeded=succeeded,

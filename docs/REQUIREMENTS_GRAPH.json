@@ -1,16 +1,16 @@
 {
-  "project_id": "65825fd4-e9b0-4c51-9b21-d6706012916c",
-  "version": 3,
+  "project_id": "9e96f650-28ae-4777-90c3-2d8e2cb72222",
+  "version": 2,
   "status": "APPROVED",
-  "created_at": "2026-05-17T17:02:23.130775",
-  "updated_at": "2026-05-17T17:02:43.190030",
-  "approved_at": "2026-05-17T17:02:43.190030",
+  "created_at": "2026-05-18T01:58:03.312343",
+  "updated_at": "2026-05-18T02:01:34.867087",
+  "approved_at": "2026-05-18T02:01:34.867087",
   "approved_by": "ui-user",
   "nodes": [
     {
       "id": "FR-001",
       "type": "FR",
-      "text": "Build hero section with clear value proposition, trust strip, and two CTAs (Book a Demo, Get ROI Estimate).",
+      "text": "001 Hero + Primary CTA",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -19,7 +19,7 @@
     {
       "id": "FR-002",
       "type": "FR",
-      "text": "Add problem/solution section with 3 pains and 3 outcome statements.",
+      "text": "002 Problem/Solution",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -28,7 +28,7 @@
     {
       "id": "FR-003",
       "type": "FR",
-      "text": "Add capabilities grid with 6 cards (lead qualification, outreach sequencing, meeting prep, CRM updates, follow-up automation, reporting summaries).",
+      "text": "003 Capabilities Grid",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -37,7 +37,7 @@
     {
       "id": "FR-004",
       "type": "FR",
-      "text": "Add \u201cHow it Works\u201d 3-step section (Connect tools, Configure goals, Execute with approvals).",
+      "text": "004 How It Works",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -46,7 +46,7 @@
     {
       "id": "FR-005",
       "type": "FR",
-      "text": "Build interactive ROI calculator with inputs (team size, leads/month, hours saved/rep) and outputs (monthly hours saved, monthly cost savings).",
+      "text": "005 ROI Calculator",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -55,7 +55,7 @@
     {
       "id": "FR-006",
       "type": "FR",
-      "text": "Add proof section with 2 testimonials and 1 mini case-study metrics block.",
+      "text": "006 Proof Section",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -64,7 +64,7 @@
     {
       "id": "FR-007",
       "type": "FR",
-      "text": "Add security/governance section (approval gates, audit logs, RBAC, data boundaries).",
+      "text": "007 Security/Governance",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -73,7 +73,7 @@
     {
       "id": "FR-008",
       "type": "FR",
-      "text": "Add pricing teaser (Starter/Growth/Enterprise) and final CTA section with lead form.",
+      "text": "008 Pricing Teaser + Final CTA",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -82,16 +82,16 @@
     {
       "id": "QR-001",
       "type": "QR",
-      "text": "Responsive on mobile/tablet/desktop with no horizontal scroll.",
-      "confidence": 0.95,
+      "text": "Interactive calculator with inputs: reps, avg hourly cost, hours saved/week; output monthly hours saved and estimated monthly savings.",
+      "confidence": 0.9,
       "source": "AI_EXTRACTED",
-      "quality_type": null,
+      "quality_type": "cost",
       "tags": []
     },
     {
       "id": "QR-002",
       "type": "QR",
-      "text": "Lighthouse Performance >= 90.",
+      "text": "001 Performance",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": "performance",
@@ -100,16 +100,16 @@
     {
       "id": "QR-003",
       "type": "QR",
-      "text": "Lighthouse Accessibility >= 90.",
-      "confidence": 0.95,
+      "text": "Lighthouse performance target >= 90 in local preview baseline.",
+      "confidence": 0.9,
       "source": "AI_EXTRACTED",
-      "quality_type": null,
+      "quality_type": "performance",
       "tags": []
     },
     {
       "id": "QR-004",
       "type": "QR",
-      "text": "SEO essentials (title, meta description, OG tags, semantic headings).",
+      "text": "002 Accessibility",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -118,7 +118,7 @@
     {
       "id": "QR-005",
       "type": "QR",
-      "text": "No inline styles and no ad-hoc colors outside design tokens/allowed colors.",
+      "text": "003 Responsive",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
@@ -127,10 +127,37 @@
     {
       "id": "QR-006",
       "type": "QR",
-      "text": "Include tests for ROI calculator and form validation.",
+      "text": "004 Design Governance",
       "confidence": 0.95,
       "source": "AI_EXTRACTED",
       "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-007",
+      "type": "QR",
+      "text": "005 Content Quality",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-008",
+      "type": "QR",
+      "text": "006 Validation",
+      "confidence": 0.95,
+      "source": "AI_EXTRACTED",
+      "quality_type": null,
+      "tags": []
+    },
+    {
+      "id": "QR-009",
+      "type": "QR",
+      "text": "AC-004 Security/governance section is visible and non-empty.",
+      "confidence": 0.9,
+      "source": "AI_EXTRACTED",
+      "quality_type": "security",
       "tags": []
     }
   ],
@@ -185,24 +212,24 @@
     },
     {
       "id": "EDGE-007",
-      "from_id": "FR-002",
-      "to_id": "QR-001",
+      "from_id": "FR-001",
+      "to_id": "QR-007",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-008",
-      "from_id": "FR-002",
-      "to_id": "QR-002",
+      "from_id": "FR-001",
+      "to_id": "QR-008",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-009",
-      "from_id": "FR-002",
-      "to_id": "QR-003",
+      "from_id": "FR-001",
+      "to_id": "QR-009",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
@@ -210,7 +237,7 @@
     {
       "id": "EDGE-010",
       "from_id": "FR-002",
-      "to_id": "QR-004",
+      "to_id": "QR-001",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
@@ -218,7 +245,7 @@
     {
       "id": "EDGE-011",
       "from_id": "FR-002",
-      "to_id": "QR-005",
+      "to_id": "QR-002",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
@@ -226,62 +253,62 @@
     {
       "id": "EDGE-012",
       "from_id": "FR-002",
-      "to_id": "QR-006",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-013",
-      "from_id": "FR-003",
-      "to_id": "QR-001",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-014",
-      "from_id": "FR-003",
-      "to_id": "QR-002",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-015",
-      "from_id": "FR-003",
       "to_id": "QR-003",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-016",
-      "from_id": "FR-003",
+      "id": "EDGE-013",
+      "from_id": "FR-002",
       "to_id": "QR-004",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-017",
-      "from_id": "FR-003",
+      "id": "EDGE-014",
+      "from_id": "FR-002",
       "to_id": "QR-005",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-018",
-      "from_id": "FR-003",
+      "id": "EDGE-015",
+      "from_id": "FR-002",
       "to_id": "QR-006",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
+      "id": "EDGE-016",
+      "from_id": "FR-002",
+      "to_id": "QR-007",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-017",
+      "from_id": "FR-002",
+      "to_id": "QR-008",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-018",
+      "from_id": "FR-002",
+      "to_id": "QR-009",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
       "id": "EDGE-019",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-001",
       "relation": "constrains",
       "weight": 0.5,
@@ -289,7 +316,7 @@
     },
     {
       "id": "EDGE-020",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-002",
       "relation": "constrains",
       "weight": 0.5,
@@ -297,7 +324,7 @@
     },
     {
       "id": "EDGE-021",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-003",
       "relation": "constrains",
       "weight": 0.5,
@@ -305,7 +332,7 @@
     },
     {
       "id": "EDGE-022",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-004",
       "relation": "constrains",
       "weight": 0.5,
@@ -313,7 +340,7 @@
     },
     {
       "id": "EDGE-023",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-005",
       "relation": "constrains",
       "weight": 0.5,
@@ -321,7 +348,7 @@
     },
     {
       "id": "EDGE-024",
-      "from_id": "FR-004",
+      "from_id": "FR-003",
       "to_id": "QR-006",
       "relation": "constrains",
       "weight": 0.5,
@@ -329,103 +356,103 @@
     },
     {
       "id": "EDGE-025",
-      "from_id": "FR-005",
-      "to_id": "QR-001",
+      "from_id": "FR-003",
+      "to_id": "QR-007",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-026",
-      "from_id": "FR-005",
-      "to_id": "QR-002",
+      "from_id": "FR-003",
+      "to_id": "QR-008",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-027",
-      "from_id": "FR-005",
-      "to_id": "QR-003",
+      "from_id": "FR-003",
+      "to_id": "QR-009",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
       "id": "EDGE-028",
-      "from_id": "FR-005",
-      "to_id": "QR-004",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-029",
-      "from_id": "FR-005",
-      "to_id": "QR-005",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-030",
-      "from_id": "FR-005",
-      "to_id": "QR-006",
-      "relation": "constrains",
-      "weight": 0.5,
-      "rationale": null
-    },
-    {
-      "id": "EDGE-031",
-      "from_id": "FR-006",
+      "from_id": "FR-004",
       "to_id": "QR-001",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-032",
-      "from_id": "FR-006",
+      "id": "EDGE-029",
+      "from_id": "FR-004",
       "to_id": "QR-002",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-033",
-      "from_id": "FR-006",
+      "id": "EDGE-030",
+      "from_id": "FR-004",
       "to_id": "QR-003",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-034",
-      "from_id": "FR-006",
+      "id": "EDGE-031",
+      "from_id": "FR-004",
       "to_id": "QR-004",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-035",
-      "from_id": "FR-006",
+      "id": "EDGE-032",
+      "from_id": "FR-004",
       "to_id": "QR-005",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
-      "id": "EDGE-036",
-      "from_id": "FR-006",
+      "id": "EDGE-033",
+      "from_id": "FR-004",
       "to_id": "QR-006",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
     },
     {
+      "id": "EDGE-034",
+      "from_id": "FR-004",
+      "to_id": "QR-007",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-035",
+      "from_id": "FR-004",
+      "to_id": "QR-008",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-036",
+      "from_id": "FR-004",
+      "to_id": "QR-009",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
       "id": "EDGE-037",
-      "from_id": "FR-007",
+      "from_id": "FR-005",
       "to_id": "QR-001",
       "relation": "constrains",
       "weight": 0.5,
@@ -433,7 +460,7 @@
     },
     {
       "id": "EDGE-038",
-      "from_id": "FR-007",
+      "from_id": "FR-005",
       "to_id": "QR-002",
       "relation": "constrains",
       "weight": 0.5,
@@ -441,7 +468,7 @@
     },
     {
       "id": "EDGE-039",
-      "from_id": "FR-007",
+      "from_id": "FR-005",
       "to_id": "QR-003",
       "relation": "constrains",
       "weight": 0.5,
@@ -449,7 +476,7 @@
     },
     {
       "id": "EDGE-040",
-      "from_id": "FR-007",
+      "from_id": "FR-005",
       "to_id": "QR-004",
       "relation": "constrains",
       "weight": 0.5,
@@ -457,7 +484,7 @@
     },
     {
       "id": "EDGE-041",
-      "from_id": "FR-007",
+      "from_id": "FR-005",
       "to_id": "QR-005",
       "relation": "constrains",
       "weight": 0.5,
@@ -465,7 +492,7 @@
     },
     {
       "id": "EDGE-042",
-      "from_id": "FR-007",
+      "from_id": "FR-005",
       "to_id": "QR-006",
       "relation": "constrains",
       "weight": 0.5,
@@ -473,6 +500,174 @@
     },
     {
       "id": "EDGE-043",
+      "from_id": "FR-005",
+      "to_id": "QR-007",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-044",
+      "from_id": "FR-005",
+      "to_id": "QR-008",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-045",
+      "from_id": "FR-005",
+      "to_id": "QR-009",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-046",
+      "from_id": "FR-006",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-047",
+      "from_id": "FR-006",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-048",
+      "from_id": "FR-006",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-049",
+      "from_id": "FR-006",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-050",
+      "from_id": "FR-006",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-051",
+      "from_id": "FR-006",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-052",
+      "from_id": "FR-006",
+      "to_id": "QR-007",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-053",
+      "from_id": "FR-006",
+      "to_id": "QR-008",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-054",
+      "from_id": "FR-006",
+      "to_id": "QR-009",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-055",
+      "from_id": "FR-007",
+      "to_id": "QR-001",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-056",
+      "from_id": "FR-007",
+      "to_id": "QR-002",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-057",
+      "from_id": "FR-007",
+      "to_id": "QR-003",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-058",
+      "from_id": "FR-007",
+      "to_id": "QR-004",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-059",
+      "from_id": "FR-007",
+      "to_id": "QR-005",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-060",
+      "from_id": "FR-007",
+      "to_id": "QR-006",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-061",
+      "from_id": "FR-007",
+      "to_id": "QR-007",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-062",
+      "from_id": "FR-007",
+      "to_id": "QR-008",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-063",
+      "from_id": "FR-007",
+      "to_id": "QR-009",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-064",
       "from_id": "FR-008",
       "to_id": "QR-001",
       "relation": "constrains",
@@ -480,7 +675,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-044",
+      "id": "EDGE-065",
       "from_id": "FR-008",
       "to_id": "QR-002",
       "relation": "constrains",
@@ -488,7 +683,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-045",
+      "id": "EDGE-066",
       "from_id": "FR-008",
       "to_id": "QR-003",
       "relation": "constrains",
@@ -496,7 +691,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-046",
+      "id": "EDGE-067",
       "from_id": "FR-008",
       "to_id": "QR-004",
       "relation": "constrains",
@@ -504,7 +699,7 @@
       "rationale": null
     },
     {
-      "id": "EDGE-047",
+      "id": "EDGE-068",
       "from_id": "FR-008",
       "to_id": "QR-005",
       "relation": "constrains",
@@ -512,13 +707,37 @@
       "rationale": null
     },
     {
-      "id": "EDGE-048",
+      "id": "EDGE-069",
       "from_id": "FR-008",
       "to_id": "QR-006",
       "relation": "constrains",
       "weight": 0.5,
       "rationale": null
+    },
+    {
+      "id": "EDGE-070",
+      "from_id": "FR-008",
+      "to_id": "QR-007",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-071",
+      "from_id": "FR-008",
+      "to_id": "QR-008",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
+    },
+    {
+      "id": "EDGE-072",
+      "from_id": "FR-008",
+      "to_id": "QR-009",
+      "relation": "constrains",
+      "weight": 0.5,
+      "rationale": null
     }
   ],
-  "sha256": "d1d526b4c57d703c4962ae6111d0db7ef9ee7d13627642aae8aa9b531d69b3d7"
+  "sha256": "81f0a55924701bece2756ec298fbd58f6878c87893eb6a17c059ec50932d15bd"
 }

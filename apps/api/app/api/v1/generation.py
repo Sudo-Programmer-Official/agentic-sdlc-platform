@@ -109,6 +109,8 @@ async def generate_tasks(
         )
     if existing_tasks and force:
         for t in existing_tasks:
+            if (t.source_type or "").strip().lower() == "genesis_setup":
+                continue
             t.status = "DEPRECATED"
             await log_activity(
                 session,
@@ -134,6 +136,8 @@ async def generate_tasks(
         )
         project_active_tasks = list(project_active_result.scalars().all())
         for task in project_active_tasks:
+            if (task.source_type or "").strip().lower() == "genesis_setup":
+                continue
             task.status = "DEPRECATED"
             cleaned_project_task_ids.append(str(task.id))
         if cleaned_project_task_ids:

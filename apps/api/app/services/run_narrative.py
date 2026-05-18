@@ -29,6 +29,11 @@ from app.services.work_item_state import is_blocking_failure, is_non_blocking_fa
 
 PHASE_BY_TYPE = {
     "PLAN_DAG": "plan",
+    "PLAN_BACKEND_TOPOLOGY": "plan",
+    "GENERATE_ROUTE": "build",
+    "GENERATE_SERVICE": "build",
+    "GENERATE_REPOSITORY": "build",
+    "GENERATE_CAPABILITY_BINDING": "build",
     "CODE_BACKEND": "build",
     "CODE_FRONTEND": "build",
     "WRITE_TESTS": "verify",
@@ -39,6 +44,11 @@ PHASE_BY_TYPE = {
 
 RATIONALE_BY_TYPE = {
     "PLAN_DAG": "Translate the run goal into bounded execution steps before any code changes begin.",
+    "PLAN_BACKEND_TOPOLOGY": "Plan capability-aware backend topology before any backend patching begins.",
+    "GENERATE_ROUTE": "Generate the backend route module bounded by the topology plan.",
+    "GENERATE_SERVICE": "Generate the backend service module bounded by the topology plan.",
+    "GENERATE_REPOSITORY": "Generate the backend repository module bounded by the topology plan.",
+    "GENERATE_CAPABILITY_BINDING": "Generate backend capability binding modules bounded by the topology plan.",
     "CODE_BACKEND": "Apply the smallest backend patch needed to satisfy the run goal.",
     "CODE_FRONTEND": "Apply the smallest frontend patch needed to satisfy the run goal.",
     "WRITE_TESTS": "Update or add tests so the change is reviewable and reproducible.",
@@ -49,6 +59,11 @@ RATIONALE_BY_TYPE = {
 
 SUCCESS_CRITERIA_BY_TYPE = {
     "PLAN_DAG": ["Execution steps are queued with a clear dependency order."],
+    "PLAN_BACKEND_TOPOLOGY": ["Backend routes/services/repositories/schemas/capability modules are planned before mutation."],
+    "GENERATE_ROUTE": ["Route module is generated within planned ownership boundaries."],
+    "GENERATE_SERVICE": ["Service module is generated within planned ownership boundaries."],
+    "GENERATE_REPOSITORY": ["Repository module is generated within planned ownership boundaries."],
+    "GENERATE_CAPABILITY_BINDING": ["Capability binding module is generated within planned ownership boundaries."],
     "CODE_BACKEND": ["Backend changes are applied without expanding beyond the scoped subsystem."],
     "CODE_FRONTEND": ["Frontend changes are applied without expanding beyond the scoped subsystem."],
     "WRITE_TESTS": ["Relevant test coverage is updated for the generated patch."],
@@ -59,6 +74,11 @@ SUCCESS_CRITERIA_BY_TYPE = {
 
 EXPECTED_COMMANDS_BY_TYPE = {
     "PLAN_DAG": ["plan run DAG"],
+    "PLAN_BACKEND_TOPOLOGY": ["plan backend topology"],
+    "GENERATE_ROUTE": ["generate route module"],
+    "GENERATE_SERVICE": ["generate service module"],
+    "GENERATE_REPOSITORY": ["generate repository module"],
+    "GENERATE_CAPABILITY_BINDING": ["generate capability binding module"],
     "CODE_BACKEND": ["apply backend patch"],
     "CODE_FRONTEND": ["apply frontend patch"],
     "WRITE_TESTS": ["update tests"],

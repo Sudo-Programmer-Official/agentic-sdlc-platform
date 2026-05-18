@@ -166,6 +166,106 @@
     </section>
 
     <section class="premium-card p-6">
+      <div class="text-sm uppercase tracking-wide text-slate-400">Capability Integrations</div>
+      <div class="mt-2 text-xs text-slate-600">Flow: Connect Provider → Verify Health → Bind Capability → Activate.</div>
+      <div class="mt-3 grid gap-3 lg:grid-cols-2">
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div class="text-xs font-semibold text-slate-900">Connect Provider Integration</div>
+          <div class="mt-2 grid gap-2">
+            <el-input v-model="integrationForm.provider" placeholder="Provider (supabase/firebase/postgres/hubspot)" />
+            <el-input v-model="integrationForm.label" placeholder="Integration label (e.g. supabase_preview)" />
+            <el-input v-model="integrationForm.capabilitiesCsv" placeholder="Capabilities CSV (lead_capture,database)" />
+            <el-input v-model="integrationForm.credentials_vault_ref" placeholder="Credentials vault ref (optional)" />
+            <el-button type="primary" size="small" :loading="capabilitySaving" @click="connectCapabilityProvider">Connect + Verify</el-button>
+          </div>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div class="text-xs font-semibold text-slate-900">Bind Capability</div>
+          <div class="mt-2 grid gap-2">
+            <el-select v-model="bindingForm.capability_key" placeholder="Capability">
+              <el-option v-for="cap in capabilities" :key="cap.id" :label="cap.capability_key" :value="cap.capability_key" />
+            </el-select>
+            <el-select v-model="bindingForm.integration_id" placeholder="Provider binding">
+              <el-option
+                v-for="integration in capabilityIntegrations"
+                :key="integration.id"
+                :label="`${integration.provider} · ${integration.label} (${integration.health_status})`"
+                :value="integration.id"
+              />
+            </el-select>
+            <el-input v-model="bindingForm.target" placeholder="Routing target (e.g. demo_requests)" />
+            <el-button type="primary" size="small" :loading="capabilitySaving" @click="bindCapability">Bind + Activate</el-button>
+          </div>
+        </div>
+      </div>
+      <div class="mt-3 grid gap-2 md:grid-cols-2">
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+          <div class="font-semibold text-slate-900">Bindings In {{ selectedEnvironment }}</div>
+          <div class="mt-1" v-if="capabilityBindings.length">
+            {{ capabilityBindings.map((row) => `${row.capability_key} → ${row.integration_id.slice(0, 8)}:${row.target || "default"}`).join(" | ") }}
+          </div>
+          <div class="mt-1 text-slate-500" v-else>No capability bindings yet.</div>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs">
+          <div class="font-semibold text-slate-900">Production Governance</div>
+          <div v-if="unresolvedRequiredCapabilities.length" class="mt-1 text-rose-700">
+            Unresolved required capabilities: {{ unresolvedRequiredCapabilities.join(", ") }}
+          </div>
+          <div v-else class="mt-1 text-emerald-700">Required capabilities resolved for production.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="premium-card p-6">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div class="text-sm uppercase tracking-wide text-slate-400">Component Capability Contracts</div>
+          <div class="mt-1 text-xs text-slate-600">DB-governed capability packets for {{ selectedEnvironment }}. Upsert then approve for runtime resolution.</div>
+        </div>
+        <el-button size="small" plain @click="loadComponentCapabilityContracts">Reload Contracts</el-button>
+      </div>
+      <div class="mt-3 grid gap-3 lg:grid-cols-2">
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div class="text-xs font-semibold text-slate-900">Upsert Contract</div>
+          <div class="mt-2 grid gap-2">
+            <el-input v-model="contractForm.capability" placeholder="Capability (e.g. HeroSection)" />
+            <el-input
+              v-model="contractForm.variant"
+              placeholder="Variant (e.g. premium_saas)"
+            />
+            <el-input
+              v-model="contractForm.allowedPropsCsv"
+              placeholder="Allowed props CSV (headline,subtitle,ctaLabel)"
+            />
+            <el-input v-model="contractForm.slotsCsv" placeholder="Slots CSV (title,subtitle,primaryCta)" />
+            <el-input v-model="contractForm.tokensCsv" placeholder="Tokens CSV (--color-brand-600,--space-6)" />
+            <el-input v-model="contractForm.variantsCsv" placeholder="Variants CSV (premium_saas,enterprise_clean)" />
+            <el-button type="primary" size="small" :loading="contractSaving" @click="upsertComponentCapabilityContract">Upsert Contract</el-button>
+          </div>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div class="text-xs font-semibold text-slate-900">Approve Contract</div>
+          <div class="mt-2 grid gap-2">
+            <el-select v-model="contractApproveCapability" placeholder="Select capability">
+              <el-option v-for="row in componentCapabilityContracts" :key="row.id" :label="`${row.capability} (${row.status})`" :value="row.capability" />
+            </el-select>
+            <el-button type="primary" size="small" :loading="contractSaving" :disabled="!contractApproveCapability" @click="approveComponentCapabilityContract">
+              Approve Contract
+            </el-button>
+            <div class="text-xs text-slate-500">Approval marks the contract as runtime-active for DB-first capability resolution.</div>
+          </div>
+        </div>
+      </div>
+      <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+        <div class="font-semibold text-slate-900">Contracts in {{ selectedEnvironment }}</div>
+        <div v-if="componentCapabilityContracts.length" class="mt-1">
+          {{ componentCapabilityContracts.map((row) => `${row.capability}:${row.status}${row.approved_at ? "@" + row.approved_at : ""}`).join(" | ") }}
+        </div>
+        <div v-else class="mt-1 text-slate-500">No component capability contracts yet.</div>
+      </div>
+    </section>
+
+    <section class="premium-card p-6">
       <div class="text-sm uppercase tracking-wide text-slate-400">Deploy Readiness</div>
       <div class="mt-2 text-xs text-slate-600">Flow: Project → Environments → Variables → Validate → Sync → Deploy</div>
       <DeploymentTrustSurfaceCard v-if="deploymentReadinessContract" class="mt-3" :contract="deploymentReadinessContract" />
@@ -224,15 +324,28 @@ import DeploymentTrustSurfaceCard from "../components/DeploymentTrustSurfaceCard
 import MetricCard from "../components/MetricCard.vue";
 import {
   applyProjectEnvironmentTemplate,
+  fetchCapabilityGovernanceCheck,
   fetchProjectDeploymentReadiness,
   getProjectEnvironmentCenter,
   getProjectEnvironmentChecklists,
+  listCapabilities,
+  listCapabilityBindings,
+  listCapabilityIntegrations,
+  listProjectComponentCapabilityContracts,
   listProjectEnvironmentTemplates,
   listProjectEnvironmentVariables,
   syncProjectEnvironment,
+  approveProjectComponentCapabilityContract,
+  upsertCapabilityBinding,
+  upsertProjectComponentCapabilityContract,
+  upsertCapabilityIntegration,
   upsertProjectEnvironmentVariable,
   validateProjectEnvironment,
   writeProjectEnvironmentVariableSecret,
+  type CapabilityBinding,
+  type CapabilityDefinition,
+  type ComponentCapabilityContractRow,
+  type CapabilityIntegration,
   type EnvironmentSyncStatusRow,
   type EnvironmentTemplate,
   type EnvironmentValidationResultRow,
@@ -260,11 +373,29 @@ const templates = ref<EnvironmentTemplate[]>([]);
 const validationResults = ref<EnvironmentValidationResultRow[]>([]);
 const lastSyncResult = ref<EnvironmentSyncStatusRow | null>(null);
 const deploymentReadinessContract = ref<any | null>(null);
+const capabilities = ref<CapabilityDefinition[]>([]);
+const capabilityIntegrations = ref<CapabilityIntegration[]>([]);
+const capabilityBindings = ref<CapabilityBinding[]>([]);
+const capabilityGovernance = ref<any | null>(null);
+const integrationForm = ref({ provider: "supabase", label: "", capabilitiesCsv: "", credentials_vault_ref: "" });
+const bindingForm = ref({ capability_key: "", integration_id: "", target: "" });
+const capabilitySaving = ref(false);
+const contractSaving = ref(false);
 const validateLoading = ref(false);
 const syncLoading = ref<"" | "vercel" | "render">("");
 const selectedTemplateKey = ref("");
 const includeOptionalTemplateVars = ref(true);
 const templateApplyLoading = ref(false);
+const componentCapabilityContracts = ref<ComponentCapabilityContractRow[]>([]);
+const contractApproveCapability = ref("");
+const contractForm = ref({
+  capability: "",
+  variant: "premium_saas",
+  allowedPropsCsv: "",
+  slotsCsv: "",
+  tokensCsv: "",
+  variantsCsv: "",
+});
 
 const variableDialogOpen = ref(false);
 const variableDialogLoading = ref(false);
@@ -362,6 +493,9 @@ const syncDeployNowText = computed(() => {
   if (String(lastSyncResult.value.status || "").toLowerCase() === "failed") return "Fix provider connector or secret and retry sync.";
   return "Synced and validated. Safe to continue to deploy and promote.";
 });
+const unresolvedRequiredCapabilities = computed(
+  () => (Array.isArray(capabilityGovernance.value?.unresolved_required_capabilities) ? capabilityGovernance.value.unresolved_required_capabilities : [])
+);
 
 function normalizeSource(source?: string | null) {
   const value = String(source || "").trim().toLowerCase();
@@ -419,6 +553,24 @@ async function loadAll() {
     }
     await loadEnvironmentVariables();
     try {
+      capabilities.value = await listCapabilities(false);
+      capabilityIntegrations.value = await listCapabilityIntegrations(projectId.value, selectedEnvironment.value);
+      capabilityBindings.value = await listCapabilityBindings(projectId.value, selectedEnvironment.value);
+      componentCapabilityContracts.value = await listProjectComponentCapabilityContracts(projectId.value, selectedEnvironment.value);
+      capabilityGovernance.value = await fetchCapabilityGovernanceCheck(projectId.value, "PRODUCTION");
+      if (!bindingForm.value.capability_key && capabilities.value.length) bindingForm.value.capability_key = capabilities.value[0].capability_key;
+      if (!bindingForm.value.integration_id && capabilityIntegrations.value.length) bindingForm.value.integration_id = capabilityIntegrations.value[0].id;
+      if (!contractApproveCapability.value && componentCapabilityContracts.value.length) {
+        contractApproveCapability.value = componentCapabilityContracts.value[0].capability;
+      }
+    } catch {
+      capabilities.value = [];
+      capabilityIntegrations.value = [];
+      capabilityBindings.value = [];
+      componentCapabilityContracts.value = [];
+      capabilityGovernance.value = null;
+    }
+    try {
       deploymentReadinessContract.value = await fetchProjectDeploymentReadiness(projectId.value, selectedEnvironment.value);
     } catch {
       deploymentReadinessContract.value = null;
@@ -433,6 +585,115 @@ async function loadAll() {
     error.value = err?.message || "Failed to load environment center.";
   } finally {
     loading.value = false;
+  }
+}
+
+async function connectCapabilityProvider() {
+  if (!projectId.value || !integrationForm.value.provider.trim() || !integrationForm.value.label.trim()) return;
+  capabilitySaving.value = true;
+  try {
+    await upsertCapabilityIntegration(projectId.value, {
+      environment: selectedEnvironment.value,
+      provider: integrationForm.value.provider.trim().toLowerCase(),
+      label: integrationForm.value.label.trim(),
+      status: "CONNECTED",
+      health_status: "HEALTHY",
+      capabilities: integrationForm.value.capabilitiesCsv
+        .split(",")
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean),
+      credentials_vault_ref: integrationForm.value.credentials_vault_ref.trim() || null,
+    });
+    await loadAll();
+    ElMessage.success("Capability integration connected.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to connect capability integration.";
+  } finally {
+    capabilitySaving.value = false;
+  }
+}
+
+async function bindCapability() {
+  if (!projectId.value || !bindingForm.value.capability_key || !bindingForm.value.integration_id) return;
+  capabilitySaving.value = true;
+  try {
+    await upsertCapabilityBinding(projectId.value, {
+      environment: selectedEnvironment.value,
+      capability_key: bindingForm.value.capability_key,
+      integration_id: bindingForm.value.integration_id,
+      target: bindingForm.value.target.trim() || null,
+      status: "ACTIVE",
+    });
+    await loadAll();
+    ElMessage.success("Capability bound to provider integration.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to bind capability.";
+  } finally {
+    capabilitySaving.value = false;
+  }
+}
+
+function csvToList(input: string) {
+  return input
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function loadComponentCapabilityContracts() {
+  if (!projectId.value) return;
+  try {
+    componentCapabilityContracts.value = await listProjectComponentCapabilityContracts(projectId.value, selectedEnvironment.value);
+    if (!contractApproveCapability.value && componentCapabilityContracts.value.length) {
+      contractApproveCapability.value = componentCapabilityContracts.value[0].capability;
+    }
+  } catch (err: any) {
+    componentCapabilityContracts.value = [];
+    error.value = err?.message || "Failed to load component capability contracts.";
+  }
+}
+
+async function upsertComponentCapabilityContract() {
+  if (!projectId.value || !contractForm.value.capability.trim()) return;
+  contractSaving.value = true;
+  try {
+    const capability = contractForm.value.capability.trim();
+    await upsertProjectComponentCapabilityContract(projectId.value, {
+      environment: selectedEnvironment.value,
+      capability,
+      contract_json: {
+        capability,
+        variant: contractForm.value.variant.trim() || "premium_saas",
+        allowed_props: csvToList(contractForm.value.allowedPropsCsv),
+        slots: csvToList(contractForm.value.slotsCsv),
+        tokens: csvToList(contractForm.value.tokensCsv),
+        variants: csvToList(contractForm.value.variantsCsv),
+      },
+    });
+    contractApproveCapability.value = capability;
+    await loadComponentCapabilityContracts();
+    ElMessage.success("Component capability contract upserted.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to upsert component capability contract.";
+  } finally {
+    contractSaving.value = false;
+  }
+}
+
+async function approveComponentCapabilityContract() {
+  if (!projectId.value || !contractApproveCapability.value) return;
+  contractSaving.value = true;
+  try {
+    await approveProjectComponentCapabilityContract(projectId.value, {
+      environment: selectedEnvironment.value,
+      capability: contractApproveCapability.value,
+    });
+    await loadComponentCapabilityContracts();
+    ElMessage.success("Component capability contract approved.");
+  } catch (err: any) {
+    error.value = err?.message || "Failed to approve component capability contract.";
+  } finally {
+    contractSaving.value = false;
   }
 }
 
@@ -581,6 +842,17 @@ watch(selectedEnvironment, async () => {
       deploymentReadinessContract.value = await fetchProjectDeploymentReadiness(projectId.value, selectedEnvironment.value);
     } catch {
       deploymentReadinessContract.value = null;
+    }
+    try {
+      capabilityIntegrations.value = await listCapabilityIntegrations(projectId.value, selectedEnvironment.value);
+      capabilityBindings.value = await listCapabilityBindings(projectId.value, selectedEnvironment.value);
+      componentCapabilityContracts.value = await listProjectComponentCapabilityContracts(projectId.value, selectedEnvironment.value);
+      capabilityGovernance.value = await fetchCapabilityGovernanceCheck(projectId.value, "PRODUCTION");
+    } catch {
+      capabilityIntegrations.value = [];
+      capabilityBindings.value = [];
+      componentCapabilityContracts.value = [];
+      capabilityGovernance.value = null;
     }
   }
 });

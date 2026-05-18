@@ -251,7 +251,17 @@ def _work_item_required_and_criticality(work_item: WorkItem) -> tuple[bool, str]
     if isinstance(required_raw, bool):
         required = required_raw
     else:
-        required = work_item.type in {"PLAN_DAG", "CODE_BACKEND", "CODE_FRONTEND", "RUN_TESTS"}
+        required = work_item.type in {
+            "PLAN_DAG",
+            "PLAN_BACKEND_TOPOLOGY",
+            "CODE_BACKEND",
+            "CODE_FRONTEND",
+            "GENERATE_ROUTE",
+            "GENERATE_SERVICE",
+            "GENERATE_REPOSITORY",
+            "GENERATE_CAPABILITY_BINDING",
+            "RUN_TESTS",
+        }
     criticality = str(payload.get("criticality") or "").strip().upper()
     if not criticality:
         criticality = "OPTIONAL" if not required else "FEATURE"
@@ -838,8 +848,6 @@ async def _pause_run_for_budget(session, run: Run, *, failed_items: list[WorkIte
 async def _pause_run_for_operator_confirmation(session, run: Run, *, failed_items: list[WorkItem]) -> bool:
     from app.services.state_guard import update_run_status
 
-    if _is_bootstrap_mode(run):
-        return False
     blocked = [item for item in failed_items if _is_operator_confirmation_failure(item)]
     if not blocked:
         return False
@@ -938,6 +946,90 @@ def _test_failure_signature(item: WorkItem) -> str:
     return head
 
 
+def _is_fix_patch_apply_failure(item: WorkItem) -> bool:
+    if item.type != "FIX_TEST_FAILURE" or str(item.status or "").upper() != "FAILED":
+        return False
+    result = item.result if isinstance(item.result, dict) else {}
+    message = str(result.get("message") or "")
+    error = str(result.get("error") or "")
+    last_error = str(item.last_error or "")
+    haystack = f"{message}\n{error}\n{last_error}".lower()
+    markers = (
+        "patch apply error",
+        "patch check failed",
+        "patch does not apply",
+        "corrupt patch",
+    )
+    return any(marker in haystack for marker in markers)
+
+
+async def _pause_run_for_fix_patch_apply_loop(session, run: Run) -> bool:
+    from app.services.state_guard import update_run_status
+
+    recent_failed_fixes = (
+        await session.execute(
+            select(WorkItem)
+            .where(
+                WorkItem.run_id == run.id,
+                WorkItem.type == "FIX_TEST_FAILURE",
+                WorkItem.status == "FAILED",
+            )
+            .order_by(WorkItem.created_at.desc())
+            .limit(2)
+        )
+    ).scalars().all()
+    if len(recent_failed_fixes) < 2 or not all(_is_fix_patch_apply_failure(item) for item in recent_failed_fixes):
+        return False
+
+    latest_failed_run_tests = await session.scalar(
+        select(WorkItem)
+        .where(
+            WorkItem.run_id == run.id,
+            WorkItem.type == "RUN_TESTS",
+            WorkItem.status == "FAILED",
+        )
+        .order_by(WorkItem.created_at.desc())
+        .limit(1)
+    )
+    if latest_failed_run_tests is None:
+        return False
+
+    newest_fix = recent_failed_fixes[0]
+    if newest_fix.created_at is None or latest_failed_run_tests.created_at is None:
+        return False
+    if newest_fix.created_at < latest_failed_run_tests.created_at:
+        return False
+
+    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+    if not ok:
+        return False
+    summary = dict(run.summary or {})
+    summary["goal_state"] = "NEEDS_HUMAN_INPUT"
+    summary["recovery_pause"] = {
+        "reason": "fix_patch_apply_loop",
+        "paused_at": datetime.now(timezone.utc).isoformat(),
+        "failed_fix_work_item_ids": [str(item.id) for item in recent_failed_fixes],
+        "source_run_tests_work_item_id": str(latest_failed_run_tests.id),
+    }
+    run.summary = summary
+    session.add(run)
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_RECOVERY_PAUSED",
+        actor_type="SYSTEM",
+        tenant_id=run.tenant_id,
+        message="Paused run: repeated FIX_TEST_FAILURE patch-apply errors for the same failing tests.",
+        payload={
+            "reason": "fix_patch_apply_loop",
+            "failed_fix_work_item_ids": [str(item.id) for item in recent_failed_fixes],
+            "source_run_tests_work_item_id": str(latest_failed_run_tests.id),
+        },
+    )
+    return True
+
+
 async def _pause_run_for_recovery_stall(session, run: Run) -> bool:
     from app.services.state_guard import update_run_status
 
@@ -1023,6 +1115,12 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
         return False
     source = blocking_failed[0]
     source_result = source.result if isinstance(source.result, dict) else {}
+    source_stop_reason = str(source_result.get("stop_reason") or source_result.get("message") or "").strip().lower()
+    source_approval_required = source_result.get("approval_required")
+    # Fail fast for internal policy stops that are not waiting on explicit operator approval.
+    # Retrying this branch is non-converging and only burns cycles/cost.
+    if source_stop_reason == "human_review_required" and source_approval_required is False:
+        return False
     source_last_error = str(source.last_error or "").lower()
     source_failure_class = str(source_result.get("failure_class") or "").strip().lower()
     source_failure_type = str(source_result.get("failure_type") or "").strip().lower()
@@ -1453,10 +1551,38 @@ async def tick(session):
                 if active_workers == 0:
                     if recovery_pending:
                         continue
-                    await _cancel_terminally_blocked_items(session, run)
                     if settings.runtime_never_fail_runs:
-                        await _finalize_run_degraded(session, run, reason="stalled_no_active_workers")
+                        ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+                        if not ok:
+                            continue
+                        summary = dict(run.summary or {})
+                        summary["goal_state"] = "NEEDS_HUMAN_INPUT"
+                        summary["recovery_pause"] = {
+                            "reason": "stalled_no_active_workers",
+                            "paused_at": datetime.now(timezone.utc).isoformat(),
+                            "queued_count": int(queued),
+                            "runnable_queued_count": int(len(runnable_items)),
+                            "active_worker_count": 0,
+                        }
+                        run.summary = summary
+                        session.add(run)
+                        await record_event(
+                            session,
+                            project_id=run.project_id,
+                            run_id=run.id,
+                            event_type="RUN_STALL_PAUSED",
+                            actor_type="SYSTEM",
+                            tenant_id=run.tenant_id,
+                            message="Paused run: no active workers available; downstream work preserved for recovery.",
+                            payload={
+                                "reason": "stalled_no_active_workers",
+                                "queued_count": int(queued),
+                                "runnable_queued_count": int(len(runnable_items)),
+                                "active_worker_count": 0,
+                            },
+                        )
                     else:
+                        await _cancel_terminally_blocked_items(session, run)
                         await _mark_run_failed(session, run, reason="stalled_no_active_workers")
                     continue
                 attempts = int(summary.get("stall_recovery_attempts") or 0) + 1
@@ -1486,10 +1612,40 @@ async def tick(session):
                 if attempts <= STALL_RECOVERY_MAX_ATTEMPTS:
                     continue
 
-                await _cancel_terminally_blocked_items(session, run)
                 if settings.runtime_never_fail_runs:
-                    await _finalize_run_degraded(session, run, reason="stalled_no_progress")
+                    ok = await update_run_status(session, run.id, ["RUNNING", "QUEUED"], "PAUSED", set_finished=False)
+                    if not ok:
+                        continue
+                    summary = dict(run.summary or {})
+                    summary["goal_state"] = "NEEDS_HUMAN_INPUT"
+                    summary["recovery_pause"] = {
+                        "reason": "stalled_no_progress",
+                        "paused_at": datetime.now(timezone.utc).isoformat(),
+                        "stalled_for_seconds": int(stalled_for),
+                        "stall_recovery_attempts": int(attempts),
+                        "queued_count": int(queued),
+                        "runnable_queued_count": int(len(runnable_after_reclaim)),
+                    }
+                    run.summary = summary
+                    session.add(run)
+                    await record_event(
+                        session,
+                        project_id=run.project_id,
+                        run_id=run.id,
+                        event_type="RUN_STALL_PAUSED",
+                        actor_type="SYSTEM",
+                        tenant_id=run.tenant_id,
+                        message="Paused run: stall recovery attempts exhausted; downstream work preserved for resume/recovery.",
+                        payload={
+                            "reason": "stalled_no_progress",
+                            "stalled_for_seconds": int(stalled_for),
+                            "stall_recovery_attempts": int(attempts),
+                            "queued_count": int(queued),
+                            "runnable_queued_count": int(len(runnable_after_reclaim)),
+                        },
+                    )
                 else:
+                    await _cancel_terminally_blocked_items(session, run)
                     await _mark_run_failed(session, run, reason="stalled_no_progress")
                 continue
 
@@ -1508,6 +1664,8 @@ async def tick(session):
             if await _pause_run_for_operator_confirmation(session, run, failed_items=failed_items):
                 continue
             if await _pause_run_for_patch_scope(session, run, failed_items=failed_items):
+                continue
+            if await _pause_run_for_fix_patch_apply_loop(session, run):
                 continue
             if await _pause_run_for_recovery_stall(session, run):
                 continue

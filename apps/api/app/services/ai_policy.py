@@ -376,15 +376,26 @@ class AIJobManager:
             }[selected_tier]
 
         review_only_job = request.role == "reviewer" and request.task_type == "review"
-        requires_human_review = (not review_only_job) and (
-            request.risk_level == "high"
-            or contains_sensitive_paths(request.changed_files)
-            or len(request.changed_files) > settings.ai_human_review_file_threshold
-            or (
-                request.confidence_score is not None
-                and request.confidence_score < settings.ai_low_confidence_threshold
+        if settings.ai_human_review_relaxed_mode:
+            # Relaxed mode keeps human review enabled, but avoids broad auto-blocking
+            # on medium-risk jobs driven by context-pack file noise.
+            requires_human_review = (not review_only_job) and (
+                request.risk_level == "high"
+                or (
+                    request.confidence_score is not None
+                    and request.confidence_score < settings.ai_low_confidence_threshold
+                )
             )
-        )
+        else:
+            requires_human_review = (not review_only_job) and (
+                request.risk_level == "high"
+                or contains_sensitive_paths(request.changed_files)
+                or len(request.changed_files) > settings.ai_human_review_file_threshold
+                or (
+                    request.confidence_score is not None
+                    and request.confidence_score < settings.ai_low_confidence_threshold
+                )
+            )
 
         return AIJobPolicy(
             task_type=request.task_type,

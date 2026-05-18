@@ -8,12 +8,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_tenant_context
 from app.db.session import get_session
 from app.schemas.repo_map import RepoMapImpactOut, RepoMapOut, RepoMapSearchOut, RepoMapSymbolSearchOut
+from app.schemas.repo_map import (
+    RepoGraphCapabilityNeighborsOut,
+    RepoGraphDependencyChainOut,
+    RepoGraphNeighborsOut,
+    RepoGraphSafeScopeOut,
+)
 from app.services.repo_map import (
     build_project_repo_impact,
     build_project_repo_map,
     refresh_project_repo_map,
     search_project_repo_map,
     search_project_repo_symbols,
+)
+from app.services.repo_intelligence_graph import (
+    get_adjacent_files,
+    get_capability_neighbors,
+    get_dependency_chain,
+    get_safe_mutation_scope,
 )
 
 public_router = APIRouter(tags=["repo-map"])
@@ -117,3 +129,86 @@ async def get_repo_map_impact(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@public_router.get("/projects/{project_id}/repo-graph/adjacent", response_model=RepoGraphNeighborsOut)
+async def get_repo_graph_adjacent(
+    project_id: uuid.UUID,
+    file: str = Query(alias="file", min_length=1),
+    depth: int = Query(default=1, ge=1, le=3),
+    limit: int = Query(default=30, ge=1, le=80),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RepoGraphNeighborsOut:
+    try:
+        return await get_adjacent_files(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            anchor_file=file,
+            depth=depth,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@public_router.get("/projects/{project_id}/repo-graph/dependency-chain", response_model=RepoGraphDependencyChainOut)
+async def get_repo_graph_dependency_chain(
+    project_id: uuid.UUID,
+    anchor: str = Query(alias="anchor", min_length=1),
+    limit: int = Query(default=25, ge=1, le=80),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RepoGraphDependencyChainOut:
+    try:
+        return await get_dependency_chain(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            anchor=anchor,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@public_router.get("/projects/{project_id}/repo-graph/capability-neighbors", response_model=RepoGraphCapabilityNeighborsOut)
+async def get_repo_graph_capability_neighbors(
+    project_id: uuid.UUID,
+    capability: str = Query(alias="capability", min_length=1),
+    limit: int = Query(default=25, ge=1, le=80),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RepoGraphCapabilityNeighborsOut:
+    try:
+        return await get_capability_neighbors(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            capability_key=capability,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@public_router.get("/projects/{project_id}/repo-graph/safe-mutation-scope", response_model=RepoGraphSafeScopeOut)
+async def get_repo_graph_safe_mutation_scope(
+    project_id: uuid.UUID,
+    files: list[str] = Query(default=[]),
+    capabilities: list[str] = Query(default=[]),
+    depth: int = Query(default=1, ge=1, le=3),
+    limit: int = Query(default=40, ge=1, le=120),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RepoGraphSafeScopeOut:
+    return await get_safe_mutation_scope(
+        session,
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+        anchor_files=files,
+        capabilities=capabilities,
+        depth=depth,
+        limit=limit,
+    )

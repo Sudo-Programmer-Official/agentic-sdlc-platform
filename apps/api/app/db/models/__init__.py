@@ -19,6 +19,10 @@ from app.db.models.project_preview_profile import ProjectPreviewProfile
 from app.db.models.project_deployment import ProjectDeployment
 from app.db.models.deployment_profile import DeploymentProfile
 from app.db.models.deployment_provider_connector import DeploymentProviderConnector
+from app.db.models.capability_definition import CapabilityDefinition
+from app.db.models.capability_integration import CapabilityIntegration
+from app.db.models.capability_binding import CapabilityBinding
+from app.db.models.component_capability_contract import ComponentCapabilityContract
 from app.db.models.workspace import Workspace
 from app.db.models.workspace_member import WorkspaceMember
 from app.db.models.tenant import Tenant
@@ -31,6 +35,7 @@ from app.db.models.workspace_secret import WorkspaceSecret
 from app.db.models.project_environment_variable import ProjectEnvironmentVariable
 from app.db.models.environment_validation_result import EnvironmentValidationResult
 from app.db.models.environment_sync_status import EnvironmentSyncStatus
+from app.db.models.content_item import ContentItem, ContentItemVersion, ContentPublishEvent
 from app.db.models.workspace_anomaly_snapshot import WorkspaceAnomalySnapshot
 from app.db.models.admin_audit_log import AdminAuditLog
 from app.db.models.impersonation_session import ImpersonationSession
@@ -93,6 +98,10 @@ __all__ = [
     "ProjectDeployment",
     "DeploymentProfile",
     "DeploymentProviderConnector",
+    "CapabilityDefinition",
+    "CapabilityIntegration",
+    "CapabilityBinding",
+    "ComponentCapabilityContract",
     "Workspace",
     "WorkspaceMember",
     "Tenant",
@@ -106,6 +115,9 @@ __all__ = [
     "ProjectEnvironmentVariable",
     "EnvironmentValidationResult",
     "EnvironmentSyncStatus",
+    "ContentItem",
+    "ContentItemVersion",
+    "ContentPublishEvent",
     "WorkspaceAnomalySnapshot",
     "WorkspaceEntitlement",
     "RunSummary",

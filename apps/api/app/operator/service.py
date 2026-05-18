@@ -79,6 +79,45 @@ async def handle_operator_request(
             tool_results={"get_current_project": result},
         )
 
+    if intent == OperatorIntent.CONTENT_UPDATE:
+        facts = [
+            "This request appears to be content-only.",
+            "Content updates can be routed without DAG generation or PR creation.",
+        ]
+        return build_response(
+            answer=compose_answer(
+                facts=facts,
+                suggestion="Use the Content Editor panel or call change routing with a content key/value.",
+            ),
+            intent=intent.value,
+            actions=[
+                _action("Open Project Overview", "open_project", path=_route(project_id)),
+                _action("Open Content Editor", "open_project", path=_route(project_id)),
+            ],
+            facts=facts,
+            grounding_tools=["deterministic_content_classifier"],
+            tool_results={"classification": "CONTENT"},
+        )
+
+    if intent == OperatorIntent.STRUCTURAL_CHANGE:
+        facts = [
+            "This request appears structural.",
+            "Structural updates should route through governed runtime generation and PR flow.",
+        ]
+        return build_response(
+            answer=compose_answer(
+                facts=facts,
+                suggestion="Launch a structural run from Project Overview or Mission Control.",
+            ),
+            intent=intent.value,
+            actions=[
+                _action("Open Mission Control", "open_run_board", path=_route(project_id, "/run")),
+            ],
+            facts=facts,
+            grounding_tools=["deterministic_content_classifier"],
+            tool_results={"classification": "STRUCTURAL"},
+        )
+
     if intent == OperatorIntent.PROJECT_HEALTH:
         result = await tools.get_project_health_summary(session, project_id=project_id)
         issues = []

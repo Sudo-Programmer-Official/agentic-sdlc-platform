@@ -34,6 +34,10 @@ from app.db.models import (
     ProjectDeployment,
     DeploymentProfile,
     DeploymentProviderConnector,
+    CapabilityDefinition,
+    CapabilityIntegration,
+    CapabilityBinding,
+    ComponentCapabilityContract,
     ImprovementRequest,
     RequirementMemory,
     RequirementRelationship,
@@ -57,6 +61,8 @@ from app.db.models import (
     EnvironmentSyncStatus,
     AdminAuditLog,
     ImpersonationSession,
+    ContentItem,
+    ContentItemVersion,
 )
 from app.db.session import get_session
 from app.schemas.persistence import (
@@ -72,6 +78,8 @@ from app.schemas.persistence import (
     ProjectRepositoryOut,
     ProjectRepositoryPreflightRequest,
     ProjectRepositoryPreflightOut,
+    ProjectRepositoryBootstrapRequest,
+    ProjectRepositoryBootstrapOut,
     FoundationReadinessOut,
     GitHubConnectInfoOut,
     GitHubInstallationRepositoryOut,
@@ -101,6 +109,15 @@ from app.schemas.persistence import (
     RunImpactScoreOut,
     ExternalReferenceIngestRequest,
     ExternalReferenceOut,
+    ContentItemUpsert,
+    ContentItemOut,
+    ContentItemHistoryOut,
+    ContentPublishRequest,
+    ContentPublishOut,
+    ContentRollbackRequest,
+    ContentSnapshotOut,
+    ChangeRouteRequest,
+    ChangeRouteOut,
 )
 from app.services import github_adapter
 from app.schemas.run_comparison import RunComparisonResponse
@@ -124,7 +141,12 @@ from app.runtime.recovery_policy import maybe_apply_recovery
 from app.runtime.recovery_policy import has_pending_recovery_work, sync_run_recovery_latch
 from app.db.session import SessionLocal
 from app.services.run_replay import fork_run
-from app.services.repo_connector import connect_repo, get_project_repository, preflight_repo_access
+from app.services.repo_connector import (
+    bootstrap_repo_remote,
+    connect_repo,
+    get_project_repository,
+    preflight_repo_access,
+)
 from app.services.foundation_readiness import build_foundation_readiness
 from app.services.project_genesis import (
     ensure_stack_presets,
@@ -169,6 +191,15 @@ from app.services.impact_analysis_loop import score_impact_prediction
 from app.services.external_reference_ingestion import persist_external_reference
 from app.services.run_recommendations import get_run_recommendations
 from app.services.secret_vault import resolve_vault_secret, store_vault_secret
+from app.services.content_registry import (
+    classify_change_request,
+    get_content_history,
+    list_content_items,
+    normalize_environment,
+    publish_environment,
+    rollback_content_item,
+    upsert_content_item,
+)
 from app.services.environment_readiness import (
     checklist_template,
     complete_timestamp,
@@ -177,6 +208,13 @@ from app.services.environment_readiness import (
     summarize_rows,
 )
 from app.services.deployment_readiness import compute_deployment_readiness
+from app.services.capability_runtime import resolve_capability, unresolved_required_capabilities, CapabilityResolutionError
+from app.services.component_capability_registry import (
+    approve_component_capability_contract,
+    list_component_capability_contracts,
+    resolve_component_capability_contract as resolve_component_capability_from_registry,
+    upsert_component_capability_contract,
+)
 from app.runtime.execution_contract import coerce_execution_contract, sync_run_execution_contract_state
 from app.api.v1.schemas import (
     ProjectSummaryResponse,
@@ -286,6 +324,21 @@ class RunUnblockResponse(BaseModel):
     queued_after: int
     runnable_after: int
     active_after: int
+    detail: str
+
+
+class RunConfirmContinueResponse(BaseModel):
+    run_id: uuid.UUID
+    run_status: str
+    requeued_work_items: int = 0
+    nudged: bool = False
+    nudged_agent_ids: list[str] = Field(default_factory=list)
+    queued_before: int = 0
+    runnable_before: int = 0
+    active_before: int = 0
+    queued_after: int = 0
+    runnable_after: int = 0
+    active_after: int = 0
     detail: str
 
 
@@ -803,6 +856,149 @@ class DeploymentProviderConnectorOut(BaseModel):
     updated_at: datetime
 
 
+class CapabilityDefinitionUpsertRequest(BaseModel):
+    capability_key: str
+    category: str = "general"
+    required: bool = False
+    supported_providers: list[str] = Field(default_factory=list)
+    description: str | None = None
+
+
+class CapabilityDefinitionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    capability_key: str
+    category: str
+    required: bool
+    supported_providers: list[str] | None = None
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CapabilityIntegrationUpsertRequest(BaseModel):
+    provider: str
+    label: str
+    environment: str = "PREVIEW"
+    status: str = "CONNECTED"
+    capabilities: list[str] = Field(default_factory=list)
+    health_status: str = "UNKNOWN"
+    credentials_vault_ref: str | None = None
+    connector_ref: str | None = None
+    metadata: dict | None = None
+    created_by: str | None = None
+
+
+class CapabilityIntegrationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    workspace_id: uuid.UUID | None = None
+    project_id: uuid.UUID
+    provider: str
+    label: str
+    environment: str
+    status: str
+    capabilities: list[str] | None = None
+    health_status: str
+    credentials_vault_ref: str | None = None
+    connector_ref: str | None = None
+    metadata_json: dict | None = None
+    last_successful_call_at: datetime | None = None
+    failure_reason: str | None = None
+    retry_state: str | None = None
+    environment_sync_state: str | None = None
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CapabilityBindingUpsertRequest(BaseModel):
+    environment: str = "PREVIEW"
+    capability_key: str
+    integration_id: uuid.UUID
+    target: str | None = None
+    status: str = "ACTIVE"
+    updated_by: str | None = None
+
+
+class CapabilityBindingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    workspace_id: uuid.UUID | None = None
+    project_id: uuid.UUID
+    environment: str
+    capability_key: str
+    integration_id: uuid.UUID
+    target: str | None = None
+    status: str
+    updated_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CapabilityResolutionOut(BaseModel):
+    capability_key: str
+    provider: str
+    environment: str
+    integration_id: uuid.UUID
+    target: str | None = None
+    adapter: str
+    health_status: str
+    credentials_resolved: bool = False
+    diagnostics: dict = Field(default_factory=dict)
+
+
+class CapabilityGovernanceCheckOut(BaseModel):
+    environment: str
+    unresolved_required_capabilities: list[str] = Field(default_factory=list)
+    safe_to_production: bool = False
+
+
+class ComponentCapabilityOut(BaseModel):
+    capability: str
+    variant: str
+    allowed_props: list[str] = Field(default_factory=list)
+    slots: list[str] = Field(default_factory=list)
+    tokens: list[str] = Field(default_factory=list)
+    variants: list[str] = Field(default_factory=list)
+
+
+class ComponentCapabilityContractUpsertRequest(BaseModel):
+    environment: str = "PREVIEW"
+    capability: str
+    contract_json: dict = Field(default_factory=dict)
+
+
+class ComponentCapabilityContractApproveRequest(BaseModel):
+    environment: str = "PREVIEW"
+    capability: str
+    approved_by: str | None = None
+
+
+class ComponentCapabilityContractOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    workspace_id: uuid.UUID | None = None
+    project_id: uuid.UUID
+    environment: str
+    capability: str
+    contract_json: dict
+    status: str
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    created_by: str | None = None
+    updated_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 ALLOWED_TRANSITIONS = {
     "INTAKE": {"PLAN"},
     "PLAN": {"RUN"},
@@ -842,6 +1038,23 @@ def _project_out(project: Project) -> ProjectOut:
     data = ProjectOut.model_validate(project)
     data.allowed_transitions = _allowed_for(project.status)
     return data
+
+
+def _content_item_out(item: ContentItem | ContentItemVersion) -> ContentItemOut:
+    updated_at = getattr(item, "updated_at", None) or getattr(item, "created_at", None) or datetime.now(timezone.utc)
+    return ContentItemOut(
+        id=item.id,
+        project_id=item.project_id,
+        environment=item.environment,
+        key=item.key,
+        type=item.type,
+        value=item.value,
+        version=item.version,
+        status=item.status,
+        source=item.source,
+        updated_by=item.updated_by,
+        updated_at=updated_at,
+    )
 
 
 def _run_out(run: Run) -> RunOut:
@@ -1620,6 +1833,228 @@ async def get_project(
     return _project_out(project)
 
 
+@router.get("/projects/{project_id}/content-items", response_model=list[ContentItemOut])
+@public_router.get("/projects/{project_id}/content-items", response_model=list[ContentItemOut])
+async def fetch_content_items(
+    project_id: uuid.UUID,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[ContentItemOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = normalize_environment(environment)
+    items = await list_content_items(session, tenant_id=ctx.tenant_id, project_id=project_id, environment=env)
+    return [_content_item_out(item) for item in items]
+
+
+@router.put("/projects/{project_id}/content-items", response_model=ContentItemOut)
+@public_router.put("/projects/{project_id}/content-items", response_model=ContentItemOut)
+async def save_content_item(
+    project_id: uuid.UUID,
+    payload: ContentItemUpsert,
+    environment: str = Query(default="PREVIEW"),
+    publish: bool = Query(default=False),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ContentItemOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = normalize_environment(environment)
+    try:
+        item = await upsert_content_item(
+            session,
+            tenant_id=ctx.tenant_id,
+            workspace_id=getattr(ctx, "workspace_id", None),
+            project_id=project_id,
+            environment=env,
+            key=payload.key,
+            content_type=payload.type,
+            value=payload.value,
+            source=payload.source or "operator",
+            updated_by=getattr(ctx, "user_id", None),
+            status="PUBLISHED" if publish else "DRAFT",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await session.commit()
+    await session.refresh(item)
+    return _content_item_out(item)
+
+
+@router.get("/projects/{project_id}/content-items/history/{key}", response_model=ContentItemHistoryOut)
+@public_router.get("/projects/{project_id}/content-items/history/{key}", response_model=ContentItemHistoryOut)
+async def fetch_content_item_history(
+    project_id: uuid.UUID,
+    key: str,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ContentItemHistoryOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = normalize_environment(environment)
+    history = await get_content_history(
+        session,
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+        environment=env,
+        key=key,
+    )
+    return ContentItemHistoryOut(key=key, environment=env, versions=[_content_item_out(row) for row in history])
+
+
+@router.post("/projects/{project_id}/content-items/rollback", response_model=ContentItemOut)
+@public_router.post("/projects/{project_id}/content-items/rollback", response_model=ContentItemOut)
+async def rollback_content(
+    project_id: uuid.UUID,
+    payload: ContentRollbackRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ContentItemOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        item = await rollback_content_item(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            environment=payload.environment,
+            key=payload.key,
+            target_version=payload.target_version,
+            updated_by=getattr(ctx, "user_id", None),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await session.commit()
+    await session.refresh(item)
+    return _content_item_out(item)
+
+
+@router.post("/projects/{project_id}/content-items/publish", response_model=ContentPublishOut)
+@public_router.post("/projects/{project_id}/content-items/publish", response_model=ContentPublishOut)
+async def publish_content_items(
+    project_id: uuid.UUID,
+    payload: ContentPublishRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ContentPublishOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        event = await publish_environment(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            source_environment=payload.source_environment,
+            target_environment=payload.target_environment,
+            published_by=getattr(ctx, "user_id", None),
+            notes=payload.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await session.commit()
+    item_count = len((event.snapshot or {}).get("items") or [])
+    return ContentPublishOut(
+        id=event.id,
+        project_id=project_id,
+        source_environment=event.source_environment,
+        target_environment=event.target_environment,
+        published_by=event.published_by,
+        created_at=event.created_at,
+        item_count=item_count,
+    )
+
+
+@router.get("/projects/{project_id}/content-items/snapshot", response_model=ContentSnapshotOut)
+@public_router.get("/projects/{project_id}/content-items/snapshot", response_model=ContentSnapshotOut)
+async def export_content_snapshot(
+    project_id: uuid.UUID,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ContentSnapshotOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = normalize_environment(environment)
+    items = await list_content_items(session, tenant_id=ctx.tenant_id, project_id=project_id, environment=env)
+    return ContentSnapshotOut(project_id=project_id, environment=env, items=[_content_item_out(item) for item in items])
+
+
+@router.post("/projects/{project_id}/change-router", response_model=ChangeRouteOut)
+@public_router.post("/projects/{project_id}/change-router", response_model=ChangeRouteOut)
+async def route_change_request(
+    project_id: uuid.UUID,
+    payload: ChangeRouteRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ChangeRouteOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    classification = classify_change_request(payload.message)
+    if classification == "CONTENT":
+        if not payload.key:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="content key is required for content updates")
+        item = await upsert_content_item(
+            session,
+            tenant_id=ctx.tenant_id,
+            workspace_id=getattr(ctx, "workspace_id", None),
+            project_id=project_id,
+            environment=payload.environment,
+            key=payload.key,
+            content_type="text",
+            value=payload.value,
+            source="operator",
+            updated_by=getattr(ctx, "user_id", None),
+            status="PUBLISHED" if payload.auto_publish else "DRAFT",
+        )
+        await session.commit()
+        await session.refresh(item)
+        return ChangeRouteOut(
+            classification=classification,
+            action="content_registry_update",
+            detail="Routed to content registry. No DAG or PR flow started.",
+            content_item=_content_item_out(item),
+            run_id=None,
+        )
+
+    if classification == "STRUCTURAL":
+        run = await launch_run_for_project(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            executor_name="codex",
+            task_id=None,
+            actor_type="USER",
+            run_kind="STRUCTURAL_CHANGE",
+            schedule=True,
+        )
+        await session.commit()
+        return ChangeRouteOut(
+            classification=classification,
+            action="runtime_generation_path",
+            detail="Routed to structural generation flow (DAG + governed PR path).",
+            content_item=None,
+            run_id=run.id,
+        )
+
+    return ChangeRouteOut(
+        classification=classification,
+        action="no_op",
+        detail="Could not deterministically classify request. Clarify content key or structural intent.",
+        content_item=None,
+        run_id=None,
+    )
+
+
 @router.post("/tasks/vision-run", response_model=VisionRunOut, status_code=status.HTTP_201_CREATED)
 @public_router.post("/tasks/vision-run", response_model=VisionRunOut, status_code=status.HTTP_201_CREATED)
 async def create_vision_run(
@@ -2223,6 +2658,51 @@ async def preflight_project_repo(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return ProjectRepositoryPreflightOut(**result.__dict__)
+
+
+@router.post("/projects/{project_id}/repo/bootstrap", response_model=ProjectRepositoryBootstrapOut)
+@public_router.post("/projects/{project_id}/repo/bootstrap", response_model=ProjectRepositoryBootstrapOut)
+async def bootstrap_project_repo(
+    project_id: uuid.UUID,
+    payload: ProjectRepositoryBootstrapRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectRepositoryBootstrapOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    repo = await get_project_repository(session, project_id=project_id, tenant_id=ctx.tenant_id)
+    repo_url = (payload.repo_url or (repo.repo_url if repo else "")).strip()
+    if not repo_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Repository URL is required")
+    result = bootstrap_repo_remote(
+        provider=payload.provider or (repo.provider if repo else "github"),
+        repo_url=repo_url,
+        repo_full_name=payload.repo_full_name if payload.repo_full_name is not None else (repo.repo_full_name if repo else None),
+        default_branch=payload.default_branch or (repo.default_branch if repo else "main"),
+        installation_id=payload.installation_id if payload.installation_id is not None else (repo.installation_id if repo else None),
+        auth_strategy=payload.auth_strategy or (repo.auth_strategy if repo else "runtime_default"),
+        readme_title=payload.readme_title or project.name,
+        commit_message=payload.commit_message,
+    )
+    if result.ok:
+        await log_activity(
+            session,
+            project_id=project.id,
+            entity_type="project_repository",
+            entity_id=repo.id if repo else project.id,
+            action_type="repo.bootstrap",
+            metadata={
+                "provider": result.provider,
+                "repo_url": result.repo_url,
+                "default_branch": result.default_branch,
+                "created": result.created,
+                "commit_sha": result.commit_sha,
+            },
+        )
+        await session.commit()
+    return ProjectRepositoryBootstrapOut(**result.__dict__)
 
 
 @router.get("/integrations/github/connect", response_model=GitHubConnectInfoOut)
@@ -3283,14 +3763,58 @@ async def unblock_run(
     run = await session.scalar(_run_scoped(session, ctx, run_id))
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    if run.status not in {"RUNNING", "QUEUED"}:
+    if run.status not in {"RUNNING", "QUEUED", "PAUSED"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Run is {run.status}; unblock is only allowed for RUNNING/QUEUED runs.",
+            detail=f"Run is {run.status}; unblock is only allowed for RUNNING/QUEUED/PAUSED runs.",
         )
+    if run.status == "PAUSED":
+        run.status = "QUEUED"
+        run.finished_at = None
+        session.add(run)
 
     await reclaim_expired_work_items(session, run_id=run.id)
     await reclaim_orphaned_work_items(session, run_id=run.id)
+
+    # Recovery-first: requeue operator-confirmation blocked items so unblock
+    # actually continues execution instead of just nudging with no runnable work.
+    failed_items = (
+        await session.execute(
+            select(WorkItem).where(WorkItem.run_id == run.id, WorkItem.status == "FAILED")
+        )
+    ).scalars().all()
+    for item in failed_items:
+        result = item.result if isinstance(item.result, dict) else {}
+        approval_required = result.get("approval_required") is True
+        stop_reason = str(result.get("stop_reason") or "").strip().lower()
+        error = str(result.get("error") or "").strip().lower()
+        message = str(result.get("message") or item.last_error or "").strip().lower()
+        operator_confirmation_block = (
+            approval_required
+            and stop_reason == "human_review_required"
+            and (
+                "operator_confirmation_required" in error
+                or "operator confirmation" in message
+                or "requires operator confirmation" in message
+            )
+        )
+        if not operator_confirmation_block:
+            continue
+        payload = dict(item.payload or {}) if isinstance(item.payload, dict) else {}
+        payload["operator_confirmation_granted"] = True
+        payload["operator_confirmation_granted_at"] = datetime.now(timezone.utc).isoformat()
+        payload["operator_confirmation_granted_by"] = str(getattr(ctx, "user_id", "") or "")
+        item.status = "QUEUED"
+        item.attempt = max(0, int(item.attempt) + 1)
+        item.max_attempts = max(int(item.max_attempts or 1), int(item.attempt) + 1)
+        item.assigned_agent_id = None
+        item.lease_expires_at = None
+        item.started_at = None
+        item.finished_at = None
+        item.last_error = None
+        item.payload = payload
+        item.result = {}
+        session.add(item)
 
     counts_before = (
         await session.execute(
@@ -3345,6 +3869,151 @@ async def unblock_run(
         runnable_after=runnable_after,
         active_after=active_after or 0,
         detail="No runnable queued items found." if runnable_before == 0 else "Worker nudge triggered.",
+    )
+
+
+def _is_operator_confirmation_blocked_item(item: WorkItem) -> bool:
+    result = item.result if isinstance(item.result, dict) else {}
+    approval_required = result.get("approval_required") is True
+    stop_reason = str(result.get("stop_reason") or "").strip().lower()
+    error = str(result.get("error") or "").strip().lower()
+    message = str(result.get("message") or item.last_error or "").strip().lower()
+    return (
+        approval_required
+        and stop_reason == "human_review_required"
+        and (
+            "operator_confirmation_required" in error
+            or "operator confirmation" in message
+            or "requires operator confirmation" in message
+        )
+    )
+
+
+@router.post("/runs/{run_id}/confirm-and-continue", response_model=RunConfirmContinueResponse)
+@public_router.post("/runs/{run_id}/confirm-and-continue", response_model=RunConfirmContinueResponse)
+async def confirm_and_continue_run(
+    run_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunConfirmContinueResponse:
+    from app.runtime.leases import reclaim_expired_work_items, reclaim_orphaned_work_items
+    from app.runtime.worker_service import tick_worker
+
+    run = await session.scalar(_run_scoped(session, ctx, run_id).with_for_update(skip_locked=True))
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status not in {"RUNNING", "QUEUED", "PAUSED"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Run is {run.status}; confirm-and-continue is only allowed for RUNNING/QUEUED/PAUSED runs.",
+        )
+
+    if run.status == "PAUSED":
+        run.status = "QUEUED"
+        run.finished_at = None
+        session.add(run)
+
+    await reclaim_expired_work_items(session, run_id=run.id)
+    await reclaim_orphaned_work_items(session, run_id=run.id)
+
+    failed_items = (
+        await session.execute(
+            select(WorkItem).where(WorkItem.run_id == run.id, WorkItem.status == "FAILED")
+        )
+    ).scalars().all()
+    requeued_count = 0
+    for item in failed_items:
+        if not _is_operator_confirmation_blocked_item(item):
+            continue
+        payload = dict(item.payload or {}) if isinstance(item.payload, dict) else {}
+        payload["operator_confirmation_granted"] = True
+        payload["operator_confirmation_granted_at"] = datetime.now(timezone.utc).isoformat()
+        payload["operator_confirmation_granted_by"] = str(getattr(ctx, "user_id", "") or "")
+        item.status = "QUEUED"
+        item.attempt = max(0, int(item.attempt) + 1)
+        item.max_attempts = max(int(item.max_attempts or 1), int(item.attempt) + 1)
+        item.assigned_agent_id = None
+        item.lease_expires_at = None
+        item.started_at = None
+        item.finished_at = None
+        item.last_error = None
+        item.payload = payload
+        item.result = {}
+        session.add(item)
+        requeued_count += 1
+
+    counts_before = (
+        await session.execute(
+            select(
+                func.count().filter(WorkItem.status == "QUEUED"),
+                func.count().filter(WorkItem.status.in_(["RUNNING", "CLAIMED"])),
+            ).where(WorkItem.run_id == run.id)
+        )
+    ).first()
+    queued_before, active_before = counts_before
+    runnable_before = len(await _runnable_queued_items_for_run(session, run.id))
+
+    nudged_agent_ids: list[str] = []
+    if runnable_before > 0:
+        agents = (
+            await session.execute(
+                select(Agent)
+                .where(Agent.status == "ACTIVE")
+                .order_by(Agent.last_heartbeat_at.desc(), Agent.created_at.desc())
+                .limit(3)
+            )
+        ).scalars().all()
+        await session.commit()
+        for agent in agents:
+            await tick_worker(agent.id)
+            nudged_agent_ids.append(str(agent.id))
+    else:
+        await session.commit()
+
+    counts_after = (
+        await session.execute(
+            select(
+                func.count().filter(WorkItem.status == "QUEUED"),
+                func.count().filter(WorkItem.status.in_(["RUNNING", "CLAIMED"])),
+            ).where(WorkItem.run_id == run.id)
+        )
+    ).first()
+    queued_after, active_after = counts_after
+    runnable_after = len(await _runnable_queued_items_for_run(session, run.id))
+    refreshed_run = await session.get(Run, run.id)
+
+    await record_event(
+        session,
+        project_id=run.project_id,
+        run_id=run.id,
+        event_type="RUN_OPERATOR_CONFIRMED_CONTINUED",
+        actor_type="USER",
+        actor_id=getattr(ctx, "user_id", None),
+        tenant_id=ctx.tenant_id,
+        payload={
+            "requeued_work_items": requeued_count,
+            "nudged_agent_ids": nudged_agent_ids,
+        },
+    )
+    await session.commit()
+
+    return RunConfirmContinueResponse(
+        run_id=run.id,
+        run_status=refreshed_run.status if refreshed_run else run.status,
+        requeued_work_items=requeued_count,
+        nudged=bool(nudged_agent_ids),
+        nudged_agent_ids=nudged_agent_ids,
+        queued_before=queued_before or 0,
+        runnable_before=runnable_before,
+        active_before=active_before or 0,
+        queued_after=queued_after or 0,
+        runnable_after=runnable_after,
+        active_after=active_after or 0,
+        detail=(
+            "No runnable queued items found after confirmation."
+            if runnable_before == 0
+            else "Operator confirmation applied and worker nudge triggered."
+        ),
     )
 
 
@@ -3657,6 +4326,17 @@ async def _enforce_deployment_readiness_contract(
     safe_to_preview = bool(readiness.get("safe_to_preview"))
     safe_to_production = bool(readiness.get("safe_to_production"))
     blockers = [str(item) for item in (readiness.get("blockers") or []) if str(item).strip()]
+    missing_required_capabilities = await unresolved_required_capabilities(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        environment=env,
+    )
+    if missing_required_capabilities:
+        blockers.append(
+            "Required capabilities unresolved: " + ", ".join(missing_required_capabilities[:8])
+        )
+        safe_to_production = False
     if env == "PRODUCTION" and not safe_to_production:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -4396,6 +5076,348 @@ async def list_deployment_connectors(
         query = query.where(DeploymentProviderConnector.provider == provider.strip().lower())
     result = await session.execute(query.order_by(DeploymentProviderConnector.created_at.desc()))
     return [DeploymentProviderConnectorOut.model_validate(item) for item in result.scalars().all()]
+
+
+@router.post("/capabilities", response_model=CapabilityDefinitionOut)
+@public_router.post("/capabilities", response_model=CapabilityDefinitionOut)
+async def upsert_capability_definition(
+    payload: CapabilityDefinitionUpsertRequest,
+    session: AsyncSession = Depends(get_session),
+) -> CapabilityDefinitionOut:
+    key = (payload.capability_key or "").strip().lower()
+    if not key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="capability_key is required")
+    row = await session.scalar(select(CapabilityDefinition).where(CapabilityDefinition.capability_key == key))
+    if row is None:
+        row = CapabilityDefinition(capability_key=key)
+        session.add(row)
+    row.category = (payload.category or "general").strip().lower() or "general"
+    row.required = bool(payload.required)
+    row.supported_providers = [str(item).strip().lower() for item in (payload.supported_providers or []) if str(item).strip()]
+    row.description = (payload.description or "").strip() or None
+    await session.commit()
+    await session.refresh(row)
+    return CapabilityDefinitionOut.model_validate(row)
+
+
+@router.get("/capabilities", response_model=List[CapabilityDefinitionOut])
+@public_router.get("/capabilities", response_model=List[CapabilityDefinitionOut])
+async def list_capability_definitions(
+    required_only: bool = Query(default=False),
+    session: AsyncSession = Depends(get_session),
+) -> List[CapabilityDefinitionOut]:
+    query = select(CapabilityDefinition)
+    if required_only:
+        query = query.where(CapabilityDefinition.required.is_(True))
+    result = await session.execute(query.order_by(CapabilityDefinition.category.asc(), CapabilityDefinition.capability_key.asc()))
+    return [CapabilityDefinitionOut.model_validate(item) for item in result.scalars().all()]
+
+
+@router.post("/projects/{project_id}/capability-integrations", response_model=CapabilityIntegrationOut)
+@public_router.post("/projects/{project_id}/capability-integrations", response_model=CapabilityIntegrationOut)
+async def upsert_project_capability_integration(
+    project_id: uuid.UUID,
+    payload: CapabilityIntegrationUpsertRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> CapabilityIntegrationOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    environment = (payload.environment or "PREVIEW").strip().upper()
+    provider = (payload.provider or "").strip().lower()
+    label = (payload.label or "").strip()
+    if not provider or not label:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="provider and label are required")
+    row = await session.scalar(
+        select(CapabilityIntegration).where(
+            CapabilityIntegration.tenant_id == ctx.tenant_id,
+            CapabilityIntegration.project_id == project_id,
+            CapabilityIntegration.environment == environment,
+            CapabilityIntegration.provider == provider,
+            CapabilityIntegration.label == label,
+        )
+    )
+    if row is None:
+        row = CapabilityIntegration(
+            tenant_id=ctx.tenant_id,
+            workspace_id=ctx.workspace_id,
+            project_id=project_id,
+            provider=provider,
+            label=label,
+            environment=environment,
+            created_by=(payload.created_by or ctx.user_id or "ui-user"),
+        )
+        session.add(row)
+    row.status = (payload.status or row.status or "CONNECTED").strip().upper()
+    row.capabilities = [str(item).strip().lower() for item in (payload.capabilities or []) if str(item).strip()]
+    row.health_status = (payload.health_status or row.health_status or "UNKNOWN").strip().upper()
+    row.credentials_vault_ref = (payload.credentials_vault_ref or "").strip() or None
+    row.connector_ref = (payload.connector_ref or "").strip() or None
+    row.metadata_json = payload.metadata
+    await session.commit()
+    await session.refresh(row)
+    return CapabilityIntegrationOut.model_validate(row)
+
+
+@router.get("/projects/{project_id}/capability-integrations", response_model=List[CapabilityIntegrationOut])
+@public_router.get("/projects/{project_id}/capability-integrations", response_model=List[CapabilityIntegrationOut])
+async def list_project_capability_integrations(
+    project_id: uuid.UUID,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[CapabilityIntegrationOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = (environment or "PREVIEW").strip().upper()
+    result = await session.execute(
+        select(CapabilityIntegration).where(
+            CapabilityIntegration.tenant_id == ctx.tenant_id,
+            CapabilityIntegration.project_id == project_id,
+            CapabilityIntegration.environment == env,
+        ).order_by(CapabilityIntegration.updated_at.desc())
+    )
+    return [CapabilityIntegrationOut.model_validate(item) for item in result.scalars().all()]
+
+
+@router.post("/projects/{project_id}/capability-bindings", response_model=CapabilityBindingOut)
+@public_router.post("/projects/{project_id}/capability-bindings", response_model=CapabilityBindingOut)
+async def upsert_project_capability_binding(
+    project_id: uuid.UUID,
+    payload: CapabilityBindingUpsertRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> CapabilityBindingOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = (payload.environment or "PREVIEW").strip().upper()
+    key = (payload.capability_key or "").strip().lower()
+    integration = await session.scalar(
+        select(CapabilityIntegration).where(
+            CapabilityIntegration.id == payload.integration_id,
+            CapabilityIntegration.tenant_id == ctx.tenant_id,
+            CapabilityIntegration.project_id == project_id,
+            CapabilityIntegration.environment == env,
+        )
+    )
+    if integration is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Capability integration not found for environment")
+    row = await session.scalar(
+        select(CapabilityBinding).where(
+            CapabilityBinding.tenant_id == ctx.tenant_id,
+            CapabilityBinding.project_id == project_id,
+            CapabilityBinding.environment == env,
+            CapabilityBinding.capability_key == key,
+        )
+    )
+    if row is None:
+        row = CapabilityBinding(
+            tenant_id=ctx.tenant_id,
+            workspace_id=ctx.workspace_id,
+            project_id=project_id,
+            environment=env,
+            capability_key=key,
+            integration_id=payload.integration_id,
+        )
+        session.add(row)
+    row.integration_id = payload.integration_id
+    row.target = (payload.target or "").strip() or None
+    row.status = (payload.status or row.status or "ACTIVE").strip().upper()
+    row.updated_by = (payload.updated_by or ctx.user_id or "ui-user")
+    await session.commit()
+    await session.refresh(row)
+    return CapabilityBindingOut.model_validate(row)
+
+
+@router.get("/projects/{project_id}/capability-bindings", response_model=List[CapabilityBindingOut])
+@public_router.get("/projects/{project_id}/capability-bindings", response_model=List[CapabilityBindingOut])
+async def list_project_capability_bindings(
+    project_id: uuid.UUID,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[CapabilityBindingOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    env = (environment or "PREVIEW").strip().upper()
+    result = await session.execute(
+        select(CapabilityBinding).where(
+            CapabilityBinding.tenant_id == ctx.tenant_id,
+            CapabilityBinding.project_id == project_id,
+            CapabilityBinding.environment == env,
+        ).order_by(CapabilityBinding.updated_at.desc())
+    )
+    return [CapabilityBindingOut.model_validate(item) for item in result.scalars().all()]
+
+
+@router.get("/projects/{project_id}/capabilities/{capability_key}/resolve", response_model=CapabilityResolutionOut)
+@public_router.get("/projects/{project_id}/capabilities/{capability_key}/resolve", response_model=CapabilityResolutionOut)
+async def resolve_project_capability(
+    project_id: uuid.UUID,
+    capability_key: str,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> CapabilityResolutionOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        resolved = await resolve_capability(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            environment=environment,
+            capability_key=capability_key,
+        )
+    except CapabilityResolutionError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return CapabilityResolutionOut(
+        capability_key=resolved.capability_key,
+        provider=resolved.provider,
+        environment=resolved.environment,
+        integration_id=resolved.integration_id,
+        target=resolved.target,
+        adapter=resolved.adapter,
+        health_status=resolved.health_status,
+        credentials_resolved=bool(resolved.credentials),
+        diagnostics=resolved.diagnostics,
+    )
+
+
+@router.get("/projects/{project_id}/capability-governance-check", response_model=CapabilityGovernanceCheckOut)
+@public_router.get("/projects/{project_id}/capability-governance-check", response_model=CapabilityGovernanceCheckOut)
+async def capability_governance_check(
+    project_id: uuid.UUID,
+    environment: str = Query(default="PRODUCTION"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> CapabilityGovernanceCheckOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    unresolved = await unresolved_required_capabilities(
+        session,
+        tenant_id=ctx.tenant_id,
+        project_id=project_id,
+        environment=environment,
+    )
+    return CapabilityGovernanceCheckOut(
+        environment=(environment or "PRODUCTION").strip().upper(),
+        unresolved_required_capabilities=unresolved,
+        safe_to_production=not bool(unresolved),
+    )
+
+
+@router.get("/projects/{project_id}/component-capabilities/{capability}", response_model=ComponentCapabilityOut)
+@public_router.get("/projects/{project_id}/component-capabilities/{capability}", response_model=ComponentCapabilityOut)
+async def resolve_component_capability_contract(
+    project_id: uuid.UUID,
+    capability: str,
+    variant: str = Query(default="premium_saas"),
+    environment: str = Query(default="PRODUCTION"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ComponentCapabilityOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        resolved = await resolve_component_capability_from_registry(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            environment=environment,
+            capability=capability,
+            variant=variant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return ComponentCapabilityOut(**resolved)
+
+
+@router.post("/projects/{project_id}/component-capability-contracts", response_model=ComponentCapabilityContractOut)
+@public_router.post("/projects/{project_id}/component-capability-contracts", response_model=ComponentCapabilityContractOut)
+async def upsert_project_component_capability_contract(
+    project_id: uuid.UUID,
+    payload: ComponentCapabilityContractUpsertRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ComponentCapabilityContractOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        row = await upsert_component_capability_contract(
+            session,
+            tenant_id=ctx.tenant_id,
+            workspace_id=ctx.workspace_id,
+            project_id=project_id,
+            environment=payload.environment,
+            capability=payload.capability,
+            contract_json=payload.contract_json,
+            created_by=ctx.user_id,
+            updated_by=ctx.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await session.commit()
+    await session.refresh(row)
+    return ComponentCapabilityContractOut.model_validate(row)
+
+
+@router.post("/projects/{project_id}/component-capability-contracts/approve", response_model=ComponentCapabilityContractOut)
+@public_router.post("/projects/{project_id}/component-capability-contracts/approve", response_model=ComponentCapabilityContractOut)
+async def approve_project_component_capability_contract(
+    project_id: uuid.UUID,
+    payload: ComponentCapabilityContractApproveRequest,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> ComponentCapabilityContractOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        row = await approve_component_capability_contract(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            environment=payload.environment,
+            capability=payload.capability,
+            approved_by=payload.approved_by or ctx.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    await session.commit()
+    await session.refresh(row)
+    return ComponentCapabilityContractOut.model_validate(row)
+
+
+@router.get("/projects/{project_id}/component-capability-contracts", response_model=List[ComponentCapabilityContractOut])
+@public_router.get("/projects/{project_id}/component-capability-contracts", response_model=List[ComponentCapabilityContractOut])
+async def list_project_component_capability_contracts(
+    project_id: uuid.UUID,
+    environment: str = Query(default="PREVIEW"),
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> List[ComponentCapabilityContractOut]:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        rows = await list_component_capability_contracts(
+            session,
+            tenant_id=ctx.tenant_id,
+            project_id=project_id,
+            environment=environment,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [ComponentCapabilityContractOut.model_validate(row) for row in rows]
 
 
 @public_router.post("/auth/bootstrap-first-login", response_model=FirstLoginBootstrapOut)

@@ -49,6 +49,10 @@ def _event_status(event_type: str) -> str:
 def _event_title(event: RunEvent, work_item: WorkItem | None) -> str:
     event_type = event.event_type.upper()
     label = _work_item_label(work_item)
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    recovery_ctx = payload.get("recovery_context") if isinstance(payload.get("recovery_context"), dict) else {}
+    module_node = str(recovery_ctx.get("module_node") or "").strip()
+    module_suffix = f" ({module_node})" if module_node else ""
     mapping = {
         "RUN_CREATED": "Run created",
         "RUN_BOOTSTRAP_STARTED": "Planner bootstrap started",
@@ -71,9 +75,9 @@ def _event_title(event: RunEvent, work_item: WorkItem | None) -> str:
         "WORK_ITEM_DONE": f"{label} completed",
         "WORK_ITEM_SKIPPED": f"{label} skipped",
         "WORK_ITEM_FAILED": f"{label} failed",
-        "WORK_ITEM_RECOVERY": f"Recovery created for {label}",
+        "WORK_ITEM_RECOVERY": f"Recovery created for {label}{module_suffix}",
         "WORK_ITEM_CREATED": f"{label} created",
-        "WORK_ITEM_RETRIED": f"{label} retried",
+        "WORK_ITEM_RETRIED": f"{label} retried{module_suffix}",
         "WORK_ITEM_LEASE_EXPIRED": f"{label} lease expired",
         "LIFECYCLE_SCORED": "Lifecycle score updated",
     }

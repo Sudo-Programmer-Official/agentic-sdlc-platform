@@ -32,6 +32,17 @@ from app.services.graph_context import EXECUTOR_CONTEXT_LIMITS, build_graph_cont
 from app.services.workspace_supervisor import workspace_uri
 from app.services.ai_policy import AIJobManager, AIJobRequest, TIER_ORDER, contains_sensitive_paths, estimate_tokens, is_retryable_error, retry_error_kind
 from app.services.event_log import record_event
+from app.runtime.content_binding import (
+    extract_literals,
+    build_binding_registry,
+    rewrite_with_content_slots,
+    validate_binding_rewrite,
+)
+from app.services.content_registry import upsert_content_item
+from app.runtime.frontend_topology import validate_frontend_topology
+from app.runtime.component_capability_protocol import build_component_capability_packet
+from app.runtime.mutation_governance import MutationGovernanceDecision, evaluate_mutation_governance
+from app.services.repo_intelligence_graph import get_safe_mutation_scope
 
 
 SYSTEM_PROMPT = """You are an automated code change worker.
@@ -54,6 +65,8 @@ Do not invent files outside the repo. Do not include explanations outside JSON."
 STRUCTURED_OUTPUT_RETRY_LIMIT = 1
 REPAIR_STRUCTURED_OUTPUT_RETRY_LIMIT = 2
 MAX_FRONTEND_WRITE_FILE_BYTES = 24_000
+MAX_FRONTEND_ROOT_MONOLITH_BYTES = 12_000
+MAX_FRONTEND_ROOT_MONOLITH_LINES = 260
 MUTATION_STRATEGIES = {"apply_patch", "write_file", "structured_transform", "component_replace", "multi_phase_patch"}
 LAYOUT_SENSITIVE_HINTS = {
     "nav",
@@ -86,7 +99,44 @@ _UNIFIED_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?
 _JSON_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL | re.IGNORECASE)
 _HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 _STYLE_ATTR_RE = re.compile(r"\bstyle\s*=", re.IGNORECASE)
+_INLINE_STYLE_ATTR_RE = re.compile(r"\sstyle\s*=\s*\"[^\"]*\"|\sstyle\s*=\s*'[^']*'", re.IGNORECASE)
 _COMPONENT_TAG_RE = re.compile(r"<([A-Z][A-Za-z0-9_]*)\b")
+_FRONTEND_ROOT_FILES = {
+    "index.html",
+    "app.vue",
+    "src/app.vue",
+    "apps/web/src/app.vue",
+    "apps/web/index.html",
+}
+_GOVERNED_COMPONENT_HINTS = {
+    "HeroSection",
+    "PricingCard",
+    "CTASection",
+    "FeatureGrid",
+    "ProblemSolutionSection",
+}
+_BACKEND_ROOT_FILES = {
+    "app.py",
+    "main.py",
+    "apps/api/app/main.py",
+}
+_DEFAULT_BACKEND_MODULES = {
+    "routes": "apps/api/app/routes/lead_capture.py",
+    "services": "apps/api/app/services/lead_capture_service.py",
+    "repositories": "apps/api/app/repositories/lead_capture_repository.py",
+    "schemas": "apps/api/app/schemas/lead_capture.py",
+}
+_DEFAULT_LANDING_SECTIONS = [
+    "HeroSection",
+    "ProblemSolutionSection",
+    "CapabilitiesGridSection",
+    "HowItWorksSection",
+    "ROICalculatorSection",
+    "ProofSection",
+    "PricingSection",
+    "CTASection",
+    "FooterSection",
+]
 
 
 def _verification_from_action_scope(
@@ -206,6 +256,11 @@ def _target_files_from_payload(payload: dict[str, Any] | None) -> list[str]:
         if isinstance(value, str) and value.strip():
             normalized.append(value.strip())
     return list(dict.fromkeys(normalized))
+
+
+def _has_operator_confirmation_grant(work_item: WorkItem) -> bool:
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    return bool(payload.get("operator_confirmation_granted") is True)
 
 
 def _unique_paths(values: list[str]) -> list[str]:
@@ -370,7 +425,7 @@ def _allow_adjacent_scope_expansion(
     repository_state = str(payload.get("repository_state") or "").strip().upper()
     if repository_state not in {"GENESIS", "EARLY_BUILD"} and not _is_bootstrap_or_genesis_scope(work_item):
         return False
-    if work_item.type not in {"FIX_TEST_FAILURE", "WRITE_TESTS", "CODE_BACKEND"}:
+    if work_item.type not in {"FIX_TEST_FAILURE", "WRITE_TESTS", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
         return False
     normalized = {Path(path).name.strip() for path in extra_files if isinstance(path, str) and path.strip()}
     return bool(normalized) and normalized.issubset(ADJACENT_REPAIR_FILES)
@@ -450,6 +505,16 @@ def _extract_balanced_json_block(raw: str) -> str | None:
     return None
 
 
+def _is_backend_codegen_type(work_item_type: str) -> bool:
+    return work_item_type in {
+        "CODE_BACKEND",
+        "GENERATE_ROUTE",
+        "GENERATE_SERVICE",
+        "GENERATE_REPOSITORY",
+        "GENERATE_CAPABILITY_BINDING",
+    }
+
+
 def _extract_structured_json_candidate(raw: str) -> str | None:
     stripped = raw.strip()
     if not stripped:
@@ -511,6 +576,91 @@ def _is_static_frontend_scope(payload: dict[str, Any] | None) -> bool:
     return all(Path(path).suffix.lower() in frontend_suffixes for path in target_files)
 
 
+def _is_python_backend_scope(payload: dict[str, Any] | None) -> bool:
+    target_files = _target_files_from_payload(payload)
+    if not target_files:
+        return False
+    return all(Path(path).suffix.lower() == ".py" for path in target_files)
+
+
+def _derive_frontend_topology_plan(
+    *,
+    work_item: WorkItem,
+    payload: dict[str, Any] | None,
+    target_files: list[str],
+) -> dict[str, Any] | None:
+    if work_item.type != "CODE_FRONTEND":
+        return None
+    if not _is_static_frontend_scope(payload):
+        return None
+    target_set = {path.strip().lower().replace("\\", "/") for path in target_files if isinstance(path, str) and path.strip()}
+    if not (target_set & _FRONTEND_ROOT_FILES):
+        return None
+
+    existing = payload.get("frontend_topology_plan") if isinstance(payload, dict) else None
+    if isinstance(existing, dict):
+        return existing
+
+    section_names: list[str] = []
+    title = ""
+    if isinstance(payload, dict):
+        raw_title = payload.get("task_title") or payload.get("title") or payload.get("task_description")
+        if isinstance(raw_title, str):
+            title = raw_title.strip()
+    normalized_title = title.lower()
+    for section in _DEFAULT_LANDING_SECTIONS:
+        simplified = section.replace("Section", "").lower()
+        if simplified and simplified in normalized_title:
+            section_names.append(section)
+    if not section_names:
+        section_names = list(_DEFAULT_LANDING_SECTIONS)
+
+    component_files = [f"apps/web/src/components/landing/{name}.vue" for name in section_names]
+    root_file = next((path for path in target_files if path.strip().lower().replace("\\", "/") in _FRONTEND_ROOT_FILES), "index.html")
+    return {
+        "planner_stage": "PLAN_FRONTEND_TOPOLOGY_V1",
+        "page": "LandingPage",
+        "root_file": root_file,
+        "sections": section_names,
+        "component_files": component_files,
+        "composition_file": "apps/web/src/pages/LandingPage.vue",
+        "content_slots": [f"landing.{name.replace('Section', '').lower()}" for name in section_names],
+    }
+
+
+def _derive_backend_topology_plan(
+    *,
+    work_item: WorkItem,
+    payload: dict[str, Any] | None,
+    target_files: list[str],
+) -> dict[str, Any] | None:
+    if work_item.type != "CODE_BACKEND":
+        return None
+    if not _is_python_backend_scope(payload):
+        return None
+    target_set = {path.strip().lower().replace("\\", "/") for path in target_files if isinstance(path, str) and path.strip()}
+    if not (target_set & _BACKEND_ROOT_FILES):
+        return None
+
+    existing = payload.get("backend_topology_plan") if isinstance(payload, dict) else None
+    if isinstance(existing, dict):
+        return existing
+
+    modules = dict(_DEFAULT_BACKEND_MODULES)
+    return {
+        "planner_stage": "PLAN_BACKEND_TOPOLOGY_V1",
+        "entrypoint_file": next((path for path in target_files if path.strip().lower().replace("\\", "/") in _BACKEND_ROOT_FILES), "app.py"),
+        "framework": "fastapi",
+        "module_files": modules,
+        "rules": {
+            "service_layer_required": True,
+            "repository_layer_required": True,
+            "database_access_forbidden_in_routes": True,
+            "max_route_file_lines": 250,
+        },
+    }
+
+
 def _stage_scope_violations(
     work_item: WorkItem,
     actions: list[Any],
@@ -559,7 +709,7 @@ class CodexExecutor(TaskExecutor):
         if work_item.type == "WRITE_TESTS":
             return float("inf")
         if (
-            work_item.type == "CODE_BACKEND"
+            _is_backend_codegen_type(work_item.type)
             and (
                 repository_state in {"GENESIS", "EARLY_BUILD"}
                 or recovery_strategy == "write_file_preferred"
@@ -627,10 +777,10 @@ class CodexExecutor(TaskExecutor):
             recovery_strategy = str(payload.get("recovery_strategy") or "").strip().lower()
             if work_item.type == "CODE_FRONTEND" and recovery_strategy == "write_file_preferred":
                 return "write_file", ["apply_patch"], ["recovery_strategy_write_file_preferred"], 0.9, 0.9, execution_zone
-            if work_item.type == "CODE_BACKEND" and recovery_strategy == "write_file_preferred":
+            if _is_backend_codegen_type(work_item.type) and recovery_strategy == "write_file_preferred":
                 return "write_file", ["apply_patch"], ["recovery_strategy_write_file_preferred"], 0.85, 0.9, execution_zone
             repository_state = str(payload.get("repository_state") or "").strip().upper()
-            if work_item.type == "CODE_BACKEND" and repository_state in {"GENESIS", "EARLY_BUILD"}:
+            if _is_backend_codegen_type(work_item.type) and repository_state in {"GENESIS", "EARLY_BUILD"}:
                 return "write_file", ["apply_patch"], ["repository_state_write_file_preferred"], 0.7, 0.88, execution_zone
         static_frontend_scope = work_item.type == "CODE_FRONTEND" and _is_static_frontend_scope(payload)
         target_files = _target_files_from_payload(payload)
@@ -686,7 +836,7 @@ class CodexExecutor(TaskExecutor):
         return "apply_patch", ["write_file"], reasons or ["default_apply_patch"], drift_risk_score, 0.65, execution_zone
 
     def _system_prompt_for(self, work_item: WorkItem) -> str:
-        if work_item.type in {"PLAN_DAG", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        if work_item.type in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
             return REVIEW_SYSTEM_PROMPT
         return SYSTEM_PROMPT
 
@@ -736,6 +886,7 @@ class CodexExecutor(TaskExecutor):
             return policy.selected_model_tier
         if retry_reason in {"structured_parser_failure", "stage_scope_violation", "project_contract_violation"} and work_item.type in {
             "PLAN_DAG",
+            "PLAN_BACKEND_TOPOLOGY",
             "WRITE_TESTS",
             "CODE_FRONTEND",
             "REVIEW_DIFF",
@@ -814,6 +965,76 @@ class CodexExecutor(TaskExecutor):
                 allowed_files = list(writable_scope)
         elif target_files:
             allowed_files = list(dict.fromkeys(target_files + allowed_files))
+        session = getattr(context, "session", None)
+        if session is not None:
+            try:
+                payload_dict = work_item.payload if isinstance(work_item.payload, dict) else {}
+                topology = (
+                    payload_dict.get("backend_topology_plan")
+                    if isinstance(payload_dict.get("backend_topology_plan"), dict)
+                    else {}
+                )
+                graph_caps = [
+                    str(item).strip().lower()
+                    for item in (
+                        list(work_item.required_capabilities or [])
+                        + list(topology.get("allowed_capabilities") or [])
+                    )
+                    if str(item).strip()
+                ]
+                anchor_scope = list(dict.fromkeys([*target_files, *allowed_files]))[:12]
+                if anchor_scope:
+                    safe_scope = await get_safe_mutation_scope(
+                        session,
+                        tenant_id=work_item.tenant_id,
+                        project_id=work_item.project_id,
+                        anchor_files=anchor_scope,
+                        capabilities=graph_caps,
+                        depth=1,
+                        limit=50,
+                    )
+                    safe_paths = [node.path for node in safe_scope.files if isinstance(node.path, str) and node.path.strip()]
+                    if safe_paths:
+                        allowed_files = list(dict.fromkeys([*anchor_scope, *safe_paths]))
+                        context_bundle["meta"]["repo_intelligence_scope"] = {
+                            "anchor_files": anchor_scope,
+                            "capabilities": graph_caps,
+                            "safe_scope_files": safe_paths[:40],
+                        }
+            except Exception:
+                # Best effort only; executor should still run with existing scope derivation.
+                pass
+
+        topology_plan = _derive_frontend_topology_plan(
+            work_item=work_item,
+            payload=work_item.payload if isinstance(work_item.payload, dict) else {},
+            target_files=target_files,
+        )
+        if isinstance(topology_plan, dict):
+            if isinstance(work_item.payload, dict):
+                work_item.payload["frontend_topology_plan"] = topology_plan
+            planned_component_files = [
+                path for path in topology_plan.get("component_files", [])
+                if isinstance(path, str) and path.strip()
+            ]
+            if planned_component_files:
+                allowed_files = list(dict.fromkeys(allowed_files + planned_component_files))
+        backend_topology_plan = _derive_backend_topology_plan(
+            work_item=work_item,
+            payload=work_item.payload if isinstance(work_item.payload, dict) else {},
+            target_files=target_files,
+        )
+        if isinstance(backend_topology_plan, dict):
+            if isinstance(work_item.payload, dict):
+                work_item.payload["backend_topology_plan"] = backend_topology_plan
+            module_files = backend_topology_plan.get("module_files")
+            if isinstance(module_files, dict):
+                planned_backend_files = [
+                    path for path in module_files.values()
+                    if isinstance(path, str) and path.strip()
+                ]
+                if planned_backend_files:
+                    allowed_files = list(dict.fromkeys(allowed_files + planned_backend_files))
         (
             selected_mutation_strategy,
             mutation_strategy_fallbacks,
@@ -860,6 +1081,10 @@ class CodexExecutor(TaskExecutor):
         if isinstance(context.project_contract, dict):
             context_bundle["meta"]["project_contract"] = context.project_contract
             context_bundle["meta"]["design_context_packet"] = _design_context_packet(context.project_contract)
+        if isinstance(topology_plan, dict):
+            context_bundle["meta"]["frontend_topology_plan"] = topology_plan
+        if isinstance(backend_topology_plan, dict):
+            context_bundle["meta"]["backend_topology_plan"] = backend_topology_plan
         if contract is not None:
             context_bundle["meta"]["execution_contract"] = contract.to_dict()
         if isinstance(context.plan_snapshot, dict):
@@ -968,6 +1193,14 @@ class CodexExecutor(TaskExecutor):
             work_item=work_item,
             contract=contract,
         )
+        # Planning/review stages are analysis-only and should not be blocked by
+        # human-review gating that is intended for mutation-capable stages.
+        should_block_on_human_review = work_item.type not in {
+            "PLAN_DAG",
+            "PLAN_BACKEND_TOPOLOGY",
+            "REVIEW_DIFF",
+            "REVIEW_INTEGRATION",
+        }
         prepared = await self._job_manager.prepare_job(
             job_request,
             system_prompt=system_prompt,
@@ -976,7 +1209,7 @@ class CodexExecutor(TaskExecutor):
             cache_hit_count=context_pack.cache_hits,
             context_pack=context_pack,
             completion_token_estimate=completion_token_estimate,
-            block_on_human_review=True,
+            block_on_human_review=should_block_on_human_review,
         )
         if prepared.stop_reason:
             log.warning(
@@ -1253,6 +1486,7 @@ class CodexExecutor(TaskExecutor):
         patch_repair_parse_retry_attempted = False
         stage_scope_repair_attempted = False
         project_contract_repair_attempted = False
+        content_binding_records: list[dict[str, Any]] = []
         while True:
             design_violation_records = self._design_validation_records(
                 work_item=work_item,
@@ -1352,6 +1586,8 @@ class CodexExecutor(TaskExecutor):
                 hard_file_budget=int(edit_budget["hard_file_budget"]),
                 contract=contract,
                 project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
+                work_item_type=work_item.type,
+                work_item_payload=work_item.payload if isinstance(work_item.payload, dict) else None,
             )
             extra_scope_files = [path for path in patch_guard.touched_files if path not in patch_guard.allowed_files]
             if _allow_adjacent_scope_expansion(work_item=work_item, extra_files=extra_scope_files):
@@ -1366,30 +1602,48 @@ class CodexExecutor(TaskExecutor):
                     hard_file_budget=int(edit_budget["hard_file_budget"]),
                     contract=contract,
                     project_contract=context.project_contract if isinstance(context.project_contract, dict) else None,
+                    work_item_type=work_item.type,
+                    work_item_payload=work_item.payload if isinstance(work_item.payload, dict) else None,
                 )
-                await record_event(
-                    context.session,
-                    project_id=work_item.project_id,
-                    run_id=work_item.run_id,
-                    work_item_id=work_item.id,
-                    event_type="RUN_SCOPE_EXPANDED",
-                    actor_type="SYSTEM",
-                    tenant_id=work_item.tenant_id,
-                    payload={
-                        "work_item_id": str(work_item.id),
-                        "reason": "adjacent_repair_scope_expansion",
-                        "repository_state": str((work_item.payload or {}).get("repository_state") or ""),
-                        "added_files": extra_scope_files,
-                        "allowed_files_count": len(expanded_scope),
-                    },
-                )
+                async with SessionLocal() as session:
+                    await record_event(
+                        session,
+                        project_id=work_item.project_id,
+                        run_id=work_item.run_id,
+                        work_item_id=work_item.id,
+                        event_type="RUN_SCOPE_EXPANDED",
+                        actor_type="SYSTEM",
+                        tenant_id=work_item.tenant_id,
+                        payload={
+                            "work_item_id": str(work_item.id),
+                            "reason": "adjacent_repair_scope_expansion",
+                            "repository_state": str((work_item.payload or {}).get("repository_state") or ""),
+                            "added_files": extra_scope_files,
+                            "allowed_files_count": len(expanded_scope),
+                        },
+                    )
             stage_violations = _stage_scope_violations(work_item, plan.actions, patch_guard.touched_files)
+            content_binding_violations, content_binding_records = self._content_binding_pass(
+                work_item=work_item,
+                actions=plan.actions,
+            )
+            stage_violations.extend(content_binding_violations)
             stage_violations.extend(
                 self._frontend_writefile_violations(
                     work_item=work_item,
                     actions=plan.actions,
                 )
             )
+            stage_violations.extend(
+                self._backend_writefile_violations(
+                    work_item=work_item,
+                    actions=plan.actions,
+                )
+            )
+            if work_item.type == "CODE_FRONTEND":
+                stage_violations.extend(
+                    validate_frontend_topology(actions=plan.actions, enforce=True)
+                )
             stage_violations.extend(
                 self._mutation_strategy_violations(
                     work_item=work_item,
@@ -1411,11 +1665,27 @@ class CodexExecutor(TaskExecutor):
             verification = await self._load_patch_verification(work_item, context)
             verification = _verification_from_action_scope(verification, patch_guard.touched_files)
             repository_state = str(((work_item.payload or {}) if isinstance(work_item.payload, dict) else {}).get("repository_state") or "")
-            if _should_block_for_operator_confirmation(
+            payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+            target_files = _target_files_from_payload(payload)
+            operator_confirmation_required = _should_block_for_operator_confirmation(
                 verification,
                 plan.actions,
                 repository_state=repository_state,
-            ):
+            )
+            governance_decision = evaluate_mutation_governance(
+                work_item_type=work_item.type,
+                target_files=target_files,
+                changed_files=patch_guard.touched_files,
+                operator_confirmation_required=operator_confirmation_required,
+            )
+            confirmation_granted = _has_operator_confirmation_grant(work_item)
+            if confirmation_granted and governance_decision.requires_confirmation:
+                governance_decision = MutationGovernanceDecision(
+                    requires_confirmation=False,
+                    mutation_class=governance_decision.mutation_class,
+                    reason="operator_confirmation_granted",
+                )
+            if governance_decision.requires_confirmation:
                 await self._job_manager.fail_job(
                     prepared.job_id,
                     reason="human_review_required",
@@ -1426,15 +1696,28 @@ class CodexExecutor(TaskExecutor):
                     actual_cost_cents=usage_cost_cents,
                     approval_state="pending",
                     status="blocked",
-                    details={"verification": verification.model_dump()},
+                    details={
+                        "verification": verification.model_dump(),
+                        "mutation_governance": {
+                            "mutation_class": governance_decision.mutation_class,
+                            "reason": governance_decision.reason,
+                        },
+                    },
                 )
                 return {
                     "status": "FAILED",
                     "message": "Patch execution requires operator confirmation before mutating the repository.",
                     "payload": {
+                        "approval_required": True,
+                        "stop_reason": "human_review_required",
+                        "error": "operator_confirmation_required",
                         "actions": [a.model_dump() for a in plan.actions],
                         "verification": verification.model_dump(),
                         "touched_files": patch_guard.touched_files,
+                        "mutation_governance": {
+                            "mutation_class": governance_decision.mutation_class,
+                            "reason": governance_decision.reason,
+                        },
                     },
                     "warnings": ["requires_confirmation"],
                 }
@@ -1854,6 +2137,12 @@ class CodexExecutor(TaskExecutor):
             review_metrics["patch_lines"] = changed_lines if 'changed_lines' in locals() else None
         combined_warnings = list(dict.fromkeys([*plan.warnings, *patch_guard.project_warnings]))
         final_status = "completed" if effective_status in {"DONE", "SKIPPED"} else "failed"
+        if final_status == "completed" and content_binding_records:
+            await self._sync_content_bindings(
+                context=context,
+                work_item=work_item,
+                binding_records=content_binding_records,
+            )
         if final_status == "completed":
             await self._job_manager.complete_job(
                 prepared.job_id,
@@ -2335,11 +2624,15 @@ class CodexExecutor(TaskExecutor):
                 (
                     "CODE_FRONTEND write_file payload too large" in violation
                     or "CODE_FRONTEND mutation_strategy violation" in violation
+                    or "CODE_FRONTEND structural contract violation" in violation
                 )
                 for violation in violations
             )
-        if work_item.type == "CODE_BACKEND":
-            return any("CODE_BACKEND mutation_strategy violation" in violation for violation in violations)
+        if _is_backend_codegen_type(work_item.type):
+            return any(
+                ("mutation_strategy violation" in violation or "structural contract violation" in violation)
+                for violation in violations
+            )
         return False
 
     def _mutation_strategy_violations(
@@ -2349,7 +2642,7 @@ class CodexExecutor(TaskExecutor):
         selected_strategy: str,
         actions: list[Any],
     ) -> list[str]:
-        if work_item.type not in {"CODE_FRONTEND", "CODE_BACKEND"}:
+        if work_item.type not in {"CODE_FRONTEND", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
             return []
         # Frontend: strategy is a preference signal; only reject mixed mutation output.
         # Backend: write_file_preferred recovery is a hard override for convergence.
@@ -2358,11 +2651,11 @@ class CodexExecutor(TaskExecutor):
             for action in actions
             if getattr(action, "type", None) in {"write_file", "apply_patch"}
         }
-        if work_item.type == "CODE_BACKEND":
+        if _is_backend_codegen_type(work_item.type):
             recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
             if recovery_strategy == "write_file_preferred" and "apply_patch" in mutating_types:
                 return [
-                    "CODE_BACKEND mutation_strategy violation: recovery_strategy_write_file_preferred requires write_file output."
+                    f"{work_item.type} mutation_strategy violation: recovery_strategy_write_file_preferred requires write_file output."
                 ]
         if len(mutating_types) > 1:
             return [
@@ -2374,6 +2667,23 @@ class CodexExecutor(TaskExecutor):
         if work_item.type != "CODE_FRONTEND" or not _is_static_frontend_scope(work_item.payload):
             return []
         violations: list[str] = []
+        topology_plan = (
+            (work_item.payload or {}).get("frontend_topology_plan")
+            if isinstance(work_item.payload, dict)
+            else None
+        )
+        planned_components = set()
+        if isinstance(topology_plan, dict) and isinstance(topology_plan.get("component_files"), list):
+            planned_components = {
+                str(path).strip().lower().replace("\\", "/")
+                for path in topology_plan.get("component_files", [])
+                if isinstance(path, str) and path.strip()
+            }
+        touched_write_paths = {
+            str(getattr(action, "path", "") or "").strip().lower().replace("\\", "/")
+            for action in actions
+            if getattr(action, "type", None) == "write_file"
+        }
         for action in actions:
             if getattr(action, "type", None) != "write_file":
                 continue
@@ -2387,7 +2697,178 @@ class CodexExecutor(TaskExecutor):
                     f"CODE_FRONTEND write_file payload too large for {path} ({size} bytes > {MAX_FRONTEND_WRITE_FILE_BYTES}). "
                     "Use minimal apply_patch hunks instead of full-file rewrites."
                 )
+            normalized_path = str(path).strip().lower().replace("\\", "/")
+            line_count = content.count("\n") + (1 if content else 0)
+            has_governed_import = "components/governed/" in content or "components\\\\governed\\\\" in content
+            used_components = set(_COMPONENT_TAG_RE.findall(content))
+            has_governed_component_usage = bool(used_components & _GOVERNED_COMPONENT_HINTS)
+            section_count = len(re.findall(r"<section\b", content, flags=re.IGNORECASE))
+            repeated_inline_sections = section_count >= 6
+            if (
+                normalized_path in _FRONTEND_ROOT_FILES
+                and size > MAX_FRONTEND_ROOT_MONOLITH_BYTES
+                and line_count > MAX_FRONTEND_ROOT_MONOLITH_LINES
+                and len(_COMPONENT_TAG_RE.findall(content)) < 3
+            ):
+                violations.append(
+                    f"CODE_FRONTEND structural contract violation in {path}: dense single-file root output "
+                    f"({line_count} lines, {size} bytes) exceeds monolith threshold. "
+                    "Extract sections into component files and keep root composition-only."
+                )
+            if (
+                normalized_path in _FRONTEND_ROOT_FILES
+                and line_count > 180
+                and not has_governed_import
+                and not has_governed_component_usage
+            ):
+                violations.append(
+                    f"CODE_FRONTEND structural contract violation in {path}: large root page ({line_count} lines) "
+                    "must compose from governed components in src/components/governed/."
+                )
+            if (
+                normalized_path in _FRONTEND_ROOT_FILES
+                and repeated_inline_sections
+                and not has_governed_component_usage
+            ):
+                violations.append(
+                    f"CODE_FRONTEND structural contract violation in {path}: repeated inline section patterns detected "
+                    f"({section_count} <section> blocks) without governed component composition."
+                )
+            if (
+                normalized_path in _FRONTEND_ROOT_FILES
+                and size > MAX_FRONTEND_ROOT_MONOLITH_BYTES
+                and planned_components
+                and not (touched_write_paths & planned_components)
+            ):
+                violations.append(
+                    f"CODE_FRONTEND structural contract violation in {path}: planned topology requires componentized output "
+                    "but no planned component files were written."
+                )
         return violations
+
+    def _backend_writefile_violations(self, *, work_item: WorkItem, actions: list[Any]) -> list[str]:
+        if not _is_backend_codegen_type(work_item.type):
+            return []
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        target_files = _target_files_from_payload(payload)
+        normalized_targets = {path.strip().lower().replace("\\", "/") for path in target_files if isinstance(path, str) and path.strip()}
+        if not (normalized_targets & _BACKEND_ROOT_FILES):
+            return []
+        topology_plan = payload.get("backend_topology_plan") if isinstance(payload.get("backend_topology_plan"), dict) else None
+        planned_module_files = set()
+        if isinstance(topology_plan, dict):
+            module_files = topology_plan.get("module_files")
+            if isinstance(module_files, dict):
+                planned_module_files = {
+                    str(path).strip().lower().replace("\\", "/")
+                    for path in module_files.values()
+                    if isinstance(path, str) and path.strip()
+                }
+        touched_write_paths = {
+            str(getattr(action, "path", "") or "").strip().lower().replace("\\", "/")
+            for action in actions
+            if getattr(action, "type", None) == "write_file"
+        }
+        violations: list[str] = []
+        for action in actions:
+            if getattr(action, "type", None) != "write_file":
+                continue
+            content = getattr(action, "content", None)
+            path = str(getattr(action, "path", "") or "").strip()
+            if not isinstance(content, str):
+                continue
+            normalized_path = path.lower().replace("\\", "/")
+            line_count = content.count("\n") + (1 if content else 0)
+            if normalized_path in _BACKEND_ROOT_FILES and line_count > 280:
+                violations.append(
+                    f"{work_item.type} structural contract violation in {path}: dense root backend module "
+                    f"({line_count} lines) exceeds bounded topology threshold. Split into route/service/repository modules."
+                )
+            if (
+                normalized_path in _BACKEND_ROOT_FILES
+                and line_count > 180
+                and planned_module_files
+                and not (touched_write_paths & planned_module_files)
+            ):
+                violations.append(
+                    f"{work_item.type} structural contract violation in {path}: planned backend topology requires modular output "
+                    "but no planned route/service/repository/schema files were written."
+                )
+        return violations
+
+    def _content_binding_pass(
+        self,
+        *,
+        work_item: WorkItem,
+        actions: list[Any],
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        if work_item.type != "CODE_FRONTEND":
+            return [], []
+        violations: list[str] = []
+        binding_records: list[dict[str, Any]] = []
+        for action in actions:
+            if getattr(action, "type", None) != "write_file":
+                continue
+            path = str(getattr(action, "path", "") or "").strip()
+            content = getattr(action, "content", None)
+            if not path or not isinstance(content, str):
+                continue
+            suffix = Path(path).suffix.lower()
+            if suffix not in {".html", ".vue"}:
+                continue
+            literals = extract_literals(content)
+            if not literals:
+                continue
+            bindings = build_binding_registry(rel_path=path, literals=literals)
+            rewritten = rewrite_with_content_slots(content, bindings)
+            binding_violations = validate_binding_rewrite(rewritten.content, bindings)
+            if binding_violations:
+                violations.extend([f"{path}: {msg}" for msg in binding_violations])
+                continue
+            action.content = rewritten.content
+            for entry in bindings:
+                if entry.key not in rewritten.applied_keys:
+                    continue
+                binding_records.append(
+                    {
+                        "environment": "PREVIEW",
+                        "key": entry.key,
+                        "type": "text",
+                        "value": entry.value,
+                        "source": "runtime",
+                    }
+                )
+        return violations, binding_records
+
+    async def _sync_content_bindings(
+        self,
+        *,
+        context: RunContext,
+        work_item: WorkItem,
+        binding_records: list[dict[str, Any]],
+    ) -> None:
+        if not binding_records:
+            return
+        async with SessionLocal() as session:
+            seen: set[str] = set()
+            for record in binding_records:
+                key = str(record.get("key") or "").strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                await upsert_content_item(
+                    session,
+                    tenant_id=work_item.tenant_id,
+                    workspace_id=getattr(context, "workspace_id", None),
+                    project_id=work_item.project_id,
+                    environment=str(record.get("environment") or "PREVIEW"),
+                    key=key,
+                    content_type=str(record.get("type") or "text"),
+                    value=record.get("value"),
+                    source=str(record.get("source") or "runtime"),
+                    updated_by="runtime.codex_executor",
+                    status="DRAFT",
+                )
 
     def _extract_added_patch_content(self, patch: str) -> str:
         added_lines: list[str] = []
@@ -2480,6 +2961,18 @@ class CodexExecutor(TaskExecutor):
                             rewritten_patch = rewritten_patch.replace(source_hex.upper(), target_hex.upper())
                         setattr(action, "patch", rewritten_patch)
                         content = self._extract_added_patch_content(rewritten_patch)
+            if enforce_inline and bootstrap_mode:
+                # Bootstrap scaffolds should not fail hard for inline-style drift.
+                # Strip inline style attributes before validation and continue.
+                stripped = _INLINE_STYLE_ATTR_RE.sub("", content)
+                if stripped != content:
+                    if action_type == "write_file":
+                        setattr(action, "content", stripped)
+                    elif action_type == "apply_patch":
+                        original_patch = getattr(action, "patch", None)
+                        if isinstance(original_patch, str):
+                            setattr(action, "patch", _INLINE_STYLE_ATTR_RE.sub("", original_patch))
+                    content = stripped
             if enforce_inline and _STYLE_ATTR_RE.search(content):
                 records.append(
                     {
@@ -2603,7 +3096,7 @@ class CodexExecutor(TaskExecutor):
             # extra room to avoid truncated structured output.
             boosted_floor = max(boosted_floor, 3200 if selected_model_tier != "tier_economy" else 1600)
             boosted_cap = 6000 if selected_model_tier != "tier_economy" else 3200
-        elif work_item.type in {"CODE_FRONTEND", "CODE_BACKEND"}:
+        elif work_item.type in {"CODE_FRONTEND", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
             boosted_floor = max(boosted_floor, 2200 if selected_model_tier != "tier_economy" else 1200)
             if self._frontend_retry_cap_bump_active(work_item):
                 boosted_floor = max(
@@ -2614,7 +3107,7 @@ class CodexExecutor(TaskExecutor):
                     boosted_cap,
                     int(getattr(self.settings, "codex_frontend_retry_completion_cap_tokens", boosted_cap)),
                 )
-        elif work_item.type not in {"PLAN_DAG", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        elif work_item.type not in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
             boosted_floor = max(boosted_floor, 1600)
         boosted = min(max(current_max_tokens * 2, boosted_floor), boosted_cap)
         if contract is not None and contract.budget.remaining_tokens > 0:
@@ -2629,7 +3122,7 @@ class CodexExecutor(TaskExecutor):
         work_item: WorkItem,
         contract: ExecutionContract | None,
     ) -> int:
-        if work_item.type == "PLAN_DAG":
+        if work_item.type in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY"}:
             # Keep planning responses compact and schema-focused to avoid large
             # truncated patch payloads in the planning stage.
             planning_cap = int(getattr(self.settings, "ai_default_completion_economy_tokens", 800))
@@ -2686,7 +3179,7 @@ class CodexExecutor(TaskExecutor):
         primary_scope = _target_files_from_payload(work_item.payload) or allowed_files[:1]
         if primary_scope:
             guidance.append(f"Prefer touching only this primary file unless the schema requires otherwise: {', '.join(primary_scope[:2])}.")
-        if work_item.type in {"CODE_BACKEND", "WRITE_TESTS"}:
+        if _is_backend_codegen_type(work_item.type) or work_item.type == "WRITE_TESTS":
             guidance.append(
                 "If a long apply_patch diff risks truncation, prefer write_file for a single targeted file or a shorter patch."
             )
@@ -2705,7 +3198,7 @@ class CodexExecutor(TaskExecutor):
                 guidance.append(
                     "If output size is large, avoid full-file write_file rewrites; emit minimal apply_patch hunks to keep JSON compact."
                 )
-        if work_item.type == "CODE_BACKEND":
+        if _is_backend_codegen_type(work_item.type):
             recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
             if recovery_strategy == "write_file_preferred":
                 guidance.append(
@@ -2802,11 +3295,11 @@ class CodexExecutor(TaskExecutor):
                     " Keep scope bounded to allowed files."
                     " Do not embed data: URLs, base64 blobs, or encoded inline scripts."
                 )
-        if work_item.type == "CODE_BACKEND":
+        if _is_backend_codegen_type(work_item.type):
             recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
             if recovery_strategy == "write_file_preferred":
                 repair_prompt += (
-                    "\nFor this CODE_BACKEND recovery retry, avoid apply_patch."
+                    f"\nFor this {work_item.type} recovery retry, avoid apply_patch."
                     " Emit write_file for the primary scoped backend file with complete updated content."
                     " Keep scope bounded to allowed files."
                 )
@@ -3017,7 +3510,7 @@ class CodexExecutor(TaskExecutor):
             "Return a corrected JSON object matching the schema.\n"
             "Do not include prose outside the JSON object."
         )
-        if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND"}:
+        if work_item.type in {"CODE_FRONTEND", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
             repair_prompt += (
                 "\nIf a long apply_patch diff risks malformed hunks, prefer write_file for one scoped file with full contents."
             )
@@ -3237,6 +3730,15 @@ class CodexExecutor(TaskExecutor):
                 + "."
             )
             base += " Frontend generation must obey this packet and compose from governed primitives only."
+            if work_item.type == "CODE_FRONTEND":
+                variant = str((work_item.payload or {}).get("component_variant") or design_packet.get("experience_blueprint") or "premium_saas")
+                capability_packet = build_component_capability_packet(
+                    allowed_components=list(design_packet.get("allowed_components", []) or []),
+                    variant=variant,
+                )
+                if capability_packet.get("components"):
+                    base += " COMPONENT_CAPABILITY_PACKET: " + json.dumps(capability_packet, sort_keys=True) + "."
+                    base += " Assemble UI from this capability packet; do not invent large inline sections."
         brand_tokens = brand_kit.get("tokens") if isinstance(brand_kit.get("tokens"), dict) else {}
         token_names: list[str] = []
         if brand_tokens:
@@ -3290,11 +3792,50 @@ class CodexExecutor(TaskExecutor):
             base += (
                 " For a bounded static frontend file, prefer tightly scoped apply_patch edits and avoid full-file rewrites unless absolutely necessary."
             )
+            topology_plan = (
+                (work_item.payload or {}).get("frontend_topology_plan")
+                if isinstance(work_item.payload, dict)
+                else None
+            )
+            if isinstance(topology_plan, dict):
+                sections = topology_plan.get("sections") if isinstance(topology_plan.get("sections"), list) else []
+                component_files = (
+                    topology_plan.get("component_files")
+                    if isinstance(topology_plan.get("component_files"), list)
+                    else []
+                )
+                root_file = str(topology_plan.get("root_file") or "index.html")
+                if sections or component_files:
+                    base += (
+                        " Frontend topology plan is active."
+                        f" Root composition file: {root_file}."
+                        f" Planned sections: {', '.join([str(s) for s in sections[:8]])}."
+                        f" Planned component files: {', '.join([str(p) for p in component_files[:8]])}."
+                        " Keep root file composition-oriented and place section implementation in planned component files."
+                )
             if recovery_strategy == "write_file_preferred":
                 base += (
                     " Recovery override: previous patch application drifted."
                     " For this retry, prefer write_file with full contents for the primary scoped file (typically index.html),"
                     " then keep any remaining edits minimal."
+                )
+        if _is_backend_codegen_type(work_item.type):
+            backend_topology_plan = (
+                (work_item.payload or {}).get("backend_topology_plan")
+                if isinstance(work_item.payload, dict)
+                else None
+            )
+            if isinstance(backend_topology_plan, dict):
+                module_files = (
+                    backend_topology_plan.get("module_files")
+                    if isinstance(backend_topology_plan.get("module_files"), dict)
+                    else {}
+                )
+                base += (
+                    " Backend topology plan is active."
+                    f" Entrypoint: {backend_topology_plan.get('entrypoint_file') or 'app.py'}."
+                    f" Planned modules: {', '.join([str(v) for v in list(module_files.values())[:6]])}."
+                    " Keep root backend file thin and move route/business/data logic into planned modules."
                 )
         test_dependency_guard = (
             " Tests must rely on the Python standard library or dependencies that are already declared in repo "
@@ -3361,9 +3902,16 @@ class CodexExecutor(TaskExecutor):
         allowed_files: list[str],
         execution_contract: ExecutionContract | None = None,
     ) -> AIJobRequest:
-        candidate_paths = self._candidate_paths(work_item, context_bundle, allowed_files, execution_contract)
-        risk_level = self._risk_level_for_work_item(work_item, candidate_paths)
         payload = work_item.payload or {}
+        candidate_paths = self._candidate_paths(work_item, context_bundle, allowed_files, execution_contract)
+        risk_paths = candidate_paths
+        if work_item.type == "CODE_FRONTEND":
+            # Frontend work can include backend files in surrounding context packs.
+            # Risk gating should key off the intended edit scope, not incidental context.
+            scoped_targets = _target_files_from_payload(payload)
+            if scoped_targets:
+                risk_paths = scoped_targets
+        risk_level = self._risk_level_for_work_item(work_item, risk_paths)
         if "PLAN" in work_item.type:
             role = "planner"
             task_type = "planning"
@@ -3456,7 +4004,7 @@ class CodexExecutor(TaskExecutor):
             feature_key=self._feature_key_for_work_item(work_item),
             surface=self._surface_for_work_item(work_item),
             entrypoint="runtime.codex_executor",
-            changed_files=candidate_paths,
+            changed_files=risk_paths,
             tests_failed=work_item.type == "FIX_TEST_FAILURE",
             metadata=metadata,
         )
@@ -3477,6 +4025,7 @@ class CodexExecutor(TaskExecutor):
             return explicit.strip()
         mapping = {
             "PLAN_DAG": "planning",
+            "PLAN_BACKEND_TOPOLOGY": "planning",
             "REVIEW_DIFF": "review",
             "REVIEW_INTEGRATION": "review",
             "WRITE_TESTS": "tests",
@@ -3484,6 +4033,10 @@ class CodexExecutor(TaskExecutor):
             "FIX_TEST_FAILURE": "tests",
             "CODE_FRONTEND": "frontend",
             "CODE_BACKEND": "backend",
+            "GENERATE_ROUTE": "backend",
+            "GENERATE_SERVICE": "backend",
+            "GENERATE_REPOSITORY": "backend",
+            "GENERATE_CAPABILITY_BINDING": "backend",
         }
         return mapping.get(work_item.type, "runtime")
 
@@ -3534,7 +4087,7 @@ class CodexExecutor(TaskExecutor):
     def _risk_level_for_work_item(self, work_item: WorkItem, candidate_paths: list[str]) -> str:
         if contains_sensitive_paths(candidate_paths) or work_item.type == "REVIEW_INTEGRATION":
             return "high"
-        if work_item.type in {"CODE_BACKEND", "CODE_FRONTEND", "FIX_TEST_FAILURE", "REVIEW_DIFF"} or len(candidate_paths) >= 4:
+        if work_item.type in {"CODE_BACKEND", "CODE_FRONTEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING", "FIX_TEST_FAILURE", "REVIEW_DIFF"} or len(candidate_paths) >= 4:
             return "medium"
         return "low"
 

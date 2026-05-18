@@ -105,3 +105,72 @@ def test_patch_guard_warn_mode_logs_project_contract_violations_without_blocking
     assert decision.violations == []
     assert any("disallows inline style attributes" in warning for warning in decision.project_warnings)
     assert any("requires brand color tokens" in warning for warning in decision.project_warnings)
+
+
+def test_patch_guard_blocks_hardcoded_provider_and_secret_patterns():
+    decision = evaluate_patch_guard(
+        actions=[
+            Action(
+                type="write_file",
+                path="apps/web/src/components/FormAction.vue",
+                content='const url = "https://myproj.supabase.co/rest/v1/leads";\\nconst api_key = "sk_test_123456789";\\n',
+            )
+        ],
+        allowed_files=["apps/web/src/components/FormAction.vue"],
+    )
+
+    assert decision.ok is False
+    assert any("Capability governance violation" in violation for violation in decision.violations)
+
+
+def test_patch_guard_enforces_backend_topology_for_code_backend():
+    decision = evaluate_patch_guard(
+        actions=[
+            Action(
+                type="write_file",
+                path="apps/api/app/routes/lead_capture.py",
+                content="from sqlalchemy import select\nresult = session.execute(select(Lead))\n",
+            )
+        ],
+        work_item_type="CODE_BACKEND",
+        work_item_payload={
+            "backend_topology_plan": {
+                "planned_files": [
+                    "apps/api/app/routes/lead_capture.py",
+                    "apps/api/app/services/lead_capture_service.py",
+                    "apps/api/app/repositories/lead_capture_repository.py",
+                ],
+                "routes": ["apps/api/app/routes/lead_capture.py"],
+                "services": ["apps/api/app/services/lead_capture_service.py"],
+                "repositories": ["apps/api/app/repositories/lead_capture_repository.py"],
+                "allowed_capabilities": ["lead_capture_storage"],
+            }
+        },
+    )
+
+    assert decision.ok is False
+    assert any("Routes must not include DB logic" in violation for violation in decision.violations)
+
+
+def test_patch_guard_blocks_route_level_capability_resolution():
+    decision = evaluate_patch_guard(
+        actions=[
+            Action(
+                type="write_file",
+                path="apps/api/app/routes/lead_capture.py",
+                content='adapter = resolve_capability("lead_capture_storage")\n',
+            )
+        ],
+        work_item_type="CODE_BACKEND",
+        work_item_payload={
+            "backend_topology_plan": {
+                "planned_files": ["apps/api/app/routes/lead_capture.py", "apps/api/app/services/lead_capture_service.py"],
+                "routes": ["apps/api/app/routes/lead_capture.py"],
+                "services": ["apps/api/app/services/lead_capture_service.py"],
+                "allowed_capabilities": ["lead_capture_storage"],
+            }
+        },
+    )
+
+    assert decision.ok is False
+    assert any("route resolved capability directly" in violation for violation in decision.violations)

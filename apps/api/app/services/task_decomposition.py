@@ -39,7 +39,7 @@ TEMPLATES: tuple[DecompositionTemplate, ...] = (
         description="Resolve a failing or missing test path with the smallest bounded patch possible.",
         buckets=(
             DecompositionBucket("isolate_failure", "Isolate failure", "Confirm the failing validation path and locate the smallest fix surface.", ("PLAN_DAG",)),
-            DecompositionBucket("patch_test_or_code", "Patch code or tests", "Apply the minimal code or test change needed to resolve the failure.", ("CODE_BACKEND", "CODE_FRONTEND", "WRITE_TESTS")),
+            DecompositionBucket("patch_test_or_code", "Patch code or tests", "Apply the minimal code or test change needed to resolve the failure.", ("GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING", "CODE_FRONTEND", "WRITE_TESTS")),
             DecompositionBucket("rerun_tests", "Rerun tests", "Re-run the affected validation path to confirm the fix holds.", ("RUN_TESTS",)),
             DecompositionBucket("review_delivery", "Review delivery", "Review the patch and integration handoff before delivery.", ("REVIEW_DIFF", "REVIEW_INTEGRATION")),
         ),
@@ -50,7 +50,7 @@ TEMPLATES: tuple[DecompositionTemplate, ...] = (
         description="Add or extend a bounded API capability without expanding into a broad refactor.",
         buckets=(
             DecompositionBucket("design_api_surface", "Design API surface", "Bound the endpoint or service contract before code generation starts.", ("PLAN_DAG",)),
-            DecompositionBucket("implement_backend_api", "Implement backend API", "Apply backend changes for the new or updated API path.", ("CODE_BACKEND",)),
+            DecompositionBucket("implement_backend_api", "Implement backend API", "Apply backend changes for the new or updated API path.", ("GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING")),
             DecompositionBucket("integrate_client", "Integrate client", "Update the consuming client or UI path if the feature crosses the API boundary.", ("CODE_FRONTEND",)),
             DecompositionBucket("validate_api", "Validate API", "Update tests and rerun validation against the scoped API flow.", ("WRITE_TESTS", "RUN_TESTS")),
             DecompositionBucket("review_delivery", "Review delivery", "Review the patch and integration handoff before delivery.", ("REVIEW_DIFF", "REVIEW_INTEGRATION")),
@@ -62,7 +62,7 @@ TEMPLATES: tuple[DecompositionTemplate, ...] = (
         description="Apply a focused UI or copy change while keeping the patch inside the frontend surface.",
         buckets=(
             DecompositionBucket("inspect_ui_scope", "Inspect UI scope", "Locate the targeted UI surface and bound the change before editing.", ("PLAN_DAG",)),
-            DecompositionBucket("update_ui", "Update UI implementation", "Apply the minimal UI patch needed to satisfy the goal.", ("CODE_FRONTEND", "CODE_BACKEND")),
+            DecompositionBucket("update_ui", "Update UI implementation", "Apply the minimal UI patch needed to satisfy the goal.", ("CODE_FRONTEND", "GENERATE_ROUTE", "GENERATE_SERVICE")),
             DecompositionBucket("validate_ui", "Validate UI", "Update relevant tests and rerun validation for the changed UI surface.", ("WRITE_TESTS", "RUN_TESTS")),
             DecompositionBucket("review_delivery", "Review delivery", "Review the patch and integration handoff before delivery.", ("REVIEW_DIFF", "REVIEW_INTEGRATION")),
         ),
@@ -73,7 +73,7 @@ TEMPLATES: tuple[DecompositionTemplate, ...] = (
         description="Patch a bounded defect, validate it, and keep the resulting patch reviewable.",
         buckets=(
             DecompositionBucket("analyze_issue", "Analyze issue", "Confirm the failing behavior and identify the bounded fix surface.", ("PLAN_DAG",)),
-            DecompositionBucket("patch_fix", "Patch affected modules", "Apply the smallest backend or frontend patch that resolves the defect.", ("CODE_BACKEND", "CODE_FRONTEND")),
+            DecompositionBucket("patch_fix", "Patch affected modules", "Apply the smallest backend or frontend patch that resolves the defect.", ("GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING", "CODE_FRONTEND")),
             DecompositionBucket("validate_fix", "Validate fix", "Update tests if needed and rerun validation before review.", ("WRITE_TESTS", "RUN_TESTS")),
             DecompositionBucket("review_delivery", "Review delivery", "Review the patch and integration handoff before delivery.", ("REVIEW_DIFF", "REVIEW_INTEGRATION")),
         ),
@@ -84,7 +84,7 @@ TEMPLATES: tuple[DecompositionTemplate, ...] = (
         description="Move the requested change through a small, reviewable execution envelope.",
         buckets=(
             DecompositionBucket("analyze_request", "Analyze request", "Bound the requested change before any patching begins.", ("PLAN_DAG",)),
-            DecompositionBucket("apply_patch", "Apply patch", "Apply the smallest patch required to move the goal forward.", ("CODE_BACKEND", "CODE_FRONTEND")),
+            DecompositionBucket("apply_patch", "Apply patch", "Apply the smallest patch required to move the goal forward.", ("GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING", "CODE_FRONTEND")),
             DecompositionBucket("validate_change", "Validate change", "Update tests if needed and rerun validation before review.", ("WRITE_TESTS", "RUN_TESTS")),
             DecompositionBucket("review_delivery", "Review delivery", "Review the patch and integration handoff before delivery.", ("REVIEW_DIFF", "REVIEW_INTEGRATION")),
         ),

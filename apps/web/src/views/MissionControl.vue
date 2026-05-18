@@ -150,6 +150,9 @@
         <div v-if="resumeBlockedHint" class="mt-2 text-xs text-amber-700">
           Resume unavailable: {{ resumeBlockedHint }}
         </div>
+        <div v-if="internalPolicyBlockHint" class="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {{ internalPolicyBlockHint }}
+        </div>
         </div>
       </div>
       <div class="mission-hero__rail">
@@ -1833,6 +1836,39 @@
             </div>
           </div>
         </div>
+        <div class="mission-subcard mt-3 p-4">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="text-xs uppercase text-slate-400">Frontend Topology Plan</div>
+            <el-tag
+              size="small"
+              effect="light"
+              :type="frontendTopologyPlan ? 'success' : 'info'"
+            >
+              {{ frontendTopologyPlan ? 'Planned' : 'Not planned yet' }}
+            </el-tag>
+          </div>
+          <div v-if="frontendTopologyPlan" class="mt-2 space-y-2 text-xs text-slate-600">
+            <div>
+              <strong class="text-slate-800">Stage:</strong>
+              {{ frontendTopologyPlan.planner_stage || "PLAN_FRONTEND_TOPOLOGY_V1" }}
+            </div>
+            <div>
+              <strong class="text-slate-800">Root:</strong>
+              <span class="font-mono">{{ frontendTopologyPlan.root_file || "index.html" }}</span>
+            </div>
+            <div>
+              <strong class="text-slate-800">Sections:</strong>
+              {{ frontendTopologySectionsLabel }}
+            </div>
+            <div>
+              <strong class="text-slate-800">Component Files:</strong>
+              {{ frontendTopologyComponentFilesLabel }}
+            </div>
+          </div>
+          <div v-else class="mt-2 text-xs text-slate-500">
+            Topology plan will appear when static frontend execution is prepared.
+          </div>
+        </div>
       </div>
     </div>
 
@@ -3152,6 +3188,34 @@ const latestErrorHint = computed(() => {
   const failedEvent = runEvents.value.find((event) => typeof event.message === "string" && /fail|error/i.test(event.message));
   return failedEvent?.message || "";
 });
+const internalPolicyBlockHint = computed(() => {
+  const latestFailedItem = [...workItems.value]
+    .reverse()
+    .find((item: any) => String(item?.status || "").toUpperCase() === "FAILED");
+  const itemResult = latestFailedItem?.result && typeof latestFailedItem.result === "object" ? latestFailedItem.result : {};
+  const itemStopReason = String(itemResult?.stop_reason || "").toLowerCase();
+  const itemApprovalRequired = itemResult?.approval_required;
+  if (itemStopReason === "human_review_required" && itemApprovalRequired === false) {
+    return "Runtime policy blocked this step internally (human_review_required). No manual approval prompt was required, so this can look like silent drift.";
+  }
+
+  const latestFailedEvent = [...runEvents.value]
+    .reverse()
+    .find((event: any) => String(event?.event_type || "").toUpperCase() === "WORK_ITEM_FAILED");
+  const payload = latestFailedEvent?.payload && typeof latestFailedEvent.payload === "object" ? latestFailedEvent.payload : {};
+  const stopReason = String(payload?.stop_reason || payload?.message || payload?.error || "").toLowerCase();
+  const approvalRequired = payload?.approval_required;
+  if (stopReason.includes("human_review_required") && approvalRequired === false) {
+    return "Runtime policy blocked this step internally (human_review_required). No manual approval prompt was required, so this can look like silent drift.";
+  }
+
+  const runCompletedWithFailure = String(latestRun.value?.status || "").toUpperCase() === "COMPLETED"
+    && Number(latestTerminalCounts.value.critical_failed || 0) > 0;
+  if (runCompletedWithFailure && stopReason.includes("human_review_required")) {
+    return "Run finished with degraded completion after internal policy blocks. Check failed work item details before rerun.";
+  }
+  return "";
+});
 const forkExecutorOptions = computed(() => {
   const options = new Set(["dummy", "codex", "test"]);
   if (latestRun.value?.executor) options.add(String(latestRun.value.executor));
@@ -3329,6 +3393,29 @@ const projectContractEnforcementMode = computed<"off" | "warn" | "strict">(() =>
 const latestExecutionContract = computed(
   () => missionOverview.value?.latest_execution_contract || executionConsole.value?.summary?.execution_contract || null
 );
+const frontendTopologyPlan = computed(() => {
+  const runSummaryPlan = latestRun.value?.summary?.frontend_topology_plan;
+  if (runSummaryPlan && typeof runSummaryPlan === "object") return runSummaryPlan as any;
+  const consolePlan = executionConsole.value?.summary?.frontend_topology_plan;
+  if (consolePlan && typeof consolePlan === "object") return consolePlan as any;
+  const overviewPlan = missionOverview.value?.frontend_topology_plan;
+  if (overviewPlan && typeof overviewPlan === "object") return overviewPlan as any;
+  return null;
+});
+const frontendTopologySectionsLabel = computed(() => {
+  const rows = Array.isArray(frontendTopologyPlan.value?.sections)
+    ? frontendTopologyPlan.value.sections.filter((item: any) => typeof item === "string" && item.trim())
+    : [];
+  return rows.length ? rows.slice(0, 8).join(" · ") : "—";
+});
+const frontendTopologyComponentFilesLabel = computed(() => {
+  const rows = Array.isArray(frontendTopologyPlan.value?.component_files)
+    ? frontendTopologyPlan.value.component_files.filter((item: any) => typeof item === "string" && item.trim())
+    : [];
+  if (!rows.length) return "—";
+  if (rows.length <= 3) return rows.join(" · ");
+  return `${rows.slice(0, 3).join(" · ")} · +${rows.length - 3} more`;
+});
 const previewRunId = computed(
   () => previewsAndPrs.value?.run_id || latestChangeImpact.value?.run_id || latestRun.value?.id || ""
 );

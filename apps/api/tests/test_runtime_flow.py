@@ -692,6 +692,90 @@ async def test_fix_recovery_retry_reuses_failed_run_tests_scope(monkeypatch, run
         assert retried_test.payload["related_files"] == ["index.html"]
         assert retried_test.payload["recovery_source_id"] == str(fix_item_id)
         assert retried_test.payload["recovery_action"] == "spawn_retry_node"
+        assert retried_test.payload["recovery_retry_count"] == 1
+        assert retried_test.payload.get("recovery_retry_signature")
+
+
+@pytest.mark.anyio
+async def test_fix_retry_stops_when_same_test_signature_reaches_cap(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_TEST_RETRY_MAX_PER_SIGNATURE", "2")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Test retry cap project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        signature = "failed tests/test_landing.py::test_roi"
+        for idx in range(2):
+            session.add(
+                WorkItem(
+                    project_id=project.id,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                    type="RUN_TESTS",
+                    key=f"RUN_TESTS_{idx}",
+                    status="FAILED",
+                    executor="test",
+                    payload={
+                        "recovery_action": "spawn_retry_node",
+                        "recovery_retry_signature": signature,
+                        "recovery_retry_count": idx + 1,
+                    },
+                    result={"stdout": signature},
+                    last_error="",
+                )
+            )
+        await session.flush()
+
+        fix_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="FIX_TEST_FAILURE",
+            key="FIX_TEST_FAILURE_2",
+            status="DONE",
+            executor="codex",
+            payload={"target_files": ["apps/web/src/pages/LandingPage.vue"]},
+            result={"message": "fix applied"},
+        )
+        session.add(fix_item)
+        await session.commit()
+        run_id = run.id
+        fix_item_id = fix_item.id
+
+    async with runtime_db() as session:
+        fix_item = await session.get(WorkItem, fix_item_id)
+        assert fix_item is not None
+        recovery = await maybe_apply_recovery(session, fix_item)
+        await session.commit()
+        assert recovery is not None
+        assert recovery["action"] == "spawn_retry_node"
+        assert recovery.get("created") is None
+
+        queued_retries = (
+            await session.execute(
+                select(func.count()).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.type == "RUN_TESTS",
+                    WorkItem.status == "QUEUED",
+                )
+            )
+        ).scalar_one()
+        assert queued_retries == 0
+        convergence_events = (
+            await session.execute(
+                select(RunEvent).where(
+                    RunEvent.run_id == run_id,
+                    RunEvent.event_type == "RUN_CONVERGENCE_STOPPED",
+                )
+            )
+        ).scalars().all()
+        assert convergence_events
 
 
 @pytest.mark.anyio
@@ -1695,6 +1779,68 @@ async def test_scheduler_spawns_goal_recovery_retry_before_conclusion(monkeypatc
 
 
 @pytest.mark.anyio
+async def test_scheduler_does_not_spawn_goal_recovery_for_internal_human_review_stop(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="No retry on internal policy stop project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True},
+            result={
+                "stop_reason": "human_review_required",
+                "approval_required": False,
+                "failure_class": "human_review_required",
+            },
+            last_error="human_review_required",
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "COMPLETED"
+        assert isinstance(run.summary, dict)
+        assert run.summary.get("degraded_completion") is True
+        queued_recovery = (
+            await session.execute(
+                select(WorkItem).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.status == "QUEUED",
+                    WorkItem.payload["recovery_action"].as_string() == "goal_recovery_retry",
+                )
+            )
+        ).scalars().all()
+        assert not queued_recovery
+
+
+@pytest.mark.anyio
 async def test_scheduler_goal_recovery_adapts_output_contract_invalid_frontend(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_MODE", "external")
     monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
@@ -1751,6 +1897,92 @@ async def test_scheduler_goal_recovery_adapts_output_contract_invalid_frontend(m
         assert payload.get("strict_output_contract_mode") is True
         assert payload.get("prior_output_contract_failures") == 1
         assert payload.get("recovery_action") == "retry_with_write_file"
+
+
+@pytest.mark.anyio
+async def test_scheduler_pauses_on_repeated_fix_patch_apply_failures(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Fix patch loop pause project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_tests = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="RUN_TESTS",
+            key="RUN_TESTS",
+            status="FAILED",
+            priority=10,
+            executor="test",
+            payload={"blocking": True},
+            result={"message": "Tests failed", "failure_class": "test_failure"},
+            last_error="Tests failed",
+        )
+        session.add(failed_tests)
+        await session.flush()
+
+        for idx in (1, 2):
+            session.add(
+                WorkItem(
+                    project_id=project.id,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                    type="FIX_TEST_FAILURE",
+                    key=f"FIX_TEST_FAILURE_{idx}",
+                    status="FAILED",
+                    priority=11,
+                    executor="codex",
+                    payload={"recovery_source_id": str(failed_tests.id), "blocking": True},
+                    result={
+                        "message": "Action error: Patch apply error: Patch check failed: error: patch failed: index.html:205",
+                        "failure_class": "patch_apply_failure",
+                    },
+                    last_error="error: patch does not apply; 3-way fallback failed: error: corrupt patch",
+                )
+            )
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "PAUSED"
+        assert isinstance(run.summary, dict)
+        pause = run.summary.get("recovery_pause")
+        assert isinstance(pause, dict)
+        assert pause.get("reason") == "fix_patch_apply_loop"
+        events = (
+            await session.execute(
+                select(RunEvent).where(RunEvent.run_id == run_id, RunEvent.event_type == "RUN_RECOVERY_PAUSED")
+            )
+        ).scalars().all()
+        assert events
+        queued_goal_retry = (
+            await session.execute(
+                select(func.count()).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.status == "QUEUED",
+                    WorkItem.payload["recovery_action"].as_string() == "goal_recovery_retry",
+                )
+            )
+        ).scalar_one()
+        assert queued_goal_retry == 0
 
 
 @pytest.mark.anyio
@@ -4060,3 +4292,13 @@ async def test_run_launch_emits_governance_transition_event(monkeypatch, runtime
         payload = transition[0].payload if isinstance(transition[0].payload, dict) else {}
         assert payload.get("from_repository_state") == previous_state
         assert payload.get("to_repository_state") == "ACTIVE_PRODUCT"
+
+
+def test_classify_failure_routes_frontend_structural_violation_to_output_contract_invalid():
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="FAILED",
+        key="CODE_FRONTEND",
+        last_error="CODE_FRONTEND structural contract violation in index.html: dense single-file root output",
+    )
+    assert classify_failure(work_item) == "output_contract_invalid"

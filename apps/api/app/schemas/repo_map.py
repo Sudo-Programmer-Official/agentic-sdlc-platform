@@ -73,3 +73,33 @@ class RepoMapImpactOut(BaseModel):
     primary_files: list[RepoMapFileOut] = Field(default_factory=list)
     dependent_files: list[RepoMapFileOut] = Field(default_factory=list)
     related_tests: list[RepoMapFileOut] = Field(default_factory=list)
+
+
+class RepoGraphFileNodeOut(BaseModel):
+    path: str
+    kind: str
+    layer: str
+    capabilities: list[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
+
+
+class RepoGraphNeighborsOut(BaseModel):
+    anchor: str
+    depth: int = 1
+    files: list[RepoGraphFileNodeOut] = Field(default_factory=list)
+
+
+class RepoGraphDependencyChainOut(BaseModel):
+    anchor: str
+    chain: list[RepoGraphFileNodeOut] = Field(default_factory=list)
+
+
+class RepoGraphCapabilityNeighborsOut(BaseModel):
+    capability: str
+    files: list[RepoGraphFileNodeOut] = Field(default_factory=list)
+
+
+class RepoGraphSafeScopeOut(BaseModel):
+    anchor_files: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    files: list[RepoGraphFileNodeOut] = Field(default_factory=list)

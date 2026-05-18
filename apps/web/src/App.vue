@@ -109,6 +109,15 @@
       <template #footer>
         <div class="flex items-center justify-end gap-2">
           <el-button @click="operatorApprovalDialogVisible = false">Later</el-button>
+          <el-button
+            v-if="operatorDialogKind === 'operator_confirmation'"
+            type="success"
+            :loading="operatorConfirmLoading"
+            :disabled="!operatorApprovalRunId"
+            @click="confirmAndContinueFromDialog"
+          >
+            Confirm & Continue
+          </el-button>
           <el-button @click="openExactRunFromDialog">Go to Exact Run</el-button>
           <el-button type="primary" @click="openOperatorActionFromDialog">{{ operatorDialogPrimaryLabel }}</el-button>
         </div>
@@ -143,7 +152,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { isApiErrorStatus } from "./api/http";
-import { getActiveTenantId, getActiveWorkspaceId, getActiveWorkspaceMeta, listApprovals, listRuns } from "./api/lifecycle";
+import { confirmAndContinueRun, getActiveTenantId, getActiveWorkspaceId, getActiveWorkspaceMeta, listApprovals, listRuns, listRunEvents, listWorkItems, resumeRun, unblockRun } from "./api/lifecycle";
 import AiOperatorPanel from "./components/AiOperatorPanel.vue";
 import AppIcon from "./components/AppIcon.vue";
 import TopBar from "./components/TopBar.vue";
@@ -174,6 +183,7 @@ const knowledgePath = computed(() => (projectContext.projectId ? `/projects/${pr
 const operatorApprovalDialogVisible = ref(false);
 const operatorApprovalRunId = ref("");
 const operatorDialogKind = ref<"operator_confirmation" | "approval_queue">("operator_confirmation");
+const operatorConfirmLoading = ref(false);
 const runIssueDialogVisible = ref(false);
 const runIssueRunId = ref("");
 const approvalAttentionRequired = ref(false);
@@ -389,12 +399,62 @@ async function checkOperatorApprovalState() {
       const status = String(latestRun?.status || "").toUpperCase();
       const reason = String(latestRun?.summary?.operator_confirmation_pause?.reason || "").toLowerCase();
       const failedError = String(latestRun?.summary?.resume_state?.failed_error || "").toLowerCase();
+      const hasOperatorMarker =
+        reason === "operator_confirmation_required" || failedError.includes("operator confirmation");
       return (
-        status === "PAUSED" &&
-        (reason === "operator_confirmation_required" || failedError.includes("operator confirmation"))
+        (status === "PAUSED" && hasOperatorMarker) ||
+        // Fallback: surface operator action even if backend pause transition lags.
+        (hasOperatorMarker && ["RUNNING", "QUEUED", "COMPLETED", "CANCELED"].includes(status))
       );
     })();
-    const pausedOperatorRun = latestRunNeedsOperatorConfirmation ? latestRun : null;
+    let fallbackEventOperatorConfirmation = false;
+    if (!latestRunNeedsOperatorConfirmation && latestRun?.id) {
+      try {
+        const events = await listRunEvents(String(latestRun.id));
+        const rows = Array.isArray(events) ? events : [];
+        fallbackEventOperatorConfirmation = rows.some((evt: any) => {
+          const eventType = String(evt?.event_type || "").toUpperCase();
+          if (eventType !== "WORK_ITEM_FAILED") return false;
+          const payload = evt?.payload || {};
+          const error = String(payload?.error || "").toLowerCase();
+          const message = String(payload?.message || evt?.message || "").toLowerCase();
+          return (
+            error.includes("operator_confirmation_required") ||
+            message.includes("operator confirmation") ||
+            message.includes("requires operator confirmation")
+          );
+        });
+      } catch {
+        // Keep monitor resilient during transient event API failures.
+      }
+    }
+    let fallbackWorkItemOperatorConfirmation = false;
+    if (!latestRunNeedsOperatorConfirmation && !fallbackEventOperatorConfirmation && latestRun?.id) {
+      try {
+        const items = await listWorkItems(projectId, String(latestRun.id));
+        const rows = Array.isArray(items) ? items : [];
+        fallbackWorkItemOperatorConfirmation = rows.some((item: any) => {
+          const status = String(item?.status || "").toUpperCase();
+          if (status !== "FAILED") return false;
+          const result = item?.result || {};
+          const approvalRequired = result?.approval_required === true;
+          const stopReason = String(result?.stop_reason || "").toLowerCase();
+          const error = String(result?.error || "").toLowerCase();
+          const message = String(result?.message || item?.last_error || "").toLowerCase();
+          const hasOperatorMarker =
+            error.includes("operator_confirmation_required") ||
+            message.includes("operator confirmation") ||
+            message.includes("requires operator confirmation");
+          return approvalRequired && stopReason === "human_review_required" && hasOperatorMarker;
+        });
+      } catch {
+        // Keep monitor resilient during transient work-item API failures.
+      }
+    }
+    const pausedOperatorRun =
+      (latestRunNeedsOperatorConfirmation || fallbackEventOperatorConfirmation || fallbackWorkItemOperatorConfirmation)
+        ? latestRun
+        : null;
 
     const latestStatus = String(latestRun?.status || "").toUpperCase();
     const latestGoalState = String(latestRun?.summary?.goal_state || "").toUpperCase();
@@ -478,6 +538,32 @@ function openExactRunFromDialog() {
   operatorApprovalDialogVisible.value = false;
   if (!projectContext.projectId || !operatorApprovalRunId.value) return;
   router.push(`/projects/${projectContext.projectId}/runs/${operatorApprovalRunId.value}/debug`);
+}
+
+async function confirmAndContinueFromDialog() {
+  if (!operatorApprovalRunId.value) return;
+  operatorConfirmLoading.value = true;
+  try {
+    await confirmAndContinueRun(operatorApprovalRunId.value);
+    operatorApprovalDialogVisible.value = false;
+    await checkOperatorApprovalState();
+  } catch {
+    try {
+      await unblockRun(operatorApprovalRunId.value);
+      operatorApprovalDialogVisible.value = false;
+      await checkOperatorApprovalState();
+    } catch {
+      try {
+      await resumeRun(operatorApprovalRunId.value, { start_now: true });
+      operatorApprovalDialogVisible.value = false;
+      await checkOperatorApprovalState();
+      } catch {
+        // Keep dialog open if all confirmation continuation paths fail.
+      }
+    }
+  } finally {
+    operatorConfirmLoading.value = false;
+  }
 }
 
 function openRunIssueFromDialog() {

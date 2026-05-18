@@ -169,7 +169,12 @@ def _derive_semantics(entity_type: str, entity) -> dict[str, Any]:
         text = f"{entity.type} {entity.key or ''} {entity.executor}"
         capability = {
             "PLAN_DAG": "planning",
+            "PLAN_BACKEND_TOPOLOGY": "planning",
             "CODE_BACKEND": "backend_code",
+            "GENERATE_ROUTE": "backend_code",
+            "GENERATE_SERVICE": "backend_code",
+            "GENERATE_REPOSITORY": "backend_code",
+            "GENERATE_CAPABILITY_BINDING": "backend_code",
             "CODE_FRONTEND": "frontend_code",
             "WRITE_TESTS": "testing",
             "RUN_TESTS": "testing",

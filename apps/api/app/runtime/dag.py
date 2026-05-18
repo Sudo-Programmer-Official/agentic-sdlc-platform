@@ -48,6 +48,18 @@ BACKEND_KEYWORDS = {
     "webhook",
     "auth",
 }
+DEFAULT_BACKEND_CAPABILITIES = [
+    "lead_capture_storage",
+    "crm_sync",
+    "notification_dispatch",
+    "analytics_event_stream",
+]
+BACKEND_GENERATION_STAGES = (
+    "GENERATE_ROUTE",
+    "GENERATE_SERVICE",
+    "GENERATE_REPOSITORY",
+    "GENERATE_CAPABILITY_BINDING",
+)
 
 
 class TaskScopeError(ValueError):
@@ -220,7 +232,12 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
     task_title = task_payload["task_title"]
     stage_titles = {
         "PLAN_DAG": task_title,
+        "PLAN_BACKEND_TOPOLOGY": f"Plan backend topology for {task_title}",
         "CODE_BACKEND": f"Implement backend for {task_title}",
+        "GENERATE_ROUTE": f"Generate route module for {task_title}",
+        "GENERATE_SERVICE": f"Generate service module for {task_title}",
+        "GENERATE_REPOSITORY": f"Generate repository module for {task_title}",
+        "GENERATE_CAPABILITY_BINDING": f"Generate capability binding module for {task_title}",
         "CODE_FRONTEND": f"Implement frontend for {task_title}",
         "WRITE_TESTS": f"Add tests for {task_title}",
         "REVIEW_DIFF": f"Review changes for {task_title}",
@@ -230,7 +247,7 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
     payload = dict(task_payload)
     task_source = str(payload.get("task_source") or "").strip().lower()
     is_foundation = task_source in {"genesis", "genesis_setup"} or task_source.startswith("genesis.")
-    stage_required = stage_name in {"PLAN_DAG", "CODE_BACKEND", "CODE_FRONTEND", "RUN_TESTS"}
+    stage_required = stage_name in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", *BACKEND_GENERATION_STAGES, "CODE_FRONTEND", "RUN_TESTS"}
     stage_criticality = "FOUNDATION" if is_foundation and stage_required else ("FEATURE" if stage_required else "OPTIONAL")
     payload["title"] = stage_titles.get(stage_name, task_title)
     payload["required"] = bool(stage_required)
@@ -239,9 +256,19 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
         path for path in (payload.get("expected_files") or [])
         if isinstance(path, str) and path.strip()
     ]
-    if stage_name in {"CODE_BACKEND", "CODE_FRONTEND"} and scoped_files and not payload.get("target_files"):
+    if stage_name in {"CODE_BACKEND", "CODE_FRONTEND", *BACKEND_GENERATION_STAGES} and scoped_files and not payload.get("target_files"):
         payload["target_files"] = list(scoped_files)
         payload["files"] = list(scoped_files)
+    if stage_name in {"PLAN_BACKEND_TOPOLOGY", "CODE_BACKEND"}:
+        topology_plan = _derive_backend_topology_plan(payload)
+        if topology_plan:
+            payload["backend_topology_plan"] = topology_plan
+            planned_files = list(dict.fromkeys(topology_plan.get("planned_files") or []))
+            if planned_files:
+                payload["expected_files"] = planned_files
+                if stage_name == "CODE_BACKEND":
+                    payload["target_files"] = planned_files
+                    payload["files"] = planned_files
     if stage_name in {"WRITE_TESTS", "RUN_TESTS"}:
         related_files = list(scoped_files)
         test_files = _infer_test_files(related_files)
@@ -252,7 +279,78 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
             payload["expected_files"] = test_files
     if stage_name == "WRITE_TESTS":
         payload["blocking"] = False
+    if stage_name in BACKEND_GENERATION_STAGES:
+        topology = payload.get("backend_topology_plan") if isinstance(payload.get("backend_topology_plan"), dict) else {}
+        key_to_paths = {
+            "GENERATE_ROUTE": topology.get("routes") or [],
+            "GENERATE_SERVICE": topology.get("services") or [],
+            "GENERATE_REPOSITORY": topology.get("repositories") or [],
+            "GENERATE_CAPABILITY_BINDING": topology.get("capability_modules") or [],
+        }
+        scoped = [path for path in key_to_paths.get(stage_name, []) if isinstance(path, str) and path.strip()]
+        if scoped:
+            payload["target_files"] = scoped
+            payload["files"] = scoped
+            payload["expected_files"] = scoped
     return payload
+
+
+def _safe_module_slug(value: str) -> str:
+    token = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return token or "feature"
+
+
+def _derive_backend_topology_plan(task_payload: dict[str, Any]) -> dict[str, Any]:
+    expected = [
+        path for path in (task_payload.get("expected_files") or [])
+        if isinstance(path, str) and path.strip() and PurePosixPath(path).suffix.lower() in BACKEND_SUFFIXES
+    ]
+    if not expected:
+        return {}
+    first = PurePosixPath(expected[0])
+    if first.suffix.lower() != ".py":
+        return {}
+    # Keep generated modules adjacent to the scoped backend file so the planner is deterministic.
+    base_dir = first.parent if str(first.parent) not in {"", "."} else PurePosixPath("apps/api/app")
+    stem = _safe_module_slug(first.stem)
+    routes_file = str(base_dir / "routes" / f"{stem}.py")
+    service_file = str(base_dir / "services" / f"{stem}_service.py")
+    repository_file = str(base_dir / "repositories" / f"{stem}_repository.py")
+    schema_file = str(base_dir / "schemas" / f"{stem}_schema.py")
+    capability_files = [
+        str(base_dir / "capabilities" / f"{cap}_binding.py")
+        for cap in DEFAULT_BACKEND_CAPABILITIES[:3]
+    ]
+    planned_files = [routes_file, service_file, repository_file, schema_file, *capability_files]
+    capability_bindings = {cap: "runtime_resolver" for cap in DEFAULT_BACKEND_CAPABILITIES}
+    dependency_graph = {
+        "route_to_service": {routes_file: [service_file]},
+        "service_to_repository": {service_file: [repository_file]},
+        "service_to_capabilities": {service_file: DEFAULT_BACKEND_CAPABILITIES},
+    }
+    composition_contract = {
+        "routes_allowed": ["request_validation", "auth_enforcement", "service_delegation", "response_formatting"],
+        "routes_blocked": ["db_logic", "capability_resolution", "retry_logic", "business_orchestration"],
+        "services_allowed": ["business_orchestration", "capability_usage", "repository_delegation", "retry_logic"],
+        "repositories_allowed": ["persistence_only"],
+        "repositories_blocked": ["route_handlers", "capability_resolution", "business_orchestration"],
+        "capability_modules_allowed": ["external_integrations_only", "provider_adapter_calls", "payload_mapping"],
+        "capability_modules_blocked": ["route_handlers", "direct_db_access", "business_orchestration"],
+    }
+    return {
+        "planner_stage": "PLAN_BACKEND_TOPOLOGY_V1",
+        "module": stem,
+        "planned_files": planned_files,
+        "routes": [routes_file],
+        "services": [service_file],
+        "repositories": [repository_file],
+        "capability_modules": capability_files,
+        "schemas": [schema_file],
+        "allowed_capabilities": DEFAULT_BACKEND_CAPABILITIES,
+        "capability_bindings": capability_bindings,
+        "dependency_graph": dependency_graph,
+        "composition_contract": composition_contract,
+    }
 
 
 async def generate_template_dag(
@@ -283,7 +381,11 @@ async def generate_template_dag(
 
     nodes = [("PLAN_DAG", "plan")]
     if surface != "frontend":
-        nodes.append(("CODE_BACKEND", "code"))
+        nodes.append(("PLAN_BACKEND_TOPOLOGY", "plan_backend_topology"))
+        nodes.append(("GENERATE_ROUTE", "code"))
+        nodes.append(("GENERATE_SERVICE", "code"))
+        nodes.append(("GENERATE_REPOSITORY", "code"))
+        nodes.append(("GENERATE_CAPABILITY_BINDING", "code"))
     if surface != "backend":
         nodes.append(("CODE_FRONTEND", "code"))
     nodes.extend(
@@ -296,6 +398,7 @@ async def generate_template_dag(
     )
     default_caps = {
         "plan": ["plan"],
+        "plan_backend_topology": ["plan", "capability_governance"],
         "code": ["code"],
         "test": ["test"],
         "test_run": ["test"],
@@ -328,9 +431,20 @@ async def generate_template_dag(
     # edges
     key_to_id = {wi.key: wi.id for wi in created}
     edges: list[tuple[str, str]] = []
-    code_nodes = [stage for stage in ("CODE_BACKEND", "CODE_FRONTEND") if stage in key_to_id]
+    code_nodes = [stage for stage in ("CODE_BACKEND", "CODE_FRONTEND", *BACKEND_GENERATION_STAGES) if stage in key_to_id]
     for code_stage in code_nodes:
-        edges.append(("PLAN_DAG", code_stage))
+        if code_stage in BACKEND_GENERATION_STAGES and "PLAN_BACKEND_TOPOLOGY" in key_to_id:
+            edges.append(("PLAN_DAG", "PLAN_BACKEND_TOPOLOGY"))
+            if code_stage == "GENERATE_ROUTE":
+                edges.append(("PLAN_BACKEND_TOPOLOGY", "GENERATE_ROUTE"))
+            elif code_stage == "GENERATE_SERVICE":
+                edges.append(("GENERATE_ROUTE", "GENERATE_SERVICE"))
+            elif code_stage == "GENERATE_REPOSITORY":
+                edges.append(("GENERATE_SERVICE", "GENERATE_REPOSITORY"))
+            elif code_stage == "GENERATE_CAPABILITY_BINDING":
+                edges.append(("GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"))
+        else:
+            edges.append(("PLAN_DAG", code_stage))
         edges.append((code_stage, "WRITE_TESTS"))
     if not code_nodes:
         edges.append(("PLAN_DAG", "WRITE_TESTS"))

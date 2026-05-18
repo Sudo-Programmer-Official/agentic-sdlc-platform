@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     ai_low_confidence_threshold: float = 0.55
     ai_medium_confidence_threshold: float = 0.8
     ai_human_review_file_threshold: int = 8
+    ai_human_review_relaxed_mode: bool = False
     health_regen_threshold: float = 60.0  # below this require force for regen
     health_cycles_block: bool = False  # set true to block trace creation when cycles exist
     runtime_mode: str = "external"  # embedded | external; external falls back if no live workers exist
@@ -142,6 +143,7 @@ class Settings(BaseSettings):
     runtime_goal_orchestration_enabled: bool = False
     runtime_goal_max_recovery_cycles: int = 6
     runtime_validation_replay_max_per_run: int = 1
+    runtime_test_retry_max_per_signature: int = 2
     runtime_run_spend_soft_limit_cents: float = 200.0
     runtime_run_spend_hard_limit_cents: float = 500.0
     runtime_recovery_max_attempts_per_work_item: int = 4

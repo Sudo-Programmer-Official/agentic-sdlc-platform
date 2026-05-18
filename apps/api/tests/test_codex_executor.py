@@ -1,5 +1,6 @@
 import json
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,9 @@ from app.db.models import Project, Run, WorkItem
 from app.runtime.context import RunContext
 from app.runtime.codex_executor import (
     _allow_adjacent_scope_expansion,
+    _derive_backend_topology_plan,
     _build_design_token_rewrite_map,
+    _derive_frontend_topology_plan,
     _edit_budget_from_payload,
     _extract_structured_json_candidate,
     _fix_test_failure_writable_scope,
@@ -30,6 +33,8 @@ from app.runtime.codex_executor import (
 )
 from app.runtime.execution_contract import build_execution_contract
 from app.runtime.patch_guard import evaluate_patch_guard
+from app.runtime.frontend_topology import validate_frontend_topology
+from app.runtime.component_capability_protocol import resolve_component_capability
 from app.runtime.schemas.executor_io import Action
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
 from app.services.ai_policy import AIJobManager
@@ -3481,3 +3486,180 @@ async def test_fix_test_failure_normalizes_failed_model_status_when_patch_applie
     assert "candidate fix patch" in result["message"].lower()
     assert "fix_patch_applied_despite_failed_model_status" in result["payload"]["warnings"]
     assert "class=\"hero\"" in index_path.read_text(encoding="utf-8")
+
+
+def test_frontend_writefile_violations_detect_root_monolith_output():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="QUEUED",
+        payload={"target_files": ["index.html"]},
+    )
+    dense_html = "<!doctype html>\n<html>\n" + ("<section>Block</section>\n" * 800) + "</html>\n"
+    actions = [SimpleNamespace(type="write_file", path="index.html", content=dense_html)]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("structural contract violation" in violation for violation in violations)
+
+
+def test_frontend_writefile_violations_require_governed_component_composition_for_large_root():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="QUEUED",
+        payload={"target_files": ["index.html"]},
+    )
+    large_root = "<!doctype html>\n<html>\n<body>\n" + ("<div>content</div>\n" * 220) + "</body>\n</html>\n"
+    actions = [SimpleNamespace(type="write_file", path="index.html", content=large_root)]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("must compose from governed components" in violation for violation in violations)
+
+
+def test_frontend_writefile_violations_detect_repeated_inline_sections_without_governed_components():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="QUEUED",
+        payload={"target_files": ["index.html"]},
+    )
+    repeated_sections = "<!doctype html>\n<html>\n<body>\n" + ("<section>Block</section>\n" * 8) + "</body>\n</html>\n"
+    actions = [SimpleNamespace(type="write_file", path="index.html", content=repeated_sections)]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("repeated inline section patterns detected" in violation for violation in violations)
+
+
+def test_frontend_topology_rejects_non_governed_paths():
+    actions = [SimpleNamespace(type="write_file", path="src/random/NewPanel.vue", content="<template><div /></template>")]
+    violations = validate_frontend_topology(actions=actions, enforce=True)
+    assert any("outside governed frontend folders" in violation for violation in violations)
+
+
+def test_frontend_topology_rejects_root_single_file_dump():
+    dumped = "<!doctype html>\\n<html><body>\\n" + ("<section style='color:red'>Block</section>\\n" * 10) + ("<style>.x{color:red;}</style>\\n" * 100) + "</body></html>"
+    actions = [SimpleNamespace(type="write_file", path="index.html", content=dumped)]
+    violations = validate_frontend_topology(actions=actions, enforce=True)
+    assert any("single-file app dump" in violation for violation in violations)
+    assert any("inline CSS dump patterns" in violation for violation in violations)
+
+
+def test_component_capability_protocol_resolves_known_component():
+    payload = resolve_component_capability("HeroSection", variant="premium_saas")
+    assert payload["capability"] == "HeroSection"
+    assert payload["variant"] == "premium_saas"
+    assert "slots" in payload and "allowed_props" in payload
+
+
+def test_frontend_instructions_include_component_capability_packet():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    project_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    work_item = WorkItem(
+        id=uuid.uuid4(),
+        run_id=run_id,
+        project_id=project_id,
+        tenant_id=uuid.uuid4(),
+        type="CODE_FRONTEND",
+        status="QUEUED",
+        payload={"target_files": ["index.html"], "component_variant": "premium_saas"},
+    )
+    context = RunContext(
+        project_id=project_id,
+        run_id=run_id,
+        project_contract={
+            "design_contract": {
+                "experience_blueprint": "premium_saas",
+                "allowed_components": ["HeroSection", "PricingCard", "UnknownThing"],
+            }
+        },
+    )
+    instructions = executor._instructions_for(work_item, context=context)
+    assert "COMPONENT_CAPABILITY_PACKET" in instructions
+    assert "HeroSection" in instructions
+    assert "PricingCard" in instructions
+
+
+def test_derive_frontend_topology_plan_for_static_root_scope():
+    work_item = WorkItem(type="CODE_FRONTEND", status="QUEUED", payload={"target_files": ["index.html"]})
+    plan = _derive_frontend_topology_plan(
+        work_item=work_item,
+        payload=work_item.payload,
+        target_files=["index.html"],
+    )
+    assert isinstance(plan, dict)
+    assert plan["planner_stage"] == "PLAN_FRONTEND_TOPOLOGY_V1"
+    assert plan["root_file"] == "index.html"
+    assert isinstance(plan.get("component_files"), list)
+    assert any(str(path).endswith("HeroSection.vue") for path in plan["component_files"])
+
+
+def test_frontend_writefile_violations_require_planned_component_writes():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="QUEUED",
+        payload={
+            "target_files": ["index.html"],
+            "frontend_topology_plan": {
+                "component_files": ["apps/web/src/components/landing/HeroSection.vue"],
+            },
+        },
+    )
+    dense_html = "<!doctype html>\n<html>\n" + ("<section>Block</section>\n" * 800) + "</html>\n"
+    actions = [SimpleNamespace(type="write_file", path="index.html", content=dense_html)]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("planned topology requires componentized output" in violation for violation in violations)
+
+
+def test_derive_backend_topology_plan_for_root_backend_scope():
+    work_item = WorkItem(type="CODE_BACKEND", status="QUEUED", payload={"target_files": ["app.py"]})
+    plan = _derive_backend_topology_plan(
+        work_item=work_item,
+        payload=work_item.payload,
+        target_files=["app.py"],
+    )
+    assert isinstance(plan, dict)
+    assert plan["planner_stage"] == "PLAN_BACKEND_TOPOLOGY_V1"
+    assert plan["entrypoint_file"] == "app.py"
+    assert isinstance(plan.get("module_files"), dict)
+    assert "routes" in plan["module_files"]
+
+
+def test_backend_writefile_violations_require_planned_module_writes():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_BACKEND",
+        status="QUEUED",
+        payload={
+            "target_files": ["app.py"],
+            "backend_topology_plan": {
+                "module_files": {
+                    "routes": "apps/api/app/routes/lead_capture.py",
+                    "services": "apps/api/app/services/lead_capture_service.py",
+                }
+            },
+        },
+    )
+    dense_backend = "\n".join(["def route(): pass" for _ in range(320)]) + "\n"
+    actions = [SimpleNamespace(type="write_file", path="app.py", content=dense_backend)]
+    violations = executor._backend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("planned backend topology requires modular output" in violation for violation in violations)
+
+
+def test_backend_instructions_include_topology_plan_details():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_BACKEND",
+        status="QUEUED",
+        payload={
+            "target_files": ["app.py"],
+            "backend_topology_plan": {
+                "entrypoint_file": "app.py",
+                "module_files": {
+                    "routes": "apps/api/app/routes/lead_capture.py",
+                    "services": "apps/api/app/services/lead_capture_service.py",
+                },
+            },
+        },
+    )
+    instructions = executor._instructions_for(work_item)
+    assert "Backend topology plan is active" in instructions
+    assert "lead_capture_service.py" in instructions

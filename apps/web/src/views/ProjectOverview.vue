@@ -35,6 +35,26 @@
       </div>
     </div>
 
+    <div class="grid gap-4 lg:grid-cols-2">
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Governed Content Runtime</div>
+        <div class="mt-2 text-sm text-slate-700">
+          Hero title preview:
+          <strong class="ml-1">
+            <ContentSlot
+              v-if="projectId"
+              :project-id="projectId"
+              content-key="landing.hero.title"
+              fallback="From Prompt to Production. Governed."
+              environment="PREVIEW"
+              :refresh-ms="5000"
+            />
+          </strong>
+        </div>
+      </div>
+      <ContentEditorPanel v-if="projectId" :project-id="projectId" />
+    </div>
+
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
       <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="text-xs uppercase tracking-wide text-slate-400">Project</div>
@@ -536,6 +556,9 @@
         <div v-if="startRunBlockedReason" class="text-xs text-amber-700 mt-2">
           {{ startRunBlockedReason }}
         </div>
+        <div v-if="overviewPolicyBlockHint" class="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {{ overviewPolicyBlockHint }}
+        </div>
         <div v-if="runError" class="text-xs text-rose-600 mt-2">{{ runError }}</div>
         <el-table :data="runs" size="small" class="mt-3" v-loading="runsLoading">
           <el-table-column prop="id" label="Run ID" width="230" />
@@ -852,6 +875,15 @@
         <div class="flex flex-wrap gap-2">
           <el-button :loading="repoPreflightLoading" @click="runRepoPreflight">
             Test Clone
+          </el-button>
+          <el-button
+            v-if="canBootstrapEmptyRepo"
+            type="warning"
+            plain
+            :loading="repoBootstrapLoading"
+            @click="bootstrapEmptyRepo"
+          >
+            Initialize Empty Repo
           </el-button>
           <el-button type="primary" :loading="repoLoading" @click="submitConnectRepo">
             Save Repository
@@ -1368,6 +1400,8 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import DeploymentTrustSurfaceCard from "../components/DeploymentTrustSurfaceCard.vue";
 import StageBadge from "../components/StageBadge.vue";
+import ContentSlot from "../components/ContentSlot.vue";
+import ContentEditorPanel from "../components/ContentEditorPanel.vue";
 import { buildDeploymentTrustSummary, clampPercent } from "../composables/deploymentTrust";
 import { buildEnvironmentReadiness } from "../composables/environmentReadiness";
 import { projectContext, updateProjectContext } from "../state/projectContext";
@@ -1404,6 +1438,7 @@ import {
   fetchProjectRepo,
   connectProjectRepo,
   preflightProjectRepo,
+  bootstrapProjectRepo,
   fetchGitHubConnectInfo,
   listGitHubInstallationRepositories,
   fetchFoundationReadiness,
@@ -1791,6 +1826,7 @@ const repoAuthStrategyOptions = [
   { label: "Runtime Default", value: "runtime_default" },
 ];
 const repoPreflightLoading = ref(false);
+const repoBootstrapLoading = ref(false);
 const repoPreflightResult = ref<any | null>(null);
 const githubConnectInfo = ref<any | null>(null);
 const githubConnectLoading = ref(false);
@@ -1868,6 +1904,29 @@ const overviewStatusBanner = computed(() => {
     total: rows.length,
     inProgressTaskName,
   };
+});
+const overviewPolicyBlockHint = computed(() => {
+  const latestFailedItem = [...workItems.value]
+    .reverse()
+    .find((item: any) => String(item?.status || "").toUpperCase() === "FAILED");
+  const itemResult = latestFailedItem?.result && typeof latestFailedItem.result === "object" ? latestFailedItem.result : {};
+  const itemStopReason = String(itemResult?.stop_reason || "").toLowerCase();
+  const itemApprovalRequired = itemResult?.approval_required;
+  if (itemStopReason === "human_review_required" && itemApprovalRequired === false) {
+    return "Runtime policy blocked a step internally (human_review_required). This is not waiting for manual approval; inspect failed work item details before rerun.";
+  }
+
+  const latestFailedEvent = [...runEvents.value]
+    .reverse()
+    .find((event: any) => String(event?.event_type || "").toUpperCase() === "WORK_ITEM_FAILED");
+  const payload = latestFailedEvent?.payload && typeof latestFailedEvent.payload === "object" ? latestFailedEvent.payload : {};
+  const stopReason = String(payload?.stop_reason || payload?.message || payload?.error || "").toLowerCase();
+  const approvalRequired = payload?.approval_required;
+  if (stopReason.includes("human_review_required") && approvalRequired === false) {
+    return "Runtime policy blocked a step internally (human_review_required). This is not waiting for manual approval; inspect failed work item details before rerun.";
+  }
+
+  return "";
 });
 const improvementLifecycle = computed(() => {
   const rows = improvementRequests.value || [];
@@ -3467,6 +3526,60 @@ async function runRepoPreflight() {
     repoError.value = err?.message || "Repository clone preflight failed.";
   } finally {
     repoPreflightLoading.value = false;
+  }
+}
+
+function isHeadMissingCloneError(message: string | null | undefined) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("ambiguous argument 'head'") || text.includes("unknown revision or path not in the working tree");
+}
+
+const canBootstrapEmptyRepo = computed(() => {
+  if (repoPreflightLoading.value || repoBootstrapLoading.value) return false;
+  if (repoPreflightResult.value?.ok) return false;
+  const errorText = String(repoPreflightResult.value?.error || repoError.value || "");
+  return isHeadMissingCloneError(errorText);
+});
+
+async function bootstrapEmptyRepo() {
+  if (!projectId.value) return;
+  if (!repoForm.value.repo_url.trim()) {
+    repoError.value = "Repository URL is required.";
+    return;
+  }
+  repoBootstrapLoading.value = true;
+  repoError.value = "";
+  repoMessage.value = "";
+  try {
+    repoForm.value.repo_url = normalizeRepoUrlForStrategy(
+      repoForm.value.repo_url,
+      repoForm.value.auth_strategy,
+      repoForm.value.repo_full_name
+    );
+    const result = await bootstrapProjectRepo(projectId.value, {
+      provider: "github",
+      repo_url: repoForm.value.repo_url.trim(),
+      repo_full_name: repoForm.value.repo_full_name.trim() || null,
+      default_branch: repoForm.value.default_branch.trim() || "main",
+      installation_id: repoForm.value.installation_id.trim()
+        ? Number.parseInt(repoForm.value.installation_id.trim(), 10)
+        : null,
+      auth_strategy: repoForm.value.auth_strategy,
+      readme_title: projectName.value || "Project Bootstrap",
+      commit_message: "chore(repo): bootstrap repository",
+    });
+    if (!result?.ok) {
+      repoError.value = result?.error || result?.message || "Repository bootstrap failed.";
+      return;
+    }
+    repoMessage.value = result?.created
+      ? "Empty repository initialized. Re-running clone preflight."
+      : "Repository already initialized. Re-running clone preflight.";
+    await runRepoPreflight();
+  } catch (err: any) {
+    repoError.value = err?.message || "Repository bootstrap failed.";
+  } finally {
+    repoBootstrapLoading.value = false;
   }
 }
 

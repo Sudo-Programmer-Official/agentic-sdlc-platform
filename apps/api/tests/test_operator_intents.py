@@ -9,6 +9,8 @@ def _request(message: str) -> OperatorRequest:
 
 
 def test_classify_intent_routes_known_queries():
+    assert classify_intent(_request("Change pricing title to Enterprise Plus")) == OperatorIntent.CONTENT_UPDATE
+    assert classify_intent(_request("Add animated pricing comparison section")) == OperatorIntent.STRUCTURAL_CHANGE
     assert classify_intent(_request("Why did the latest run fail?")) == OperatorIntent.RUN_DEBUG
     assert classify_intent(_request("Explain the latest patch")) == OperatorIntent.ARTIFACT_EXPLAIN
     assert classify_intent(_request("Compare the last two runs")) == OperatorIntent.RUN_COMPARISON

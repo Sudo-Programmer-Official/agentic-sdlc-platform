@@ -12,6 +12,8 @@ _UUID_RE = re.compile(
 
 
 class OperatorIntent(str, enum.Enum):
+    CONTENT_UPDATE = "content_update"
+    STRUCTURAL_CHANGE = "structural_change"
     PROJECT_STATUS = "project_status"
     RUN_DEBUG = "run_debug"
     ARTIFACT_EXPLAIN = "artifact_explain"
@@ -59,6 +61,36 @@ def classify_intent(request: OperatorRequest) -> OperatorIntent:
         or "button" in lowered
     ):
         return OperatorIntent.REPO_CONTEXT
+    structural_terms = (
+        "add section",
+        "add ",
+        "section",
+        "layout",
+        "styling",
+        "animation",
+        "animated",
+        "route",
+        "routing",
+        "interaction",
+        "topology",
+    )
+    content_terms = (
+        "change",
+        "update",
+        "headline",
+        "title",
+        "cta",
+        "pricing",
+        "faq",
+        "testimonial",
+        "copy",
+        "label",
+        "button text",
+    )
+    if any(term in lowered for term in structural_terms):
+        return OperatorIntent.STRUCTURAL_CHANGE
+    if any(term in lowered for term in content_terms):
+        return OperatorIntent.CONTENT_UPDATE
     if (
         "run" in lowered
         or "failed" in lowered

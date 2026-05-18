@@ -59,6 +59,12 @@ def _seed_remote_repo(tmp_path: Path) -> Path:
     return remote
 
 
+def _create_empty_remote_repo(tmp_path: Path) -> Path:
+    remote = tmp_path / "empty-origin.git"
+    _run_git(["init", "--bare", str(remote)])
+    return remote
+
+
 @pytest.fixture
 async def db_session(tmp_path, monkeypatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'repo-integration.db'}", future=True)
@@ -209,6 +215,46 @@ async def test_repo_preflight_uses_saved_auth_strategy(db_session, monkeypatch):
     assert preflight_resp.json()["ok"] is True
     assert calls[0]["auth_strategy"] == "public_https"
     assert calls[0]["repo_url"] == str(remote)
+
+
+@pytest.mark.anyio
+async def test_repo_bootstrap_initializes_empty_remote(db_session):
+    session, tenant_id, tmp_path = db_session
+    project = Project(name="Bootstrap project", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+
+    remote = _create_empty_remote_repo(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        bootstrap_resp = await client.post(
+            f"/api/v1/projects/{project.id}/repo/bootstrap",
+            json={
+                "provider": "github",
+                "repo_url": str(remote),
+                "default_branch": "main",
+                "auth_strategy": "public_https",
+                "readme_title": "Bootstrap project",
+            },
+        )
+        preflight_resp = await client.post(
+            f"/api/v1/projects/{project.id}/repo/preflight",
+            json={
+                "provider": "github",
+                "repo_url": str(remote),
+                "default_branch": "main",
+                "auth_strategy": "public_https",
+                "clone": True,
+            },
+        )
+
+    assert bootstrap_resp.status_code == 200
+    assert bootstrap_resp.json()["ok"] is True
+    assert bootstrap_resp.json()["created"] is True
+    assert bootstrap_resp.json()["commit_sha"]
+    assert preflight_resp.status_code == 200
+    assert preflight_resp.json()["ok"] is True
 
 
 @pytest.mark.anyio

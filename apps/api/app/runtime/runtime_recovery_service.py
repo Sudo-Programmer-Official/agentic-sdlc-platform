@@ -418,5 +418,11 @@ class RuntimeRecoveryService:
             match = re.search(r"patch too large for ([^ )]+)", lowered)
             file_name = (match.group(1).strip() if match else "unknown")
             return f"{failure_type}:patch_too_large:{file_name}"
+        if "frontend topology violation:" in lowered and "inline css dump patterns" in lowered:
+            import re
+
+            match = re.search(r"frontend topology violation:\s*([^ ]+)\s+contains inline css dump patterns", lowered)
+            file_name = (match.group(1).strip() if match else "unknown")
+            return f"{failure_type}:frontend_topology_inline_css:{file_name}"
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16] if text else "none"
         return f"{failure_type}:{work_item.type}:{digest}"

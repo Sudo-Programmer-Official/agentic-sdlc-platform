@@ -488,6 +488,28 @@ class ProjectRepositoryPreflightOut(BaseModel):
     error: Optional[str] = None
 
 
+class ProjectRepositoryBootstrapRequest(BaseModel):
+    provider: str = "github"
+    repo_url: Optional[str] = None
+    repo_full_name: Optional[str] = None
+    default_branch: Optional[str] = None
+    installation_id: Optional[int] = None
+    auth_strategy: Optional[str] = None
+    readme_title: Optional[str] = None
+    commit_message: str = "chore(repo): bootstrap repository"
+
+
+class ProjectRepositoryBootstrapOut(BaseModel):
+    ok: bool
+    created: bool
+    provider: str
+    repo_url: str
+    default_branch: str
+    commit_sha: Optional[str] = None
+    message: str
+    error: Optional[str] = None
+
+
 class ProjectRepositoryOut(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
@@ -628,3 +650,76 @@ class ExternalReferenceOut(BaseModel):
     uri: str
     metadata: dict = Field(default_factory=dict, validation_alias=AliasChoices("metadata", "extra_metadata"))
     created_at: datetime
+
+class ContentItemUpsert(BaseModel):
+    key: str = Field(min_length=1, max_length=255)
+    type: str = "text"
+    value: object | None = None
+    source: str = "operator"
+
+
+class ContentItemOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    environment: str
+    key: str
+    type: str
+    value: object | None = None
+    version: int
+    status: str
+    source: str
+    updated_by: str | None = None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ContentItemHistoryOut(BaseModel):
+    key: str
+    environment: str
+    versions: list[ContentItemOut] = Field(default_factory=list)
+
+
+class ContentPublishRequest(BaseModel):
+    source_environment: str = "PREVIEW"
+    target_environment: str = "STAGING"
+    notes: str | None = None
+
+
+class ContentPublishOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    source_environment: str
+    target_environment: str
+    published_by: str | None = None
+    created_at: datetime
+    item_count: int
+
+
+class ContentRollbackRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=255)
+    environment: str = "PREVIEW"
+    target_version: int = Field(ge=1)
+
+
+class ContentSnapshotOut(BaseModel):
+    project_id: uuid.UUID
+    environment: str
+    items: list[ContentItemOut] = Field(default_factory=list)
+
+
+class ChangeRouteRequest(BaseModel):
+    message: str = Field(min_length=1)
+    key: str | None = None
+    value: object | None = None
+    environment: str = "PREVIEW"
+    auto_publish: bool = False
+
+
+class ChangeRouteOut(BaseModel):
+    classification: str
+    action: str
+    detail: str
+    content_item: ContentItemOut | None = None
+    run_id: uuid.UUID | None = None

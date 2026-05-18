@@ -12,6 +12,11 @@ from app.runtime.execution_contract import build_execution_contract
 
 PHASE_BY_TYPE = {
     "PLAN_DAG": "plan",
+    "PLAN_BACKEND_TOPOLOGY": "plan",
+    "GENERATE_ROUTE": "build",
+    "GENERATE_SERVICE": "build",
+    "GENERATE_REPOSITORY": "build",
+    "GENERATE_CAPABILITY_BINDING": "build",
     "CODE_BACKEND": "build",
     "CODE_FRONTEND": "build",
     "WRITE_TESTS": "verify",
@@ -22,6 +27,11 @@ PHASE_BY_TYPE = {
 
 RATIONALE_BY_TYPE = {
     "PLAN_DAG": "Translate the run goal into a bounded execution graph before code changes start.",
+    "PLAN_BACKEND_TOPOLOGY": "Generate a capability-aware backend topology contract (routes, services, repositories, schemas, capability modules).",
+    "GENERATE_ROUTE": "Generate route module bounded by the backend topology contract.",
+    "GENERATE_SERVICE": "Generate service module bounded by the backend topology contract.",
+    "GENERATE_REPOSITORY": "Generate repository module bounded by the backend topology contract.",
+    "GENERATE_CAPABILITY_BINDING": "Generate capability binding module bounded by the backend topology contract.",
     "CODE_BACKEND": "Apply the smallest backend patch needed to move the goal forward.",
     "CODE_FRONTEND": "Apply the smallest frontend patch needed to move the goal forward.",
     "WRITE_TESTS": "Prepare or adjust tests so the patch can be validated and reviewed safely.",
@@ -32,6 +42,11 @@ RATIONALE_BY_TYPE = {
 
 SUCCESS_CRITERIA_BY_TYPE = {
     "PLAN_DAG": ["Execution steps are staged with explicit dependencies."],
+    "PLAN_BACKEND_TOPOLOGY": ["Backend module boundaries and capability usage are explicitly planned before code generation."],
+    "GENERATE_ROUTE": ["Route module is generated without violating layer boundaries."],
+    "GENERATE_SERVICE": ["Service module is generated with capability-aware orchestration."],
+    "GENERATE_REPOSITORY": ["Repository module is generated with persistence-only responsibilities."],
+    "GENERATE_CAPABILITY_BINDING": ["Capability integration module is generated using runtime capability resolution contract."],
     "CODE_BACKEND": ["Backend patch stays inside the intended subsystem."],
     "CODE_FRONTEND": ["Frontend patch stays inside the intended subsystem."],
     "WRITE_TESTS": ["Relevant tests are ready to validate the change."],
@@ -42,6 +57,11 @@ SUCCESS_CRITERIA_BY_TYPE = {
 
 EXPECTED_COMMANDS_BY_TYPE = {
     "PLAN_DAG": ["plan run DAG"],
+    "PLAN_BACKEND_TOPOLOGY": ["plan backend topology"],
+    "GENERATE_ROUTE": ["generate route module"],
+    "GENERATE_SERVICE": ["generate service module"],
+    "GENERATE_REPOSITORY": ["generate repository module"],
+    "GENERATE_CAPABILITY_BINDING": ["generate capability binding module"],
     "CODE_BACKEND": ["apply backend patch"],
     "CODE_FRONTEND": ["apply frontend patch"],
     "WRITE_TESTS": ["update tests"],

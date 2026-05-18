@@ -389,6 +389,17 @@ export type RepoPreflightPayload = {
   clone?: boolean;
 };
 
+export type RepoBootstrapPayload = {
+  provider?: string;
+  repo_url?: string | null;
+  repo_full_name?: string | null;
+  default_branch?: string | null;
+  installation_id?: number | null;
+  auth_strategy?: string | null;
+  readme_title?: string | null;
+  commit_message?: string | null;
+};
+
 export type GitHubConnectInfo = {
   enabled: boolean;
   app_slug?: string | null;
@@ -965,6 +976,23 @@ export type DeploymentReadinessContract = {
   evidence: Record<string, any>;
 };
 
+export type ComponentCapabilityContractRow = {
+  id: string;
+  tenant_id: string;
+  workspace_id?: string | null;
+  project_id: string;
+  environment: string;
+  capability: string;
+  contract_json: Record<string, any>;
+  status: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  created_by?: string | null;
+  updated_by?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export async function getProjectEnvironmentCenter(projectId: string) {
   const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/environments`);
   return parseApiResponse(resp) as Promise<ProjectEnvironmentCenter>;
@@ -1093,6 +1121,48 @@ export async function fetchProjectDeploymentReadiness(
   const query = environment ? `?environment=${encodeURIComponent(environment)}` : "";
   const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/deployment-readiness${query}`);
   return parseApiResponse(resp) as Promise<DeploymentReadinessContract>;
+}
+
+export async function listProjectComponentCapabilityContracts(
+  projectId: string,
+  environment: "PREVIEW" | "STAGING" | "PRODUCTION"
+) {
+  const resp = await apiFetch(
+    `${API_BASE}/projects/${encodeURIComponent(projectId)}/component-capability-contracts?environment=${encodeURIComponent(environment)}`
+  );
+  return parseApiResponse(resp) as Promise<ComponentCapabilityContractRow[]>;
+}
+
+export async function upsertProjectComponentCapabilityContract(
+  projectId: string,
+  payload: {
+    environment: "PREVIEW" | "STAGING" | "PRODUCTION";
+    capability: string;
+    contract_json: Record<string, any>;
+  }
+) {
+  const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/component-capability-contracts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp) as Promise<ComponentCapabilityContractRow>;
+}
+
+export async function approveProjectComponentCapabilityContract(
+  projectId: string,
+  payload: {
+    environment: "PREVIEW" | "STAGING" | "PRODUCTION";
+    capability: string;
+    approved_by?: string | null;
+  }
+) {
+  const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/component-capability-contracts/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp) as Promise<ComponentCapabilityContractRow>;
 }
 
 export async function materializeAdminWorkspaceUsage(workspaceId: string, days = 30) {
@@ -1263,6 +1333,15 @@ export async function connectProjectRepo(projectId: string, payload: ConnectRepo
 
 export async function preflightProjectRepo(projectId: string, payload: RepoPreflightPayload) {
   const resp = await apiFetch(`${API_BASE}/projects/${projectId}/repo/preflight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function bootstrapProjectRepo(projectId: string, payload: RepoBootstrapPayload) {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/repo/bootstrap`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -1616,6 +1695,15 @@ export async function unblockRun(runId: string) {
   return parseApiResponse(resp);
 }
 
+export async function confirmAndContinueRun(runId: string) {
+  const resp = await apiFetch(`${API_BASE}/runs/${runId}/confirm-and-continue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return parseApiResponse(resp);
+}
+
 export async function retryRunPush(runId: string, payload: { auth_strategy?: string } = {}) {
   const resp = await apiFetch(`${API_BASE}/runs/${runId}/retry-push`, {
     method: "POST",
@@ -1735,6 +1823,80 @@ export async function listDeploymentEvents(deploymentId: string, limit = 60) {
 export async function listDeploymentConnectors(provider?: string) {
   const qs = provider ? `?provider=${encodeURIComponent(provider)}` : "";
   const resp = await apiFetch(`${API_BASE}/deployment-connectors${qs}`);
+  return parseApiResponse(resp);
+}
+
+export type CapabilityDefinition = {
+  id: string;
+  capability_key: string;
+  category: string;
+  required: boolean;
+  supported_providers?: string[];
+  description?: string | null;
+};
+
+export type CapabilityIntegration = {
+  id: string;
+  project_id: string;
+  provider: string;
+  label: string;
+  environment: "LOCAL_DEV" | "PREVIEW" | "STAGING" | "PRODUCTION";
+  status: string;
+  capabilities?: string[];
+  health_status: string;
+  credentials_vault_ref?: string | null;
+  failure_reason?: string | null;
+};
+
+export type CapabilityBinding = {
+  id: string;
+  project_id: string;
+  environment: "LOCAL_DEV" | "PREVIEW" | "STAGING" | "PRODUCTION";
+  capability_key: string;
+  integration_id: string;
+  target?: string | null;
+  status: string;
+};
+
+export async function listCapabilities(requiredOnly = false): Promise<CapabilityDefinition[]> {
+  const qs = requiredOnly ? "?required_only=true" : "";
+  const resp = await apiFetch(`${API_BASE}/capabilities${qs}`);
+  return parseApiResponse(resp);
+}
+
+export async function listCapabilityIntegrations(projectId: string, environment: string): Promise<CapabilityIntegration[]> {
+  const qs = `?environment=${encodeURIComponent(environment)}`;
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/capability-integrations${qs}`);
+  return parseApiResponse(resp);
+}
+
+export async function upsertCapabilityIntegration(projectId: string, payload: Record<string, any>): Promise<CapabilityIntegration> {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/capability-integrations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function listCapabilityBindings(projectId: string, environment: string): Promise<CapabilityBinding[]> {
+  const qs = `?environment=${encodeURIComponent(environment)}`;
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/capability-bindings${qs}`);
+  return parseApiResponse(resp);
+}
+
+export async function upsertCapabilityBinding(projectId: string, payload: Record<string, any>): Promise<CapabilityBinding> {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/capability-bindings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
+export async function fetchCapabilityGovernanceCheck(projectId: string, environment: string) {
+  const qs = `?environment=${encodeURIComponent(environment)}`;
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/capability-governance-check${qs}`);
   return parseApiResponse(resp);
 }
 

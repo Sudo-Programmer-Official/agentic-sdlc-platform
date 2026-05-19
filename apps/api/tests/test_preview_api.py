@@ -294,3 +294,477 @@ async def test_launch_run_preview_rejects_invalid_static_entrypoint(db_session, 
 
     with pytest.raises(ValueError, match="Static preview contract requires index.html to contain a <body> element"):
         await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_auto_switches_explicit_static_profile_to_vite_dev(db_session, monkeypatch, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Vite static mismatch", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/vite-site.git",
+            repo_full_name="acme/vite-site",
+            default_branch="main",
+        )
+    )
+    await preview_service.upsert_project_preview_profile(
+        session,
+        project_id=project.id,
+        tenant_id=tenant_id,
+        payload={
+            "enabled": True,
+            "mode": "local",
+            "frontend_start_command": "python3 -m http.server $PORT --bind $HOST",
+        },
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    (workspace_root / "context").mkdir(parents=True)
+    repo_root.mkdir(parents=True)
+    (repo_root / "index.html").write_text(
+        "<!doctype html><html><body><div id='app'></div><script type=\"module\" src=\"/src/main.ts\"></script></body></html>",
+        encoding="utf-8",
+    )
+    (repo_root / "package.json").write_text(
+        '{"name":"vite-site","scripts":{"dev":"vite"},"devDependencies":{"vite":"^5.0.0"}}',
+        encoding="utf-8",
+    )
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/vite-preview",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(preview_service, "_pick_port", lambda _preferred=None: 59491)
+    monkeypatch.setattr(preview_service, "_service_healthcheck", lambda _url, _path=None: True)
+    monkeypatch.setattr(preview_service, "_terminate_process_group", lambda _pid=None: None)
+
+    def fake_start_service_process(**_kwargs):
+        return preview_service._PreviewProcess(
+            pid=12345,
+            log_path=str(Path(tmp_path) / "preview.log"),
+            url="http://127.0.0.1:59491",
+            port=59491,
+        )
+
+    monkeypatch.setattr(preview_service, "_start_service_process", fake_start_service_process)
+
+    preview = await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+    assert preview.status == "READY"
+    assert preview.frontend is not None
+    assert preview.frontend.start_command in {
+        "npm run dev -- --host $HOST --port $PORT",
+        "npx vite --host $HOST --port $PORT",
+    }
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_auto_switches_default_static_profile_to_vite_dev(db_session, monkeypatch, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Vite auto profile", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/vite-site.git",
+            repo_full_name="acme/vite-site",
+            default_branch="main",
+        )
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    (workspace_root / "context").mkdir(parents=True)
+    repo_root.mkdir(parents=True)
+    (repo_root / "index.html").write_text(
+        "<!doctype html><html><body><div id='app'></div><script type=\"module\" src=\"/src/main.ts\"></script></body></html>",
+        encoding="utf-8",
+    )
+    (repo_root / "package.json").write_text(
+        '{"name":"vite-site","scripts":{"dev":"vite"},"devDependencies":{"vite":"^5.0.0"}}',
+        encoding="utf-8",
+    )
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/vite-auto-preview",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(preview_service, "_pick_port", lambda _preferred=None: 59491)
+    monkeypatch.setattr(preview_service, "_service_healthcheck", lambda _url, _path=None: True)
+    monkeypatch.setattr(preview_service, "_terminate_process_group", lambda _pid=None: None)
+
+    def fake_start_service_process(**_kwargs):
+        return preview_service._PreviewProcess(
+            pid=12345,
+            log_path=str(Path(tmp_path) / "preview.log"),
+            url="http://127.0.0.1:59491",
+            port=59491,
+        )
+
+    monkeypatch.setattr(preview_service, "_start_service_process", fake_start_service_process)
+
+    preview = await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+
+    assert preview.status == "READY"
+    assert preview.frontend is not None
+    assert preview.frontend.start_command in {
+        "npm run dev -- --host $HOST --port $PORT",
+        "npx vite --host $HOST --port $PORT",
+    }
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_detects_apps_web_root_for_vite_auto_switch(db_session, monkeypatch, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Vite monorepo auto root", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/monorepo.git",
+            repo_full_name="acme/monorepo",
+            default_branch="main",
+        )
+    )
+    await preview_service.upsert_project_preview_profile(
+        session,
+        project_id=project.id,
+        tenant_id=tenant_id,
+        payload={
+            "enabled": True,
+            "mode": "local",
+            "frontend_start_command": "python3 -m http.server $PORT --bind $HOST",
+        },
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    app_web = repo_root / "apps" / "web"
+    (workspace_root / "context").mkdir(parents=True)
+    app_web.mkdir(parents=True)
+    (app_web / "index.html").write_text(
+        "<!doctype html><html><body><div id='app'></div><script type=\"module\" src=\"/src/main.ts\"></script></body></html>",
+        encoding="utf-8",
+    )
+    (app_web / "package.json").write_text(
+        '{"name":"web","scripts":{"dev":"vite"},"devDependencies":{"vite":"^5.0.0"}}',
+        encoding="utf-8",
+    )
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/vite-monorepo-preview",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(preview_service, "_pick_port", lambda _preferred=None: 59491)
+    monkeypatch.setattr(preview_service, "_service_healthcheck", lambda _url, _path=None: True)
+    monkeypatch.setattr(preview_service, "_terminate_process_group", lambda _pid=None: None)
+
+    observed_cwd: dict[str, str] = {}
+
+    def fake_start_service_process(**kwargs):
+        observed_cwd["cwd"] = str(kwargs["cwd"])
+        return preview_service._PreviewProcess(
+            pid=12345,
+            log_path=str(Path(tmp_path) / "preview.log"),
+            url="http://127.0.0.1:59491",
+            port=59491,
+        )
+
+    monkeypatch.setattr(preview_service, "_start_service_process", fake_start_service_process)
+
+    preview = await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+    assert preview.status == "READY"
+    assert preview.frontend is not None
+    assert preview.frontend.start_command in {
+        "npm run dev -- --host $HOST --port $PORT",
+        "npx vite --host $HOST --port $PORT",
+    }
+    assert observed_cwd["cwd"] == str(app_web)
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_autofixes_missing_package_json_for_vite_workspace(db_session, monkeypatch, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Vite autofix", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/vite-missing-pkg.git",
+            repo_full_name="acme/vite-missing-pkg",
+            default_branch="main",
+        )
+    )
+    await preview_service.upsert_project_preview_profile(
+        session,
+        project_id=project.id,
+        tenant_id=tenant_id,
+        payload={
+            "enabled": True,
+            "mode": "local",
+            "frontend_start_command": "python3 -m http.server $PORT --bind $HOST",
+        },
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    src_root = repo_root / "src"
+    (workspace_root / "context").mkdir(parents=True)
+    src_root.mkdir(parents=True)
+    (repo_root / "index.html").write_text(
+        "<!doctype html><html><body><div id='app'></div><script type=\"module\" src=\"/src/main.ts\"></script></body></html>",
+        encoding="utf-8",
+    )
+    (src_root / "main.ts").write_text("console.log('preview');\n", encoding="utf-8")
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/vite-autofix-preview",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(preview_service, "_pick_port", lambda _preferred=None: 59491)
+    monkeypatch.setattr(preview_service, "_service_healthcheck", lambda _url, _path=None: True)
+    monkeypatch.setattr(preview_service, "_terminate_process_group", lambda _pid=None: None)
+
+    def fake_start_service_process(**_kwargs):
+        return preview_service._PreviewProcess(
+            pid=12345,
+            log_path=str(Path(tmp_path) / "preview.log"),
+            url="http://127.0.0.1:59491",
+            port=59491,
+        )
+
+    monkeypatch.setattr(preview_service, "_start_service_process", fake_start_service_process)
+
+    preview = await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+    assert preview.status == "READY"
+    assert preview.frontend is not None
+    assert preview.frontend.start_command == "npx vite --host $HOST --port $PORT"
+    assert (repo_root / "package.json").exists()
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_sanitizes_stale_vite_script_when_static_fallback(db_session, monkeypatch, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Stale vite static fallback", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/static-fallback.git",
+            repo_full_name="acme/static-fallback",
+            default_branch="main",
+        )
+    )
+    await preview_service.upsert_project_preview_profile(
+        session,
+        project_id=project.id,
+        tenant_id=tenant_id,
+        payload={
+            "enabled": True,
+            "mode": "local",
+            "frontend_start_command": "python3 -m http.server $PORT --bind $HOST",
+        },
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    (workspace_root / "context").mkdir(parents=True)
+    repo_root.mkdir(parents=True)
+    index_path = repo_root / "index.html"
+    index_path.write_text(
+        "<!doctype html><html><body><div>hello</div><script type=\"module\" src=\"/src/main.ts\"></script></body></html>",
+        encoding="utf-8",
+    )
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/static-fallback",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(preview_service, "_pick_port", lambda _preferred=None: 65079)
+    monkeypatch.setattr(preview_service, "_service_healthcheck", lambda _url, _path=None: True)
+    monkeypatch.setattr(preview_service, "_terminate_process_group", lambda _pid=None: None)
+
+    def fake_start_service_process(**_kwargs):
+        return preview_service._PreviewProcess(
+            pid=12345,
+            log_path=str(Path(tmp_path) / "preview.log"),
+            url="http://127.0.0.1:65079",
+            port=65079,
+        )
+
+    monkeypatch.setattr(preview_service, "_start_service_process", fake_start_service_process)
+
+    preview = await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+    assert preview.status == "READY"
+    assert preview.frontend is not None
+    assert preview.frontend.start_command == "python3 -m http.server $PORT --bind $HOST"
+    assert "/src/main.ts" not in index_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.anyio
+async def test_launch_run_preview_static_fallback_rewrites_framework_only_markup(db_session, monkeypatch, tmp_path):
+    session, tenant_id = db_session
+    project = Project(name="Framework markup fallback", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="git@github.com:acme/framework-markup.git",
+            repo_full_name="acme/framework-markup",
+            default_branch="main",
+        )
+    )
+    await preview_service.upsert_project_preview_profile(
+        session,
+        project_id=project.id,
+        tenant_id=tenant_id,
+        payload={"enabled": True, "mode": "local", "frontend_start_command": "python3 -m http.server $PORT --bind $HOST"},
+    )
+
+    workspace_root = tmp_path / "workspace"
+    repo_root = workspace_root / "repo"
+    (workspace_root / "context").mkdir(parents=True)
+    repo_root.mkdir(parents=True)
+    index_path = repo_root / "index.html"
+    index_path.write_text(
+        """<!doctype html><html><body><div id="app"><HeroSection><template #title><span>AI-Powered B2B Sales Automation</span></template><template #subtitle><span>Accelerate your sales pipeline.</span></template><template #primaryCta><PrimaryButton>Get Started</PrimaryButton></template></HeroSection></div></body></html>""",
+        encoding="utf-8",
+    )
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/framework-fallback",
+        workspace_status="SEEDED",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    monkeypatch.setattr(preview_service, "_pick_port", lambda _preferred=None: 49567)
+    monkeypatch.setattr(preview_service, "_service_healthcheck", lambda _url, _path=None: True)
+    monkeypatch.setattr(preview_service, "_terminate_process_group", lambda _pid=None: None)
+    monkeypatch.setattr(
+        preview_service,
+        "_start_service_process",
+        lambda **_kwargs: preview_service._PreviewProcess(
+            pid=12345,
+            log_path=str(Path(tmp_path) / "preview.log"),
+            url="http://127.0.0.1:49567",
+            port=49567,
+        ),
+    )
+
+    preview = await preview_service.launch_run_preview(session, tenant_id=tenant_id, run_id=run.id)
+    assert preview.status == "READY"
+    rendered = index_path.read_text(encoding="utf-8")
+    assert "<HeroSection" not in rendered
+    assert "AI-Powered B2B Sales Automation" in rendered
+
+
+def test_service_healthcheck_rejects_malformed_slot_rewrite_html(monkeypatch):
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _n: int = -1):
+            return b"<!doctype html><html><head><title><ContentSlot x /><//title></head></html>"
+
+    monkeypatch.setattr(preview_service, "urlopen", lambda *_args, **_kwargs: _Response())
+    assert preview_service._service_healthcheck("http://127.0.0.1:57966", "/") is False
+
+
+def test_service_healthcheck_rejects_unresolved_contentslot_in_static_html(monkeypatch):
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _n: int = -1):
+            return b"<!doctype html><html><body><ContentSlot content-key=\"hero\" /></body></html>"
+
+    monkeypatch.setattr(preview_service, "urlopen", lambda *_args, **_kwargs: _Response())
+    assert preview_service._service_healthcheck("http://127.0.0.1:57966", "/") is False

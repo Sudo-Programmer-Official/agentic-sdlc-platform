@@ -1414,6 +1414,20 @@ export async function deriveProjectArchitectureProfile(
   return parseApiResponse(resp);
 }
 
+export async function applyArchitectureDriftFixAndOpenPr(
+  projectId: string,
+  payload: {
+    updated_by?: string | null;
+  } = {}
+) {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/architecture-profile/fix-drift/apply-and-pr`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(resp);
+}
+
 export async function fetchProjectContract(projectId: string) {
   const resp = await apiFetch(`${API_BASE}/projects/${projectId}/project-contract`);
   return parseApiResponse(resp);

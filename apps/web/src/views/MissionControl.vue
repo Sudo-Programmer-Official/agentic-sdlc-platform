@@ -755,6 +755,26 @@
             <div v-if="architectureProfile.assumptions_used?.length" class="mt-2 text-xs text-slate-500">
               <strong>Assumptions:</strong> {{ architectureProfile.assumptions_used.join(" · ") }}
             </div>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="architectureDriftFixLoading"
+                @click="fixArchitectureDriftAndOpenPr"
+              >
+                Fix Drift + Open PR
+              </el-button>
+              <span v-if="architectureDriftFixResult?.pr_url" class="text-xs text-slate-500">
+                PR:
+                <a :href="architectureDriftFixResult.pr_url" target="_blank" rel="noopener noreferrer" class="text-sky-700 hover:underline">
+                  {{ architectureDriftFixResult.pr_url }}
+                </a>
+              </span>
+            </div>
+            <div v-if="architectureDriftFixError" class="mt-2 text-xs text-rose-600">
+              {{ architectureDriftFixError }}
+            </div>
           </div>
           <div v-if="projectContract" class="mission-subcard p-3 text-sm">
             <div class="flex flex-wrap items-center justify-between gap-2">
@@ -2858,6 +2878,7 @@ import ExecutionConsolePanel from "../components/workbench/ExecutionConsolePanel
 import ReviewSurfacePanel from "../components/workbench/ReviewSurfacePanel.vue";
 import TaskQueuePanel from "../components/workbench/TaskQueuePanel.vue";
 import {
+  applyArchitectureDriftFixAndOpenPr,
   bootstrapProjectContract,
   compareRuns,
   createApproval,
@@ -3052,6 +3073,8 @@ const projectContractBootstrapLoading = ref(false);
 const projectContractEnforcementLoading = ref(false);
 const projectContractStrictLoading = ref(false);
 const projectContractActionError = ref("");
+const architectureDriftFixLoading = ref(false);
+const architectureDriftFixError = ref("");
 const pinnedRunId = ref("");
 
 const projectId = computed(() => (route.params.projectId as string) || "");
@@ -3083,18 +3106,10 @@ const canonicalRunId = computed(() => {
     const selected = runs.value.find((run) => run?.id === pinnedRunId.value);
     if (selected?.id) return selected.id;
   }
-  const statusPriority = ["RUNNING", "CLAIMED", "QUEUED"];
-  const active = runs.value
-    .filter((run) => statusPriority.includes(String(run?.status || "").toUpperCase()))
-    .sort((a, b) => timestampScore(b) - timestampScore(a));
-  if (active[0]?.id) return active[0].id;
-  const hintRunId = previewsAndPrs.value?.run_id || latestChangeImpact.value?.run_id || "";
-  if (hintRunId) {
-    const hinted = runs.value.find((run) => run?.id === hintRunId);
-    if (hinted?.id) return hinted.id;
-  }
-  const fallback = [...runs.value].sort((a, b) => timestampScore(b) - timestampScore(a))[0];
-  return fallback?.id || "";
+  // Default focus should follow recency to avoid jumping back to older paused runs.
+  // Sticky focus is only applied when the operator explicitly pins a run.
+  const latestByUpdatedAt = [...runs.value].sort((a, b) => timestampScore(b) - timestampScore(a))[0];
+  return latestByUpdatedAt?.id || "";
 });
 
 const latestRun = computed(() => runs.value.find((run) => run?.id === canonicalRunId.value) || null);
@@ -3383,6 +3398,8 @@ const projectContractActionInFlight = computed(
     || projectContractEnforcementLoading.value
     || projectContractStrictLoading.value
 );
+
+const architectureDriftFixResult = ref<any | null>(null);
 const projectContractEnforcementMode = computed<"off" | "warn" | "strict">(() => {
   const rawMode = String(projectContract.value?.enforcement_mode || "").toLowerCase();
   if (rawMode === "warn" || rawMode === "strict" || rawMode === "off") {
@@ -4290,6 +4307,27 @@ async function bootstrapProjectContractFromMissionControl() {
     projectContractActionError.value = err?.message || "Failed to initialize project contract.";
   } finally {
     projectContractBootstrapLoading.value = false;
+  }
+}
+
+async function fixArchitectureDriftAndOpenPr() {
+  if (!projectId.value) return;
+  architectureDriftFixLoading.value = true;
+  architectureDriftFixError.value = "";
+  try {
+    const result = await applyArchitectureDriftFixAndOpenPr(projectId.value, { updated_by: "ui-user" });
+    architectureDriftFixResult.value = result;
+    await loadMissionOverview();
+    const prUrl = String(result?.pr_url || "").trim();
+    if (prUrl) {
+      ElMessage.success("Architecture drift fixed and PR opened.");
+    } else {
+      ElMessage.success("Architecture drift fixed. No PR opened because no repository changes were detected.");
+    }
+  } catch (err: any) {
+    architectureDriftFixError.value = err?.message || "Failed to fix architecture drift and open PR.";
+  } finally {
+    architectureDriftFixLoading.value = false;
   }
 }
 

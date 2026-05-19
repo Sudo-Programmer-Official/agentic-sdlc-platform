@@ -779,6 +779,78 @@ async def test_fix_retry_stops_when_same_test_signature_reaches_cap(monkeypatch,
 
 
 @pytest.mark.anyio
+async def test_fix_retry_stops_after_one_retry_for_missing_dependency_signature(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_TEST_RETRY_MAX_PER_SIGNATURE", "4")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    signature = "modulenotfounderror: no module named 'flask'"
+    async with runtime_db() as session:
+        project = Project(name="Dependency signature retry cap project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        session.add(
+            WorkItem(
+                project_id=project.id,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                type="RUN_TESTS",
+                key="RUN_TESTS_0",
+                status="FAILED",
+                executor="test",
+                payload={
+                    "recovery_action": "spawn_retry_node",
+                    "recovery_retry_signature": signature,
+                    "recovery_retry_count": 1,
+                },
+                result={"stdout": signature},
+                last_error="",
+            )
+        )
+        await session.flush()
+
+        fix_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="FIX_TEST_FAILURE",
+            key="FIX_TEST_FAILURE_1",
+            status="DONE",
+            executor="codex",
+            payload={"target_files": ["requirements.txt"]},
+            result={"message": "fix applied"},
+        )
+        session.add(fix_item)
+        await session.commit()
+        run_id = run.id
+        fix_item_id = fix_item.id
+
+    async with runtime_db() as session:
+        fix_item = await session.get(WorkItem, fix_item_id)
+        assert fix_item is not None
+        recovery = await maybe_apply_recovery(session, fix_item)
+        await session.commit()
+        assert recovery is not None
+        assert recovery["action"] == "spawn_retry_node"
+        assert recovery.get("created") is None
+
+        queued_retries = (
+            await session.execute(
+                select(func.count()).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.type == "RUN_TESTS",
+                    WorkItem.status == "QUEUED",
+                )
+            )
+        ).scalar_one()
+        assert queued_retries == 0
+
+
+@pytest.mark.anyio
 async def test_recovery_memory_emits_miss_event(monkeypatch, runtime_db):
     monkeypatch.setenv("RUNTIME_RECOVERY_MEMORY_ENABLED", "true")
     get_settings.cache_clear()
@@ -1937,6 +2009,7 @@ async def test_scheduler_does_not_spawn_goal_recovery_for_internal_human_review_
     monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
     monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
     monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("CODEX_BYPASS_OPERATOR_CONFIRMATION_REQUIRED", "false")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     get_settings.cache_clear()
     tenant_id = uuid.uuid4()
@@ -1991,6 +2064,69 @@ async def test_scheduler_does_not_spawn_goal_recovery_for_internal_human_review_
             )
         ).scalars().all()
         assert not queued_recovery
+
+
+@pytest.mark.anyio
+async def test_scheduler_spawns_goal_recovery_for_internal_human_review_stop_when_bypass_enabled(
+    monkeypatch, runtime_db
+):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("CODEX_BYPASS_OPERATOR_CONFIRMATION_REQUIRED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Retry on policy stop project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="PLAN_DAG",
+            key="PLAN_DAG",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True},
+            result={
+                "stop_reason": "human_review_required",
+                "approval_required": False,
+                "failure_class": "human_review_required",
+            },
+            last_error="human_review_required",
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        queued_recovery = (
+            await session.execute(
+                select(WorkItem).where(
+                    WorkItem.run_id == run_id,
+                    WorkItem.status == "QUEUED",
+                    WorkItem.payload["recovery_action"].as_string() == "goal_recovery_retry",
+                )
+            )
+        ).scalars().all()
+        assert queued_recovery
 
 
 @pytest.mark.anyio
@@ -2909,6 +3045,7 @@ async def test_scheduler_pauses_run_for_operator_confirmation_required(monkeypat
     monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
     monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
     monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("CODEX_BYPASS_OPERATOR_CONFIRMATION_REQUIRED", "false")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     get_settings.cache_clear()
     tenant_id = uuid.uuid4()
@@ -2966,6 +3103,58 @@ async def test_scheduler_pauses_run_for_operator_confirmation_required(monkeypat
         assert "RUN_OPERATOR_ACTION_REQUIRED" in event_types
         assert "WORK_ITEM_RECOVERY" not in event_types
         assert "WORK_ITEM_CREATED" not in event_types
+
+
+@pytest.mark.anyio
+async def test_scheduler_does_not_pause_for_operator_confirmation_when_bypass_enabled(monkeypatch, runtime_db):
+    monkeypatch.setenv("RUNTIME_MODE", "external")
+    monkeypatch.setenv("RUNTIME_NEVER_FAIL_RUNS", "false")
+    monkeypatch.setenv("RUNTIME_GOAL_ORCHESTRATION_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_GOAL_MAX_RECOVERY_CYCLES", "3")
+    monkeypatch.setenv("CODEX_BYPASS_OPERATOR_CONFIRMATION_REQUIRED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+    tenant_id = uuid.uuid4()
+
+    async with runtime_db() as session:
+        project = Project(name="Operator confirmation bypass project", tenant_id=tenant_id)
+        session.add(project)
+        await session.flush()
+
+        run = Run(project_id=project.id, tenant_id=tenant_id, status="RUNNING", executor="codex")
+        session.add(run)
+        await session.flush()
+
+        failed_item = WorkItem(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            type="GENERATE_ROUTE",
+            key="GENERATE_ROUTE",
+            status="FAILED",
+            priority=10,
+            executor="codex",
+            payload={"blocking": True},
+            result={"message": "Patch execution requires operator confirmation before mutating the repository."},
+            last_error="Patch execution requires operator confirmation before mutating the repository.",
+        )
+        session.add(failed_item)
+        await session.commit()
+        run_id = run.id
+
+    async with runtime_db() as session:
+        await scheduler_tick(session)
+        await session.commit()
+
+    async with runtime_db() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        assert run.status != "PAUSED"
+        events = (
+            await session.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id))
+        ).scalars().all()
+        event_types = [event.event_type for event in events]
+        assert "RUN_OPERATOR_ACTION_REQUIRED" not in event_types
 
 
 @pytest.mark.anyio

@@ -464,12 +464,13 @@ def _allow_adjacent_scope_expansion(
 ) -> bool:
     if not extra_files:
         return False
-    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
-    repository_state = str(payload.get("repository_state") or "").strip().upper()
-    if repository_state not in {"GENESIS", "EARLY_BUILD"} and not _is_bootstrap_or_genesis_scope(work_item):
-        return False
     if work_item.type not in {"FIX_TEST_FAILURE", "WRITE_TESTS", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
         return False
+    if work_item.type != "FIX_TEST_FAILURE":
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        repository_state = str(payload.get("repository_state") or "").strip().upper()
+        if repository_state not in {"GENESIS", "EARLY_BUILD"} and not _is_bootstrap_or_genesis_scope(work_item):
+            return False
     normalized = {Path(path).name.strip() for path in extra_files if isinstance(path, str) and path.strip()}
     return bool(normalized) and normalized.issubset(ADJACENT_REPAIR_FILES)
 
@@ -797,6 +798,11 @@ class CodexExecutor(TaskExecutor):
         if not bool(getattr(self.settings, "codex_bypass_app_py_patch_ratio_limit", False)):
             return False
         return str(rel_path or "").strip().lower() == "app.py"
+
+    def _should_block_on_human_review_gate(self, work_item: WorkItem) -> bool:
+        if bool(getattr(self.settings, "codex_bypass_operator_confirmation_required", False)):
+            return False
+        return _should_block_on_human_review_for_work_item(work_item)
 
     def _maybe_bypass_operator_confirmation(
         self,
@@ -1257,7 +1263,7 @@ class CodexExecutor(TaskExecutor):
         )
         # Planning/review stages and bootstrap/genesis scopes should not hard-stop
         # on human-review gating; bootstrap flows must converge end-to-end.
-        should_block_on_human_review = _should_block_on_human_review_for_work_item(work_item)
+        should_block_on_human_review = self._should_block_on_human_review_gate(work_item)
         prepared = await self._job_manager.prepare_job(
             job_request,
             system_prompt=system_prompt,
@@ -2709,12 +2715,6 @@ class CodexExecutor(TaskExecutor):
             for action in actions
             if getattr(action, "type", None) in {"write_file", "apply_patch"}
         }
-        if _is_backend_codegen_type(work_item.type):
-            recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
-            if recovery_strategy == "write_file_preferred" and "apply_patch" in mutating_types:
-                return [
-                    f"{work_item.type} mutation_strategy violation: recovery_strategy_write_file_preferred requires write_file output."
-                ]
         if len(mutating_types) > 1:
             return [
                 f"{work_item.type} mutation_strategy violation: plan emitted mixed mutating action types (write_file and apply_patch)."
@@ -2872,7 +2872,9 @@ class CodexExecutor(TaskExecutor):
             if not path or not isinstance(content, str):
                 continue
             suffix = Path(path).suffix.lower()
-            if suffix not in {".html", ".vue"}:
+            # Only rewrite Vue templates. Raw HTML entrypoints (for example index.html)
+            # are not compiled as Vue templates, so ContentSlot tags render as empty custom elements.
+            if suffix != ".vue":
                 continue
             literals = extract_literals(content)
             if not literals:

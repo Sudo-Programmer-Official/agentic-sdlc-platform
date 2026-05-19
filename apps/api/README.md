@@ -54,3 +54,19 @@ docker compose down
 ```
 
 One important detail: Compose uses the repo-root [`.env`](Documents/sudo-programmer-official/agentic-sdlc-platform/.env), not `apps/api/.env`. For Docker local startup, the current root `.env` is already set up correctly to use the `db` container.
+
+## Runtime Mode Profiles
+
+Use mode profiles when you want to switch between high-throughput execution and strict runtime gating.
+
+- `apps/api/.env.fast`: Looser runtime gates, faster autonomous flow.
+- `apps/api/.env.strict`: Tighter runtime gates, explicit confirmations.
+
+Switch mode from repo root:
+
+```bash
+./scripts/switch-runtime-mode.sh fast
+./scripts/switch-runtime-mode.sh strict
+```
+
+After switching, restart API, scheduler, and worker so the new values are loaded.

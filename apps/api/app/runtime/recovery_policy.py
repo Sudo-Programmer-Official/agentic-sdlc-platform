@@ -53,6 +53,11 @@ def _run_tests_failure_signature(item: WorkItem) -> str:
     )
 
 
+def _is_dependency_import_signature(signature: str) -> bool:
+    text = str(signature or "").lower()
+    return "no module named" in text or "modulenotfounderror" in text
+
+
 @dataclass(frozen=True)
 class RecoveryRule:
     when_status: str
@@ -540,6 +545,10 @@ async def _spawn_test_retry(session: AsyncSession, source_work_item: WorkItem) -
     )
     signature = _run_tests_failure_signature(latest_failed)
     retry_cap = max(1, int(get_settings().runtime_test_retry_max_per_signature))
+    if signature and _is_dependency_import_signature(signature):
+        # Dependency import errors often persist inside the same runtime environment
+        # even after requirements files are patched. Limit auto-retry churn.
+        retry_cap = min(retry_cap, 1)
     prior_same_signature_retries = 0
     if signature:
         prior_same_signature_retries = sum(

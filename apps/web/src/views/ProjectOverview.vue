@@ -3105,7 +3105,9 @@ function manualSelectionDependencyWarnings(queue: any[], allTasks: any[]) {
 }
 
 function hasActiveRuns(rows: any[]) {
-  return rows.some((run) => ["RUNNING", "QUEUED", "PAUSED"].includes(String(run?.status || "").toUpperCase()));
+  // PAUSED runs should not block ordered dispatch; they are resumable/idle states.
+  // Only truly active execution states should gate the next task launch.
+  return rows.some((run) => ["RUNNING", "QUEUED", "CLAIMED"].includes(String(run?.status || "").toUpperCase()));
 }
 
 function sleep(ms: number) {

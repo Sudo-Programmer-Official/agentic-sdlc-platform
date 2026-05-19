@@ -28,6 +28,10 @@ class ArchitectureProfileDeriveRequest(BaseModel):
     updated_by: str | None = None
 
 
+class ArchitectureProfileFixDriftRequest(BaseModel):
+    updated_by: str | None = None
+
+
 class ArchitectureProfileBootstrapRequest(BaseModel):
     refresh_repo_map: bool = False
     created_by: str | None = None
@@ -85,3 +89,25 @@ class ArchitectureProfileSummaryOut(BaseModel):
     assumptions_used: list[str] = Field(default_factory=list)
     derivation_confidence: str = "LOW"
     derived_from: list[str] = Field(default_factory=list)
+
+
+class ArchitectureProfileFixDriftPreviewOut(BaseModel):
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    patch: dict[str, Any] = Field(default_factory=dict)
+    changed: bool = False
+
+
+class ArchitectureProfileFixDriftApplyOut(BaseModel):
+    applied: bool = False
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    profile: ArchitectureProfileOut
+
+
+class ArchitectureProfileFixDriftPrOut(BaseModel):
+    applied: bool = False
+    branch_name: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    changed_files: list[str] = Field(default_factory=list)
+    profile: ArchitectureProfileOut

@@ -1,4 +1,5 @@
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -195,6 +196,231 @@ async def test_architecture_profile_patch_merges_sections_and_rederives(db_sessi
         assert patched["derived_json"]["safe_zone_index"]["apps/web/src/views"]["editable"] is True
         assert patched["derived_json"]["protected_zone_index"]["apps/web/src/admin"]["approval_required"] is True
 
+
+@pytest.mark.anyio
+async def test_architecture_profile_derive_normalizes_integrations_and_environment_assumptions(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Derive normalize", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="https://github.com/acme/normalize.git",
+            repo_full_name="acme/normalize",
+            default_branch="main",
+        )
+    )
+    session.add(
+        ProjectPreviewProfile(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            enabled=True,
+            mode="local",
+            frontend_root="apps/web",
+            backend_root="apps/api",
+        )
+    )
+    session.add_all(
+        [
+            RepoFile(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                path="apps/web/package.json",
+                language="json",
+                kind="config",
+                summary="frontend package",
+            ),
+            RepoFile(
+                tenant_id=tenant_id,
+                project_id=project.id,
+                path="apps/api/pyproject.toml",
+                language="toml",
+                kind="config",
+                summary="api config",
+            ),
+        ]
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        bootstrap_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/bootstrap",
+            json={"created_by": "ui-user"},
+        )
+        assert bootstrap_response.status_code == 200, bootstrap_response.text
+
+        patch_response = await client.patch(
+            f"/api/v1/projects/{project.id}/architecture-profile",
+            json={
+                "sections": {
+                    "integrations": [
+                        {"name": "repository", "provider": None, "repo_full_name": None, "default_branch": None},
+                        {"name": "repository", "provider": "github", "repo_full_name": "acme/normalize", "default_branch": "main"},
+                    ],
+                    "environment_assumptions": {
+                        "repo_connected": False,
+                        "preview_profile_configured": False,
+                        "frontend_root": None,
+                        "backend_root": None,
+                    },
+                },
+                "updated_by": "ui-user",
+            },
+        )
+        assert patch_response.status_code == 200, patch_response.text
+
+        derive_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/derive",
+            json={"updated_by": "ui-user"},
+        )
+        assert derive_response.status_code == 200, derive_response.text
+        payload = derive_response.json()
+        integrations = payload["profile_json"]["integrations"]
+        assert len(integrations) == 2
+        assert integrations[0]["name"] == "repository"
+        assert integrations[0]["provider"] == "github"
+        assert integrations[0]["repo_full_name"] == "acme/normalize"
+        assert integrations[1]["name"] == "preview"
+        assert integrations[1]["frontend_root"] == "apps/web"
+        assert integrations[1]["backend_root"] == "apps/api"
+        assumptions = payload["profile_json"]["environment_assumptions"]
+        assert assumptions["repo_connected"] is True
+        assert assumptions["preview_profile_configured"] is True
+        assert assumptions["frontend_root"] == "apps/web"
+        assert assumptions["backend_root"] == "apps/api"
+        diagnostics = payload["profile_json"]["contract_diagnostics"]
+        assert diagnostics["warnings"] == []
+
+
+@pytest.mark.anyio
+async def test_architecture_profile_fix_drift_preview_and_apply(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Fix drift project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            provider="github",
+            repo_url="https://github.com/acme/fix-drift.git",
+            repo_full_name="acme/fix-drift",
+            default_branch="main",
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        bootstrap_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/bootstrap",
+            json={"created_by": "ui-user"},
+        )
+        assert bootstrap_response.status_code == 200, bootstrap_response.text
+        version_before = bootstrap_response.json()["version"]
+
+        patch_response = await client.patch(
+            f"/api/v1/projects/{project.id}/architecture-profile",
+            json={
+                "sections": {
+                    "integrations": [
+                        {"name": "repository", "provider": None, "repo_full_name": None, "default_branch": None},
+                        {"name": "repository", "provider": "github", "repo_full_name": "acme/fix-drift", "default_branch": "main"},
+                    ],
+                },
+                "updated_by": "ui-user",
+            },
+        )
+        assert patch_response.status_code == 200, patch_response.text
+
+        preview_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/fix-drift",
+        )
+        assert preview_response.status_code == 200, preview_response.text
+        preview_payload = preview_response.json()
+        assert preview_payload["changed"] is True
+        assert preview_payload["diagnostics"]["severity"] in {"LOW", "MEDIUM"}
+        assert preview_payload["patch"]["integrations"][0]["name"] == "repository"
+
+        apply_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/fix-drift/apply",
+            json={"updated_by": "ui-user"},
+        )
+        assert apply_response.status_code == 200, apply_response.text
+        apply_payload = apply_response.json()
+        assert apply_payload["applied"] is True
+        assert apply_payload["profile"]["version"] == version_before + 2
+        assert apply_payload["profile"]["profile_json"]["contract_diagnostics"]["warnings"] == []
+
+
+@pytest.mark.anyio
+async def test_architecture_profile_fix_drift_apply_and_pr_requires_repo(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Fix drift no repo", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        bootstrap_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/bootstrap",
+            json={"created_by": "ui-user"},
+        )
+        assert bootstrap_response.status_code == 200, bootstrap_response.text
+
+        response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/fix-drift/apply-and-pr",
+            json={"updated_by": "ui-user"},
+        )
+        assert response.status_code == 400, response.text
+        assert "repository is not connected" in response.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_architecture_profile_fix_drift_apply_and_pr_success_with_mock(db_session, monkeypatch):
+    session, tenant_id = db_session
+    project = Project(name="Fix drift with mock PR", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        bootstrap_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/bootstrap",
+            json={"created_by": "ui-user"},
+        )
+        assert bootstrap_response.status_code == 200, bootstrap_response.text
+
+        from app.api.v1 import architecture_profile as architecture_profile_router
+
+        async def _mock_apply_and_pr(*args, **kwargs):
+            profile = SimpleNamespace(**bootstrap_response.json())
+            return {
+                "applied": True,
+                "branch_name": "chore/fix-architecture-drift-12345678",
+                "pr_url": "https://github.com/acme/repo/pull/42",
+                "pr_number": 42,
+                "diagnostics": {"warnings": [], "violations": [], "fixes": [], "severity": "LOW"},
+                "changed_files": ["contracts/project_contract.json"],
+                "profile": profile,
+            }
+
+        monkeypatch.setattr(
+            architecture_profile_router,
+            "apply_architecture_drift_fix_and_open_pr",
+            _mock_apply_and_pr,
+        )
+
+        response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/fix-drift/apply-and-pr",
+            json={"updated_by": "ui-user"},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["applied"] is True
+        assert payload["pr_number"] == 42
+        assert payload["branch_name"].startswith("chore/fix-architecture-drift-")
+        assert "contracts/project_contract.json" in payload["changed_files"]
 
 @pytest.mark.anyio
 async def test_architecture_profile_bootstrap_includes_blueprint_sections_when_present(db_session):

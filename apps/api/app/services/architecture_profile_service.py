@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -11,6 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ArchitectureProfile, Project, ProjectBlueprint, ProjectPreviewProfile, ProjectRepository, RepoFile
 from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
+from app.services.architecture_drift_service import (
+    detect_architecture_drift,
+    generate_canonical_contract_patch,
+)
+from app.services.knowledge_git import ensure_analysis_repo
+from app.services.repo_connector import (
+    commit_all,
+    get_project_repository,
+    push_branch,
+    repo_has_changes,
+)
+from app.services.vcs import get_default_installation_id, get_vcs_adapter
 from app.services.repo_map import refresh_project_repo_map
 
 _MONOREPO_ROOTS = {"apps", "packages", "services"}
@@ -725,6 +739,38 @@ def _infer_boundaries(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return boundaries
 
 
+def _first_package_by_kind(packages: list[dict[str, Any]], kind: str) -> str | None:
+    for package in packages:
+        if package.get("kind") == kind:
+            name = package.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return None
+
+
+def _canonical_integrations(
+    *,
+    repo: ProjectRepository | None,
+    preview: ProjectPreviewProfile | None,
+    frontend_root: str | None = None,
+    backend_root: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "repository",
+            "provider": repo.provider if repo else None,
+            "repo_full_name": repo.repo_full_name if repo else None,
+            "default_branch": repo.default_branch if repo else None,
+        },
+        {
+            "name": "preview",
+            "mode": preview.mode if preview else None,
+            "frontend_root": frontend_root if frontend_root else (preview.frontend_root if preview else None),
+            "backend_root": backend_root if backend_root else (preview.backend_root if preview else None),
+        },
+    ]
+
+
 def _build_bootstrap_profile(
     *,
     project: Project,
@@ -752,6 +798,8 @@ def _build_bootstrap_profile(
         "label": "Monorepo" if len(packages) > 1 else "Repository",
         "packages": packages,
     }
+    inferred_frontend_root = preview.frontend_root if preview and preview.frontend_root else _first_package_by_kind(packages, "frontend")
+    inferred_backend_root = preview.backend_root if preview and preview.backend_root else _first_package_by_kind(packages, "backend")
     profile_json = {
         "repo_layout": repo_layout,
         "boundaries": _infer_boundaries(packages),
@@ -759,20 +807,12 @@ def _build_bootstrap_profile(
             {"path": package["name"], "owner": package["owned_by"], "kind": package["kind"]}
             for package in packages
         ],
-        "integrations": [
-            {
-                "name": "repository",
-                "provider": repo.provider if repo else None,
-                "repo_full_name": repo.repo_full_name if repo else None,
-                "default_branch": repo.default_branch if repo else None,
-            },
-            {
-                "name": "preview",
-                "mode": preview.mode if preview else None,
-                "frontend_root": preview.frontend_root if preview else None,
-                "backend_root": preview.backend_root if preview else None,
-            },
-        ],
+        "integrations": _canonical_integrations(
+            repo=repo,
+            preview=preview,
+            frontend_root=inferred_frontend_root,
+            backend_root=inferred_backend_root,
+        ),
         "commands": commands,
         "validation_recipes": validation_recipes,
         "deployment_surfaces": deployment_surfaces,
@@ -795,8 +835,8 @@ def _build_bootstrap_profile(
         "environment_assumptions": {
             "repo_connected": repo is not None,
             "preview_profile_configured": preview is not None and preview.enabled,
-            "frontend_root": preview.frontend_root if preview else None,
-            "backend_root": preview.backend_root if preview else None,
+            "frontend_root": inferred_frontend_root,
+            "backend_root": inferred_backend_root,
         },
     }
     if isinstance(blueprint, dict):
@@ -809,6 +849,7 @@ def _build_bootstrap_profile(
                 "governance_blueprint": blueprint.get("governance_blueprint") or {},
             }
         )
+    profile_json["contract_diagnostics"] = detect_architecture_drift(profile_json)
     summary = (
         f"{project.name} uses "
         f"{'a monorepo' if repo_layout['monorepo'] else 'a repository'} contract with "
@@ -1326,7 +1367,43 @@ async def derive_architecture_profile(
         project_id=project_id,
         refresh_repo_map_requested=refresh_repo_map_requested,
     )
-    profile.derived_json = _derive_profile_json(profile.profile_json if isinstance(profile.profile_json, dict) else {})
+    profile_json = dict(profile.profile_json if isinstance(profile.profile_json, dict) else {})
+    packages = _coerce_packages(profile_json)
+    inferred_frontend_root = (
+        repo_hints["preview"].frontend_root
+        if repo_hints["preview"] and repo_hints["preview"].frontend_root
+        else _first_package_by_kind(packages, "frontend")
+    )
+    inferred_backend_root = (
+        repo_hints["preview"].backend_root
+        if repo_hints["preview"] and repo_hints["preview"].backend_root
+        else _first_package_by_kind(packages, "backend")
+    )
+
+    profile_json["integrations"] = _canonical_integrations(
+        repo=repo_hints["repo"],
+        preview=repo_hints["preview"],
+        frontend_root=inferred_frontend_root,
+        backend_root=inferred_backend_root,
+    )
+    profile_json["environment_assumptions"] = {
+        "repo_connected": repo_hints["repo"] is not None,
+        "preview_profile_configured": repo_hints["preview"] is not None and repo_hints["preview"].enabled,
+        "frontend_root": inferred_frontend_root,
+        "backend_root": inferred_backend_root,
+    }
+    release_flow = profile_json.get("release_flow") if isinstance(profile_json.get("release_flow"), dict) else {}
+    profile_json["release_flow"] = {
+        **release_flow,
+        "default_branch": repo_hints["repo"].default_branch if repo_hints["repo"] else release_flow.get("default_branch", "main"),
+        "preview_mode": repo_hints["preview"].mode if repo_hints["preview"] else release_flow.get("preview_mode"),
+    }
+    canonical_patch = generate_canonical_contract_patch(profile_json)
+    profile_json.update(canonical_patch)
+    profile_json["contract_diagnostics"] = detect_architecture_drift(profile_json)
+
+    profile.profile_json = profile_json
+    profile.derived_json = _derive_profile_json(profile_json)
     profile.last_derived_at = datetime.now(timezone.utc)
     profile.updated_by = updated_by or profile.updated_by
     profile.repo_full_name = repo_hints["repo"].repo_full_name if repo_hints["repo"] else profile.repo_full_name
@@ -1336,6 +1413,140 @@ async def derive_architecture_profile(
     session.add(profile)
     await session.flush()
     return profile
+
+
+async def preview_architecture_drift_fix(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+) -> dict[str, Any]:
+    profile = await get_architecture_profile(session, tenant_id=tenant_id, project_id=project_id)
+    profile_json = dict(profile.profile_json if isinstance(profile.profile_json, dict) else {})
+    patch = generate_canonical_contract_patch(profile_json)
+    diagnostics = detect_architecture_drift(profile_json)
+    return {
+        "diagnostics": diagnostics,
+        "patch": patch,
+        "changed": any(profile_json.get(key) != patch.get(key) for key in patch.keys()),
+    }
+
+
+async def apply_architecture_drift_fix(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    updated_by: str | None = None,
+) -> tuple[ArchitectureProfile, dict[str, Any], bool]:
+    profile = await get_architecture_profile(session, tenant_id=tenant_id, project_id=project_id)
+    profile_json = dict(profile.profile_json if isinstance(profile.profile_json, dict) else {})
+    patch = generate_canonical_contract_patch(profile_json)
+    changed = False
+    for key, value in patch.items():
+        if profile_json.get(key) != value:
+            profile_json[key] = value
+            changed = True
+    profile_json["contract_diagnostics"] = detect_architecture_drift(profile_json)
+
+    if changed:
+        profile.profile_json = profile_json
+        profile.derived_json = _derive_profile_json(profile_json)
+        profile.last_derived_at = datetime.now(timezone.utc)
+        profile.updated_by = updated_by or profile.updated_by
+        profile.version += 1
+        session.add(profile)
+        await session.flush()
+
+    diagnostics = detect_architecture_drift(profile_json)
+    return profile, diagnostics, changed
+
+
+def _write_contract_files(repo_dir: Path, profile_json: dict[str, Any]) -> list[str]:
+    changed_files: list[str] = []
+    contracts_dir = repo_dir / "contracts"
+    contracts_dir.mkdir(parents=True, exist_ok=True)
+    contract_path = contracts_dir / "project_contract.json"
+    desired = json.dumps(profile_json, indent=2, sort_keys=True) + "\n"
+    existing = contract_path.read_text(encoding="utf-8") if contract_path.exists() else None
+    if existing != desired:
+        contract_path.write_text(desired, encoding="utf-8")
+        changed_files.append("contracts/project_contract.json")
+    return changed_files
+
+
+async def apply_architecture_drift_fix_and_open_pr(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+    updated_by: str | None = None,
+) -> dict[str, Any]:
+    profile, diagnostics, applied = await apply_architecture_drift_fix(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        updated_by=updated_by,
+    )
+    profile_json = dict(profile.profile_json if isinstance(profile.profile_json, dict) else {})
+    project_repo = await get_project_repository(session, project_id=project_id, tenant_id=tenant_id)
+    if project_repo is None:
+        raise ValueError("Project repository is not connected")
+    if not project_repo.repo_full_name:
+        raise ValueError("Connected repository is missing repo_full_name")
+
+    branch_name = f"chore/fix-architecture-drift-{str(project_id)[:8]}"
+    repo_dir = ensure_analysis_repo(project_repo, branch_name=branch_name)
+    changed_files = _write_contract_files(repo_dir, profile_json)
+
+    if not repo_has_changes(repo_dir):
+        return {
+            "applied": applied,
+            "branch_name": branch_name,
+            "pr_url": None,
+            "pr_number": None,
+            "diagnostics": diagnostics,
+            "changed_files": changed_files,
+            "profile": profile,
+        }
+
+    commit_all(repo_dir, "chore: fix architecture drift contract alignment")
+    push_branch(
+        repo_dir,
+        branch_name,
+        provider=project_repo.provider,
+        repo_url=project_repo.repo_url,
+        repo_full_name=project_repo.repo_full_name,
+        installation_id=project_repo.installation_id,
+        auth_strategy=project_repo.auth_strategy,
+    )
+
+    adapter = get_vcs_adapter(project_repo.provider)
+    if adapter is None:
+        raise ValueError(f"{project_repo.provider} integration is not configured")
+    installation_id = project_repo.installation_id or get_default_installation_id(project_repo.provider)
+    pr = adapter.create_pull_request(
+        project_repo.repo_full_name,
+        "Fix architecture drift for project contract alignment",
+        "Deterministic canonical rewrite for architecture contract drift.\n\n"
+        "- Normalized integrations\n"
+        "- Normalized environment assumptions\n"
+        "- Normalized release flow\n"
+        "- Synced `contracts/project_contract.json`",
+        branch_name,
+        project_repo.default_branch or "main",
+        installation_id=installation_id,
+    )
+    pr_number = pr.get("number") if isinstance(pr, dict) else None
+    return {
+        "applied": applied,
+        "branch_name": branch_name,
+        "pr_url": pr.get("html_url") if isinstance(pr, dict) else None,
+        "pr_number": pr_number if isinstance(pr_number, int) else None,
+        "diagnostics": diagnostics,
+        "changed_files": changed_files,
+        "profile": profile,
+    }
 
 
 async def summarize_architecture_profile(

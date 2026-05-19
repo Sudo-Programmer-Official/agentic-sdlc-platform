@@ -39,6 +39,7 @@ from app.runtime.mutation_governance import MutationGovernanceDecision
 from app.runtime.patch_guard import evaluate_patch_guard
 from app.runtime.frontend_topology import validate_frontend_topology
 from app.runtime.component_capability_protocol import resolve_component_capability
+from app.runtime.content_binding import build_binding_registry, extract_literals, rewrite_with_content_slots
 from app.runtime.schemas.executor_io import Action
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
 from app.services.ai_policy import AIJobManager
@@ -796,7 +797,7 @@ def test_select_mutation_strategy_prefers_write_file_for_backend_genesis_state()
     assert zone == "logic_zone"
 
 
-def test_backend_mutation_strategy_violation_requires_write_file_in_recovery_mode():
+def test_backend_recovery_write_file_preference_does_not_hard_fail_on_apply_patch():
     executor = CodexExecutor()
     work_item = SimpleNamespace(type="CODE_BACKEND", payload={"recovery_strategy": "write_file_preferred"})
     actions = [SimpleNamespace(type="apply_patch", path="app.py", patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b\n")]
@@ -807,8 +808,7 @@ def test_backend_mutation_strategy_violation_requires_write_file_in_recovery_mod
         actions=actions,
     )
 
-    assert len(violations) == 1
-    assert "CODE_BACKEND mutation_strategy violation" in violations[0]
+    assert violations == []
 
 
 def test_select_mutation_strategy_prefers_write_file_for_layout_sensitive_task_text():
@@ -1220,10 +1220,45 @@ def test_added_patch_payload_only_scans_added_lines():
     assert "assert token is not None" in payload
 
 
+def test_content_slot_rewriter_preserves_valid_closing_tag():
+    content = "<title>B2B AI Sales Automation Landing Page</title>"
+    literals = extract_literals(content)
+    bindings = build_binding_registry(rel_path="index.vue", literals=literals)
+
+    rewritten = rewrite_with_content_slots(content, bindings)
+
+    assert "<//title>" not in rewritten.content
+    assert "</title>" in rewritten.content
+    assert "<ContentSlot" in rewritten.content
+
+
+def test_content_binding_pass_skips_raw_html_entrypoints():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND")
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="index.html",
+            content="<title>Landing</title><h1>Hero copy</h1>",
+        )
+    ]
+
+    violations, records = executor._content_binding_pass(work_item=work_item, actions=actions)
+
+    assert violations == []
+    assert records == []
+    assert "<ContentSlot" not in actions[0].content
+
+
 def test_adjacent_scope_expansion_allows_dependency_file_in_genesis_repair():
     work_item = SimpleNamespace(type="FIX_TEST_FAILURE", payload={"repository_state": "GENESIS"})
     assert _allow_adjacent_scope_expansion(work_item=work_item, extra_files=["requirements.txt"])
     assert not _allow_adjacent_scope_expansion(work_item=work_item, extra_files=["apps/api/app/main.py"])
+
+
+def test_adjacent_scope_expansion_allows_dependency_file_for_fix_test_failure_without_repository_state():
+    work_item = SimpleNamespace(type="FIX_TEST_FAILURE", payload={})
+    assert _allow_adjacent_scope_expansion(work_item=work_item, extra_files=["requirements.txt"])
 
 
 def test_instructions_for_plan_stage_forbid_mutations():
@@ -1459,6 +1494,17 @@ def test_operator_confirmation_bypass_flag_overrides_required_confirmation():
     bypassed = executor._maybe_bypass_operator_confirmation(decision)
     assert bypassed.requires_confirmation is False
     assert bypassed.reason == "operator_confirmation_bypassed_by_flag"
+
+
+def test_human_review_gate_respects_operator_confirmation_bypass_flag():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="GENERATE_ROUTE", payload={"task_source": "feature"})
+
+    executor.settings.codex_bypass_operator_confirmation_required = False
+    assert executor._should_block_on_human_review_gate(work_item) is True
+
+    executor.settings.codex_bypass_operator_confirmation_required = True
+    assert executor._should_block_on_human_review_gate(work_item) is False
 
 
 def test_patch_guard_uses_apply_patch_path_when_diff_headers_are_missing():

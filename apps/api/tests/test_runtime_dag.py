@@ -84,6 +84,50 @@ def test_payload_for_write_tests_targets_generated_test_file():
     assert payload["related_files"] == ["index.html"]
     assert payload["target_files"] == ["test_index_html.py"]
     assert payload["expected_files"] == ["test_index_html.py"]
+    assert payload["required"] is False
+    assert payload["blocking"] is False
+
+
+def test_payload_for_run_tests_is_optional_and_non_blocking():
+    payload = _payload_for_stage(
+        "RUN_TESTS",
+        {
+            "task_id": "task-api",
+            "task_title": "Initialize backend",
+            "goal": "Initialize backend",
+            "expected_files": ["app.py"],
+        },
+    )
+
+    assert payload["required"] is False
+    assert payload["criticality"] == "OPTIONAL"
+    assert payload["blocking"] is False
+
+
+def test_payload_for_review_stages_is_non_blocking():
+    review_diff = _payload_for_stage(
+        "REVIEW_DIFF",
+        {
+            "task_id": "task-review",
+            "task_title": "Review backend",
+            "goal": "Review backend",
+            "expected_files": ["app.py"],
+        },
+    )
+    review_integration = _payload_for_stage(
+        "REVIEW_INTEGRATION",
+        {
+            "task_id": "task-review",
+            "task_title": "Review backend",
+            "goal": "Review backend",
+            "expected_files": ["app.py"],
+        },
+    )
+
+    assert review_diff["required"] is False
+    assert review_diff["blocking"] is False
+    assert review_integration["required"] is False
+    assert review_integration["blocking"] is False
 
 
 @pytest.mark.anyio
@@ -186,7 +230,12 @@ async def test_generate_template_dag_applies_fallback_scope_for_task_runs_withou
             items = (
                 await session.execute(select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.priority))
             ).scalars().all()
-            backend = next(item for item in items if item.key == "CODE_BACKEND")
-            assert backend.payload["target_files"] == ["app.py"]
+            backend_candidates = [
+                item
+                for item in items
+                if item.key in {"GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}
+            ]
+            assert backend_candidates
+            assert any((item.payload or {}).get("target_files") == ["app.py"] for item in backend_candidates)
     finally:
         await engine.dispose()

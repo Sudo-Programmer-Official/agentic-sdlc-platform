@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import signal
 import socket
@@ -22,11 +23,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import ProjectPreviewProfile, ProjectRepository, Run
 from app.schemas.preview import RunPreviewOut, RunPreviewServiceRef
+from app.services.preview_runtime import PreviewStrategy, resolve_preview_runtime_contract
 from app.services.workspace_commands import run_workspace_command_async
 
 
 DEFAULT_PREVIEW_STATUS = "NOT_CONFIGURED"
 DEFAULT_STATIC_START_COMMAND = "python3 -m http.server $PORT --bind $HOST"
+DEFAULT_VITE_START_COMMAND = "npm run dev -- --host $HOST --port $PORT"
+DEFAULT_VITE_NPX_START_COMMAND = "npx vite --host $HOST --port $PORT"
 
 
 @dataclass(frozen=True)
@@ -198,6 +202,125 @@ def _validate_static_frontend_contract(
         raise ValueError("Static preview contract requires index.html to contain a <body> element")
     if "<html" not in lower and "<!doctype html" not in lower:
         raise ValueError("Static preview contract requires index.html to contain an <html> element or doctype")
+    has_vite_entry_marker = "/src/main.ts" in lower or ('type="module"' in lower and 'src="/src/' in lower)
+    has_vite_runtime_shape = (
+        (frontend_root / "package.json").exists()
+        or (frontend_root / "src" / "main.ts").exists()
+        or (frontend_root / "src" / "main.js").exists()
+    )
+    if has_vite_entry_marker and has_vite_runtime_shape:
+        raise ValueError(
+            "Static preview contract is incompatible with Vite module entrypoints "
+            "(for example /src/main.ts). Configure a dev/build preview start command "
+            "such as 'npm run dev -- --host $HOST --port $PORT'."
+        )
+
+
+def _try_autofix_vite_workspace(frontend_root: Path, reason: str | None) -> bool:
+    if not reason or "package.json is missing at frontend root" not in reason:
+        return False
+    src_main_ts = frontend_root / "src" / "main.ts"
+    src_main_js = frontend_root / "src" / "main.js"
+    if not src_main_ts.exists() and not src_main_js.exists():
+        return False
+    package_json = frontend_root / "package.json"
+    if package_json.exists():
+        return False
+    package_json.write_text(
+        json.dumps(
+            {
+                "name": "preview-autofix-vite",
+                "private": True,
+                "scripts": {"dev": "vite"},
+                "devDependencies": {"vite": "^5.0.0"},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return True
+
+
+def _sanitize_stale_vite_entry_for_static(frontend_root: Path, reason: str | None) -> bool:
+    if not reason or "falling back to static preview" not in reason.lower():
+        return False
+    index_file = frontend_root / "index.html"
+    if not index_file.exists():
+        return False
+    try:
+        content = index_file.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    sanitized = re.sub(
+        r'<script[^>]*type=["\']module["\'][^>]*src=["\']/src/main\.(?:ts|js)["\'][^>]*>\s*</script>',
+        "",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if sanitized == content:
+        return False
+    index_file.write_text(sanitized, encoding="utf-8")
+    return True
+
+
+def _sanitize_framework_only_markup_for_static(frontend_root: Path) -> bool:
+    index_file = frontend_root / "index.html"
+    if not index_file.exists():
+        return False
+    try:
+        content = index_file.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # If there are framework-only component tags in a static fallback, build a
+    # simple readable shell so preview never lands on a blank screen.
+    if "<HeroSection" not in content and "<PrimaryButton" not in content and "<template #title>" not in content:
+        return False
+    title_match = re.search(r"<template\s+#title>\s*<span>(.*?)</span>\s*</template>", content, flags=re.IGNORECASE | re.DOTALL)
+    subtitle_match = re.search(
+        r"<template\s+#subtitle>\s*<span>(.*?)</span>\s*</template>",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    title = (title_match.group(1).strip() if title_match else "Preview Ready").replace("<", "").replace(">", "")
+    subtitle = (subtitle_match.group(1).strip() if subtitle_match else "Static fallback rendered because framework runtime was unavailable.")
+    subtitle = subtitle.replace("<", "").replace(">", "")
+    fallback_html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title}</title>
+    <style>
+      body {{
+        margin: 0;
+        padding: 48px 24px;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: #f8fafc;
+        color: #0f172a;
+      }}
+      .card {{
+        max-width: 840px;
+        margin: 0 auto;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 28px;
+      }}
+      h1 {{ margin: 0 0 12px; font-size: 32px; line-height: 1.2; }}
+      p {{ margin: 0; font-size: 18px; line-height: 1.6; color: #334155; }}
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>{title}</h1>
+      <p>{subtitle}</p>
+    </main>
+  </body>
+</html>
+"""
+    index_file.write_text(fallback_html, encoding="utf-8")
+    return True
 
 
 def _pick_port(preferred: int | None = None) -> int:
@@ -225,7 +348,22 @@ def _service_healthcheck(url: str, path: str | None) -> bool:
     target = f"{url}{path or '/'}"
     try:
         with urlopen(target, timeout=1.5) as response:  # noqa: S310
-            return 200 <= int(response.status) < 500
+            status_ok = 200 <= int(response.status) < 500
+            if not status_ok:
+                return False
+            try:
+                body = response.read(8192)
+            except Exception:
+                body = b""
+            if body:
+                text = body.decode("utf-8", errors="ignore").lower()
+                # Guard against malformed slot-rewrite artifacts that render blank previews.
+                if "<//" in text:
+                    return False
+                # Static HTML previews should not contain unresolved framework-only slot tags.
+                if "<contentslot" in text and ("<!doctype html" in text or "<html" in text):
+                    return False
+            return True
     except (URLError, OSError, ValueError):
         return False
 
@@ -484,7 +622,69 @@ async def launch_run_preview(
     ttl_hours = effective_profile.ttl_hours or get_settings().preview_default_ttl_hours
     launched_at = _now()
     expires_at = launched_at + timedelta(hours=ttl_hours)
-    frontend_root = _root_path(repo_root, effective_profile.frontend_root)
+    configured_frontend_root = _root_path(repo_root, effective_profile.frontend_root)
+    runtime_contract = resolve_preview_runtime_contract(
+        repo_root=repo_root,
+        configured_frontend_root=configured_frontend_root,
+    )
+    frontend_root = runtime_contract.frontend_root
+    if (
+        runtime_contract.strategy == PreviewStrategy.INVALID
+        and get_settings().preview_autofix_vite_missing_package
+        and _try_autofix_vite_workspace(frontend_root, runtime_contract.reason)
+    ):
+        runtime_contract = resolve_preview_runtime_contract(
+            repo_root=repo_root,
+            configured_frontend_root=configured_frontend_root,
+        )
+        frontend_root = runtime_contract.frontend_root
+    if runtime_contract.strategy == PreviewStrategy.STATIC_SERVER:
+        _sanitize_stale_vite_entry_for_static(frontend_root, runtime_contract.reason)
+        _sanitize_framework_only_markup_for_static(frontend_root)
+    if runtime_contract.strategy == PreviewStrategy.INVALID:
+        raise ValueError(runtime_contract.reason or "Preview runtime classification failed.")
+    if runtime_contract.strategy == PreviewStrategy.DISABLED and not effective_profile.backend_start_command:
+        raise ValueError(runtime_contract.reason or "No previewable frontend artifact generated.")
+    if runtime_contract.strategy == PreviewStrategy.VITE_DEV and _uses_static_frontend_contract(effective_profile):
+        effective_profile = ResolvedPreviewProfile(
+            enabled=effective_profile.enabled,
+            mode=effective_profile.mode,
+            frontend_root=str(frontend_root.relative_to(repo_root)),
+            backend_root=effective_profile.backend_root,
+            compose_file=effective_profile.compose_file,
+            frontend_build_command=effective_profile.frontend_build_command,
+            backend_build_command=effective_profile.backend_build_command,
+            frontend_start_command=DEFAULT_VITE_START_COMMAND,
+            backend_start_command=effective_profile.backend_start_command,
+            frontend_healthcheck_path=effective_profile.frontend_healthcheck_path or "/",
+            backend_healthcheck_path=effective_profile.backend_healthcheck_path or "/",
+            frontend_port=effective_profile.frontend_port,
+            backend_port=effective_profile.backend_port,
+            env_overrides=effective_profile.env_overrides or {},
+            ttl_hours=effective_profile.ttl_hours,
+            max_previews_per_project=effective_profile.max_previews_per_project,
+            created_by=(effective_profile.created_by or "system:default-static-web-monorepo"),
+        )
+    if runtime_contract.strategy == PreviewStrategy.VITE_DEV and not (frontend_root / "node_modules").exists():
+        effective_profile = ResolvedPreviewProfile(
+            enabled=effective_profile.enabled,
+            mode=effective_profile.mode,
+            frontend_root=effective_profile.frontend_root,
+            backend_root=effective_profile.backend_root,
+            compose_file=effective_profile.compose_file,
+            frontend_build_command=effective_profile.frontend_build_command,
+            backend_build_command=effective_profile.backend_build_command,
+            frontend_start_command=DEFAULT_VITE_NPX_START_COMMAND,
+            backend_start_command=effective_profile.backend_start_command,
+            frontend_healthcheck_path=effective_profile.frontend_healthcheck_path or "/",
+            backend_healthcheck_path=effective_profile.backend_healthcheck_path or "/",
+            frontend_port=effective_profile.frontend_port,
+            backend_port=effective_profile.backend_port,
+            env_overrides=effective_profile.env_overrides or {},
+            ttl_hours=effective_profile.ttl_hours,
+            max_previews_per_project=effective_profile.max_previews_per_project,
+            created_by=(effective_profile.created_by or "system:default-vite-dev-preview"),
+        )
     _validate_static_frontend_contract(frontend_root, effective_profile)
     backend_root = _root_path(repo_root, effective_profile.backend_root)
 

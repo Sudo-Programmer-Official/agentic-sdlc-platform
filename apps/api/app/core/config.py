@@ -170,6 +170,7 @@ class Settings(BaseSettings):
     preview_default_ttl_hours: int = 24
     preview_max_per_project: int = 100
     preview_max_global: int = 20
+    preview_autofix_vite_missing_package: bool = True
     git_author_name: str = "Agentic SDLC"
     git_author_email: str = "agentic-sdlc@local"
     runtime_git_auth_mode: str = "auto"  # auto | github_app_https | ssh | none

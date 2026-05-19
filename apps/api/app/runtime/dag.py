@@ -247,7 +247,7 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
     payload = dict(task_payload)
     task_source = str(payload.get("task_source") or "").strip().lower()
     is_foundation = task_source in {"genesis", "genesis_setup"} or task_source.startswith("genesis.")
-    stage_required = stage_name in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", *BACKEND_GENERATION_STAGES, "CODE_FRONTEND", "RUN_TESTS"}
+    stage_required = stage_name in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", *BACKEND_GENERATION_STAGES, "CODE_FRONTEND"}
     stage_criticality = "FOUNDATION" if is_foundation and stage_required else ("FEATURE" if stage_required else "OPTIONAL")
     payload["title"] = stage_titles.get(stage_name, task_title)
     payload["required"] = bool(stage_required)
@@ -277,7 +277,7 @@ def _payload_for_stage(stage_name: str, task_payload: dict[str, str | list[str]]
             payload["target_files"] = test_files
             payload["files"] = test_files
             payload["expected_files"] = test_files
-    if stage_name == "WRITE_TESTS":
+    if stage_name in {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
         payload["blocking"] = False
     if stage_name in BACKEND_GENERATION_STAGES:
         topology = payload.get("backend_topology_plan") if isinstance(payload.get("backend_topology_plan"), dict) else {}

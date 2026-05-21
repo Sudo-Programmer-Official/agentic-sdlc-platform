@@ -1,0 +1,5 @@
+{
+  "shell": "PageShell",
+  "zones": ["hero", "features", "testimonials", "cta"],
+  "foundation_version": 1
+}

@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Project, ProjectBlueprint, ProjectGenesisRun, Run, Task
+from app.core.config import get_settings
+from app.db.models import Project, ProjectBlueprint, ProjectGenesisRun, Run, Task, WorkItem
 from app.db.session import SessionLocal
 from app.schemas.architecture_profile import ArchitectureProfileSummaryOut
 from app.schemas.project_contract import ProjectContractSummaryOut
@@ -24,6 +25,7 @@ from app.services.repo_connector import get_project_repository
 from app.services.foundation_readiness import build_foundation_readiness
 from app.services.impact_analysis_loop import predict_pre_execution_impact
 from app.services.requirement_memory import build_requirement_context_pack, compress_requirement_memory
+from app.services.execution_intelligence import capture_pre_run_estimation_features
 from app.services.run_resume import capture_run_checkpoint, sync_run_resume_state
 from app.services.task_branching import clean_branch_value, resolve_task_branch_plan
 from app.services.workspace_supervisor import ensure_run_workspace
@@ -118,6 +120,54 @@ def _normalize_repository_state(value: object) -> str:
     if raw in {"GENESIS", "EARLY_BUILD", "ACTIVE_PRODUCT", "PRODUCTION_CRITICAL", "LEGACY_COMPLEX"}:
         return raw
     return "ACTIVE_PRODUCT"
+
+
+def _default_runtime_governance_mode(repository_state: str) -> str:
+    state = _normalize_repository_state(repository_state)
+    if state in {"GENESIS", "EARLY_BUILD", "ACTIVE_PRODUCT"}:
+        return "stability"
+    return "governed"
+
+
+def _resolve_runtime_governance_mode(
+    *,
+    repository_state: str,
+    has_preview_success: bool,
+    active_product_default_mode: str = "stability",
+    emergency_ship_mode_enabled: bool = False,
+) -> str:
+    if emergency_ship_mode_enabled or str(active_product_default_mode or "").strip().lower() == "emergency":
+        return "emergency"
+    state = _normalize_repository_state(repository_state)
+    if state in {"GENESIS", "EARLY_BUILD"}:
+        return "stability"
+    if state == "ACTIVE_PRODUCT":
+        preferred = str(active_product_default_mode or "").strip().lower()
+        if preferred == "governed":
+            return "governed" if has_preview_success else "stability"
+        return "stability"
+    return "governed"
+
+
+async def _project_has_preview_success(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    project_id: uuid.UUID,
+) -> bool:
+    count = (
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkItem)
+            .where(
+                WorkItem.tenant_id == tenant_id,
+                WorkItem.project_id == project_id,
+                WorkItem.type == "PREVIEW_VALIDATE",
+                WorkItem.status == "DONE",
+            )
+        )
+    ) or 0
+    return int(count) > 0
 
 
 async def _resolve_architecture_payload(
@@ -286,21 +336,6 @@ async def launch_run_for_project(
         .where(ProjectBlueprint.project_id == project_id, ProjectBlueprint.tenant_id == tenant_id)
         .order_by(ProjectBlueprint.created_at.desc())
     )
-    is_genesis_setup = (run_kind or "").strip().lower() in {"genesis", "genesis_setup", "setup"}
-    if selected_task is not None:
-        is_genesis_setup = is_genesis_setup or selected_task.source == "genesis" or selected_task.source_type == "genesis_setup"
-    if blueprint is not None and blueprint.readiness_enforced and not is_genesis_setup:
-        latest_genesis = await session.scalar(
-            select(ProjectGenesisRun)
-            .where(ProjectGenesisRun.project_id == project_id, ProjectGenesisRun.tenant_id == tenant_id)
-            .order_by(ProjectGenesisRun.created_at.desc())
-        )
-        if latest_genesis is not None:
-            validation = latest_genesis.validation if isinstance(latest_genesis.validation, dict) else {}
-            readiness_status = str(validation.get("status") or "").upper()
-            if readiness_status != "READY":
-                raise ValueError("Foundation readiness is not READY; complete setup tasks before launching feature runs.")
-
     active_statuses = ("QUEUED", "RUNNING")
     existing_active = await session.scalar(
         select(func.count()).select_from(
@@ -313,6 +348,85 @@ async def launch_run_for_project(
         raise ValueError(
             "A run is already in progress for this project; finish or cancel it before starting another."
         )
+    is_genesis_setup = (run_kind or "").strip().lower() in {
+        "genesis",
+        "genesis_setup",
+        "setup",
+        "base_task",
+        "base_setup",
+        "foundation_setup",
+    }
+    if selected_task is not None:
+        selected_source = str(selected_task.source or "").strip().lower()
+        selected_source_type = str(selected_task.source_type or "").strip().lower()
+        selected_category = str(selected_task.category or "").strip().lower()
+        is_genesis_setup = is_genesis_setup or (
+            selected_source == "genesis"
+            or selected_source in {"base", "foundation"}
+            or selected_source_type in {"genesis_setup", "base_task", "foundation_setup", "setup"}
+            or selected_category == "setup"
+        )
+    existing_run_count = (
+        await session.scalar(
+            select(func.count())
+            .select_from(Run)
+            .where(
+                Run.project_id == project_id,
+                Run.tenant_id == tenant_id,
+            )
+        )
+    ) or 0
+    if not is_genesis_setup and not isinstance(project.project_intent_json, dict):
+        # Backward-compatible bridge: legacy projects without guided onboarding metadata
+        # still need deterministic intent defaults to launch scoped feature runs safely.
+        project.project_intent_json = {
+            "setup_experience": "legacy_auto",
+            "architecture_mode": "guided",
+            "repo_layout": "monorepo",
+            "frontend_stack": "vue_vite",
+            "backend_stack": "fastapi",
+            "capabilities": [],
+            "runtime_defaults": {
+                "component_driven_frontend": True,
+                "module_driven_backend": True,
+            },
+        }
+        session.add(project)
+    settings = get_settings()
+    readiness_gate_enabled = bool(getattr(settings, "foundation_readiness_gate_enabled", False))
+    if readiness_gate_enabled and blueprint is not None and blueprint.readiness_enforced and not is_genesis_setup:
+        latest_genesis = await session.scalar(
+            select(ProjectGenesisRun)
+            .where(ProjectGenesisRun.project_id == project_id, ProjectGenesisRun.tenant_id == tenant_id)
+            .order_by(ProjectGenesisRun.created_at.desc())
+        )
+        readiness_status = ""
+        if latest_genesis is not None:
+            validation = latest_genesis.validation if isinstance(latest_genesis.validation, dict) else {}
+            readiness_status = str(validation.get("status") or "").upper()
+        live_readiness = await build_foundation_readiness(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        live_readiness_status = str(live_readiness.get("status") or "").upper()
+        effective_readiness_status = live_readiness_status or readiness_status
+        if effective_readiness_status != "READY":
+            missing = live_readiness.get("missing_prerequisites")
+            missing_list = (
+                ", ".join(str(item) for item in missing if isinstance(item, str) and item.strip())
+                if isinstance(missing, list)
+                else ""
+            )
+            next_step = str(live_readiness.get("recommended_next_step") or "").strip()
+            detail_parts: list[str] = []
+            if missing_list:
+                detail_parts.append(f"missing: {missing_list}")
+            if next_step:
+                detail_parts.append(f"next: {next_step}")
+            detail = " ".join(detail_parts).strip()
+            base = "Foundation readiness is not READY; complete setup tasks before launching feature runs."
+            raise ValueError(f"{base} {detail}".strip())
 
     if run_summary is None:
         run_summary = {}
@@ -328,22 +442,26 @@ async def launch_run_for_project(
     previous_repository_state = "GENESIS"
     if latest_prior_run is not None and isinstance(latest_prior_run.summary, dict):
         previous_repository_state = _normalize_repository_state(latest_prior_run.summary.get("repository_state"))
-    prior_runs = (
-        await session.scalar(
-            select(func.count())
-            .select_from(Run)
-            .where(
-                Run.project_id == project_id,
-                Run.tenant_id == tenant_id,
-            )
-        )
-    ) or 0
+    prior_runs = existing_run_count
     current_repository_state = _resolve_repository_state(
         is_genesis_setup=is_genesis_setup,
         prior_runs=int(prior_runs),
     )
+    preview_success = await _project_has_preview_success(
+        session,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
     run_summary["repository_state"] = current_repository_state
     run_summary["repository_state_previous"] = previous_repository_state
+    run_summary["runtime_governance_mode"] = _resolve_runtime_governance_mode(
+        repository_state=current_repository_state,
+        has_preview_success=preview_success,
+        active_product_default_mode=settings.runtime_governance_active_product_default_mode,
+        emergency_ship_mode_enabled=bool(getattr(settings, "runtime_emergency_ship_mode_enabled", False)),
+    )
+    if isinstance(project.project_intent_json, dict):
+        run_summary["project_intent"] = dict(project.project_intent_json)
     if (
         selected_task is not None
         and executor_name.lower() == "dummy"
@@ -495,6 +613,7 @@ async def launch_run_for_project(
             "branch_name": run.branch_name,
         },
     )
+    await capture_pre_run_estimation_features(session, run=run)
     transitioned_to_stricter_mode = (
         previous_repository_state in {"GENESIS", "EARLY_BUILD"}
         and current_repository_state in {"ACTIVE_PRODUCT", "PRODUCTION_CRITICAL"}

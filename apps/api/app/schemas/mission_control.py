@@ -102,6 +102,16 @@ class MissionControlPreviewAndPrs(BaseModel):
     backend_url: str | None = None
     frontend_port: int | None = None
     backend_port: int | None = None
+    runtime_classification: str | None = None
+    preview_strategy: str | None = None
+    active_preview_command: str | None = None
+    upstream_preview_port: int | None = None
+    frontend_install_status: str | None = None
+    backend_install_status: str | None = None
+    runtime_boot_duration_seconds: float | None = None
+    dependency_repair_attempts: int = 0
+    cached_hydration_state: dict[str, object] = Field(default_factory=dict)
+    preview_diagnostics: dict[str, object] = Field(default_factory=dict)
     frontend_log_path: str | None = None
     backend_log_path: str | None = None
     preview_checked_at: datetime | None = None
@@ -234,6 +244,58 @@ class MissionControlExecutionStep(BaseModel):
     summary: str | None = None
 
 
+class MissionControlRunLedgerAggregate(BaseModel):
+    total_cost_cents: float = 0.0
+    total_duration_ms: int = 0
+    recovery_overhead_pct: float = 0.0
+    preview_failures: int = 0
+    drift_events: int = 0
+    targeted_stage_count: int = 0
+    component_reuse_ratio: float = 0.0
+    module_reuse_ratio: float = 0.0
+    avg_reuse_ratio: float = 0.0
+    package_drift_count: int = 0
+    monolith_risk_max: float = 0.0
+    preview_continuity_score: float = 0.0
+    avg_targeting_confidence_delta: float = 0.0
+    decisive_targeting_count: int = 0
+    moderate_targeting_count: int = 0
+    close_targeting_count: int = 0
+
+
+class MissionControlStageLedgerEntry(BaseModel):
+    stage_name: str
+    lifecycle_state: str
+    duration_ms: int | None = None
+    retries: int = 0
+    recovery_count: int = 0
+    model_tier: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    estimated_cost_cents: float = 0.0
+    files_touched: int = 0
+    lines_added: int = 0
+    lines_removed: int = 0
+    architecture_compliance_score: float | None = None
+    package_affinity: str | None = None
+    layer_affinity: str | None = None
+    topology_zone: str | None = None
+    targeting_strategy: str | None = None
+    target_file_count: int = 0
+    selected_existing_files_count: int = 0
+    neighbor_files_count: int = 0
+    component_reuse_preferred: bool = False
+    module_reuse_preferred: bool = False
+    reuse_ratio: float = 0.0
+    primary_targeting_reasons: list[str] = Field(default_factory=list)
+    primary_target_score: float | None = None
+    runner_up_target_score: float | None = None
+    targeting_confidence_delta: float | None = None
+    targeting_confidence_label: str | None = None
+    top_ranked_candidates: list[dict] = Field(default_factory=list)
+    created_at: datetime | None = None
+
+
 class MissionControlExecutionSummary(BaseModel):
     run_id: uuid.UUID
     run_status: str
@@ -243,6 +305,7 @@ class MissionControlExecutionSummary(BaseModel):
     active_command_count: int = 0
     last_updated_at: datetime | None = None
     execution_contract: MissionControlExecutionContractTelemetry | None = None
+    ledger: MissionControlRunLedgerAggregate | None = None
 
 
 class MissionControlExecutionBudgetTelemetry(BaseModel):
@@ -289,6 +352,7 @@ class MissionControlExecutionConsoleResponse(BaseModel):
     environment: MissionControlExecutionEnvironment
     commands: list[MissionControlExecutionCommand] = Field(default_factory=list)
     steps: list[MissionControlExecutionStep] = Field(default_factory=list)
+    stage_telemetry: list[MissionControlStageLedgerEntry] = Field(default_factory=list)
 
 
 class MissionControlOverviewResponse(BaseModel):

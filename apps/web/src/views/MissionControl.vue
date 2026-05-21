@@ -1371,17 +1371,54 @@
             </div>
           </div>
           <div><strong>Preview contract host:</strong> {{ previewsAndPrs.preview_domain_host || "—" }}</div>
+          <div><strong>Runtime classification:</strong> {{ previewsAndPrs.runtime_classification || "—" }}</div>
+          <div><strong>Preview strategy:</strong> {{ previewsAndPrs.preview_strategy || "—" }}</div>
+          <div><strong>Active preview command:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.active_preview_command || "—" }}</span></div>
+          <div><strong>Upstream preview port:</strong> {{ previewsAndPrs.upstream_preview_port || "—" }}</div>
+          <div><strong>Frontend install status:</strong> {{ previewsAndPrs.frontend_install_status || "—" }}</div>
+          <div><strong>Backend install status:</strong> {{ previewsAndPrs.backend_install_status || "—" }}</div>
+          <div><strong>Runtime boot duration:</strong> {{ previewsAndPrs.runtime_boot_duration_seconds != null ? `${previewsAndPrs.runtime_boot_duration_seconds}s` : "—" }}</div>
+          <div><strong>Dependency repair attempts:</strong> {{ previewsAndPrs.dependency_repair_attempts ?? 0 }}</div>
+          <div><strong>Cached hydration:</strong> {{ previewsAndPrs.cached_hydration_state ? JSON.stringify(previewsAndPrs.cached_hydration_state) : "—" }}</div>
           <div v-if="previewsAndPrs.active_preview_url"><strong>Active preview URL:</strong> <a :href="previewsAndPrs.active_preview_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.active_preview_url }}</a></div>
           <div v-if="previewsAndPrs.stale_preview_url"><strong>Stale preview URL:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.stale_preview_url }}</span></div>
           <div v-if="previewsAndPrs.frontend_url"><strong>Frontend:</strong> <a :href="previewsAndPrs.frontend_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.frontend_url }}</a></div>
           <div v-if="previewsAndPrs.backend_url"><strong>Backend:</strong> <a :href="previewsAndPrs.backend_url" target="_blank" rel="noreferrer" class="underline">{{ previewsAndPrs.backend_url }}</a></div>
           <div><strong>Preview port:</strong> {{ previewPortLabel }}</div>
           <div><strong>Last health check:</strong> {{ previewLastHealthCheckLabel }}</div>
+          <div
+            v-if="authoritativePreviewDiagnostics && Object.keys(authoritativePreviewDiagnostics).length"
+            class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
+          >
+            <div class="font-semibold text-slate-900">Preview diagnostics</div>
+            <div><strong>MIME validation:</strong> {{ authoritativePreviewDiagnostics.mime_validation_passed ? "passed" : "failed" }}</div>
+            <div><strong>Root HTML:</strong> {{ authoritativePreviewDiagnostics.root_html_ok ? "ok" : "failed" }}</div>
+            <div><strong>Vite client:</strong> {{ authoritativePreviewDiagnostics.vite_client_ok ? "ok" : "failed" }}</div>
+            <div><strong>Entry module:</strong> {{ authoritativePreviewDiagnostics.entry_mime_ok ? "ok" : "failed" }}</div>
+            <div><strong>Frontend dependencies ready:</strong> {{ authoritativePreviewDiagnostics.dependencies_ready_frontend ? "yes" : "no" }}</div>
+            <div><strong>Backend dependencies ready:</strong> {{ authoritativePreviewDiagnostics.dependencies_ready_backend ? "yes" : "no" }}</div>
+            <div><strong>Frontend runtime ready:</strong> {{ authoritativePreviewDiagnostics.preview_runtime_ready ? "yes" : "no" }}</div>
+            <div><strong>Backend runtime ready:</strong> {{ authoritativePreviewDiagnostics.backend_runtime_ready ? "yes" : "no" }}</div>
+            <div v-if="authoritativePreviewDiagnostics.diagnostic_code"><strong>Diagnostic code:</strong> {{ authoritativePreviewDiagnostics.diagnostic_code }}</div>
+            <div v-if="authoritativePreviewDiagnostics.diagnostic_detail"><strong>Diagnostic detail:</strong> {{ authoritativePreviewDiagnostics.diagnostic_detail }}</div>
+            <div v-if="authoritativePreviewDiagnostics.root_probe?.content_type"><strong>`/` Content-Type:</strong> {{ authoritativePreviewDiagnostics.root_probe.content_type }}</div>
+            <div v-if="authoritativePreviewDiagnostics.vite_client_probe?.content_type"><strong>`/@vite/client` Content-Type:</strong> {{ authoritativePreviewDiagnostics.vite_client_probe.content_type }}</div>
+            <div v-if="authoritativePreviewDiagnostics.entry_probe?.content_type !== undefined"><strong>{{ authoritativePreviewDiagnostics.entry_path || "/src/main.ts" }} Content-Type:</strong> {{ authoritativePreviewDiagnostics.entry_probe.content_type || "missing" }}</div>
+            <div v-if="authoritativePreviewDiagnostics.health_probe?.status !== undefined"><strong>`/health` status:</strong> {{ authoritativePreviewDiagnostics.health_probe.status }}</div>
+          </div>
           <div v-if="previewsAndPrs.frontend_log_path"><strong>Frontend log:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.frontend_log_path }}</span></div>
           <div v-if="previewsAndPrs.backend_log_path"><strong>Backend log:</strong> <span class="font-mono text-xs">{{ previewsAndPrs.backend_log_path }}</span></div>
           <div v-if="previewsAndPrs.preview_expires_at"><strong>Expires:</strong> {{ formatTimestamp(previewsAndPrs.preview_expires_at) }}</div>
-          <div v-if="previewsAndPrs.verification_note" class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            {{ previewsAndPrs.verification_note }}
+          <div v-if="authoritativeVerificationNote" class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            {{ authoritativeVerificationNote }}
+            <div v-if="previewRepairAvailable" class="mt-2 flex flex-wrap gap-2">
+              <el-button size="small" type="warning" plain :loading="previewLaunchLoading" @click="repairPreviewRoot">
+                Repair Preview Root
+              </el-button>
+              <el-button size="small" type="primary" plain :loading="previewLaunchLoading" @click="repairPreviewEntrypoint">
+                Repair Entrypoint
+              </el-button>
+            </div>
           </div>
           <div v-if="previewLaunchError" class="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             {{ previewLaunchError }}
@@ -1435,6 +1472,26 @@
               @click="restartPreviewLaunch"
             >
               Restart Preview
+            </el-button>
+            <el-button
+              plain
+              size="small"
+              type="info"
+              :loading="previewLaunchLoading"
+              :disabled="!previewRunId || !previewsAndPrs.profile_configured"
+              @click="repairPreviewRoot"
+            >
+              Repair Root
+            </el-button>
+            <el-button
+              plain
+              size="small"
+              type="primary"
+              :loading="previewLaunchLoading"
+              :disabled="!previewRunId || !previewsAndPrs.profile_configured"
+              @click="repairPreviewEntrypoint"
+            >
+              Repair Entrypoint
             </el-button>
             <el-button
               plain
@@ -3269,25 +3326,39 @@ const recentRunCardsEnhanced = computed(() =>
     else if (status === "FAILED" || status === "CANCELED") nextActionHint = "Open logs, then retry failed step or replay the run.";
     else if (status === "COMPLETED" && card?.patch_artifact && !card?.pull_request_url) nextActionHint = "Approve patch and create PR.";
     else if (status === "COMPLETED" && card?.pull_request_url) nextActionHint = "Open PR and merge when ready.";
+    const rawGovernance = String(card?.runtime_governance_mode || card?.summary?.runtime_governance_mode || "").trim().toLowerCase();
+    const governance = rawGovernance === "stability" || rawGovernance === "governed" ? rawGovernance : "";
     const rawMode = String(card?.repository_state || card?.summary?.repository_state || "").trim().toUpperCase();
     const mode = rawMode === "GENESIS" || rawMode === "EARLY_BUILD" || rawMode === "PRODUCTION_CRITICAL" || rawMode === "ACTIVE_PRODUCT"
       ? rawMode
       : "ACTIVE_PRODUCT";
-    const governanceModeLabel = mode === "GENESIS"
+    const governanceModeLabel = governance === "stability"
+      ? "Governance mode: Stability"
+      : governance === "governed"
+      ? "Governance mode: Governed"
+      : mode === "GENESIS"
       ? "Genesis Mode"
       : mode === "EARLY_BUILD"
       ? "Early Build Mode"
       : mode === "PRODUCTION_CRITICAL"
       ? "Production Critical Mode"
       : "Active Product Mode";
-    const governanceModeDescription = mode === "GENESIS"
+    const governanceModeDescription = governance === "stability"
+      ? "Prioritizes working app output with safety rails."
+      : governance === "governed"
+      ? "Strict mutation authority and quality policy enforcement."
+      : mode === "GENESIS"
       ? "Broad scaffolding and bootstrap operations are allowed."
       : mode === "EARLY_BUILD"
       ? "Larger bounded mutations are allowed while architecture is evolving."
       : mode === "PRODUCTION_CRITICAL"
       ? "Strict governance and production protections are enforced."
       : "Stricter governance, decomposition, and validation protections are enforced.";
-    const governanceModeTag = mode === "GENESIS"
+    const governanceModeTag = governance === "stability"
+      ? "warning"
+      : governance === "governed"
+      ? "info"
+      : mode === "GENESIS"
       ? "success"
       : mode === "EARLY_BUILD"
       ? "warning"
@@ -3299,7 +3370,7 @@ const recentRunCardsEnhanced = computed(() =>
       outcome_status: outcomeStatus,
       outcome_label: outcomeLabel,
       next_action_hint: nextActionHint,
-      governance_mode: mode,
+      governance_mode: governance || mode,
       governance_mode_label: governanceModeLabel,
       governance_mode_description: governanceModeDescription,
       governance_mode_tag: governanceModeTag,
@@ -3446,6 +3517,37 @@ const previewRefreshSuggested = computed(() => {
   const previewUrl = String(previewsAndPrs.value?.preview_url || "");
   const previewSourceRunId = String(previewsAndPrs.value?.run_id || "");
   return Boolean(previewUrl && latestCompletedRunId.value && previewSourceRunId && previewSourceRunId !== latestCompletedRunId.value);
+});
+const authoritativePreviewDiagnostics = computed<Record<string, any>>(() => {
+  const raw = previewsAndPrs.value?.preview_diagnostics;
+  if (!raw || typeof raw !== "object") return {};
+  const directTerminal = raw.terminal_diagnostics;
+  if (directTerminal && typeof directTerminal === "object") {
+    return directTerminal as Record<string, any>;
+  }
+  const runtimeState = raw.preview_runtime_state;
+  if (runtimeState && typeof runtimeState === "object" && runtimeState.checks && typeof runtimeState.checks === "object") {
+    return runtimeState.checks as Record<string, any>;
+  }
+  return raw as Record<string, any>;
+});
+const previewTerminalState = computed<Record<string, any> | null>(() => {
+  const raw = previewsAndPrs.value?.preview_diagnostics;
+  if (!raw || typeof raw !== "object") return null;
+  const terminal = raw.preview_terminal_state;
+  if (!terminal || typeof terminal !== "object") return null;
+  return terminal as Record<string, any>;
+});
+const authoritativeVerificationNote = computed<string>(() => {
+  const previewStatus = String(previewsAndPrs.value?.preview_status || "").toUpperCase();
+  const terminalStatus = String(previewTerminalState.value?.status || "").toUpperCase();
+  if (previewStatus === "READY" || terminalStatus === "READY") return "";
+  return String(previewsAndPrs.value?.verification_note || "").trim();
+});
+const previewRepairAvailable = computed(() => {
+  const strategy = String(previewsAndPrs.value?.preview_strategy || "").toUpperCase();
+  const note = String(authoritativeVerificationNote.value || "").trim();
+  return strategy === "VITE_DEV" && Boolean(previewRunId.value) && Boolean(note);
 });
 const previewPortLabel = computed(() => {
   const explicitFrontendPort = previewsAndPrs.value?.frontend_port;
@@ -4516,6 +4618,35 @@ async function restartPreviewToLatestRun() {
   } finally {
     previewLaunchLoading.value = false;
   }
+}
+
+async function runPreviewRepair(repairAction: string, message: string) {
+  if (!previewRunId.value) return;
+  previewLaunchLoading.value = true;
+  previewLaunchError.value = "";
+  previewLaunchInfo.value = message;
+  try {
+    await launchRunPreview(previewRunId.value, {
+      reuse_if_healthy: false,
+      repair_action: repairAction,
+    });
+    await refreshPreviewStateUntilSettled();
+    await refreshOverviewSurface();
+    previewLaunchInfo.value = "Preview repair completed.";
+  } catch (err: any) {
+    previewLaunchError.value = err?.message || "Failed to repair preview.";
+    previewLaunchInfo.value = "";
+  } finally {
+    previewLaunchLoading.value = false;
+  }
+}
+
+async function repairPreviewRoot() {
+  await runPreviewRepair("repair_frontend_root", "Repairing preview root mapping…");
+}
+
+async function repairPreviewEntrypoint() {
+  await runPreviewRepair("repair_frontend_entrypoint", "Repairing frontend entrypoint…");
 }
 
 async function refreshPreviewStateUntilSettled() {

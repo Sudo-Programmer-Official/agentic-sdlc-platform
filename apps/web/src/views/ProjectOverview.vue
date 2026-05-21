@@ -219,6 +219,62 @@
         </div>
         <div v-if="genesisError" class="mt-2 text-xs text-rose-600">{{ genesisError }}</div>
       </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs uppercase tracking-wide text-slate-400">Runtime Initialization Timeline</div>
+          <div class="flex items-center gap-2">
+            <el-button
+              v-if="runtimeLifecycleCanInitialize"
+              size="small"
+              type="primary"
+              plain
+              :disabled="!projectId || runtimeLifecycleInitializing"
+              @click="runRuntimeInitialization"
+            >
+              {{ runtimeLifecycleInitializing ? "Initializing..." : "Initialize Runtime" }}
+            </el-button>
+            <el-button size="small" plain :disabled="!projectId" @click="loadProjectRuntimeLifecycle">Refresh</el-button>
+            <el-button
+              size="small"
+              plain
+              :disabled="!projectId || foundationPrSubmitting"
+              @click="raiseFoundationPrManually"
+            >
+              {{ foundationPrSubmitting ? "Raising PR..." : "Raise Foundation PR" }}
+            </el-button>
+          </div>
+        </div>
+        <div class="mt-2 flex items-center gap-2 text-sm font-semibold text-slate-900">
+          <span>State:</span>
+          <el-tag effect="light" :type="runtimeLifecycleStateTagType">
+            {{ runtimeLifecycle?.state || "CREATED" }}
+          </el-tag>
+        </div>
+        <div class="text-xs text-slate-500">
+          Retries: {{ runtimeLifecycle?.retry_count ?? 0 }}
+          · Updated: {{ runtimeLifecycle?.updated_at || "—" }}
+        </div>
+        <div v-if="runtimeLifecycleLastError" class="mt-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
+          Last error: {{ runtimeLifecycleLastError }}
+        </div>
+        <div
+          v-else-if="runtimeLifecycleHistoricalFailure"
+          class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700"
+        >
+          Last failure (historical): {{ runtimeLifecycleHistoricalFailure }}
+        </div>
+        <div v-if="runtimeLifecycleError" class="mt-2 text-xs text-rose-600">{{ runtimeLifecycleError }}</div>
+        <div v-if="foundationPrMessage" class="mt-2 text-xs text-slate-600">{{ foundationPrMessage }}</div>
+        <div v-else class="mt-2 max-h-44 space-y-1 overflow-auto text-xs text-slate-600">
+          <div v-if="!runtimeLifecycleTimeline.length" class="text-slate-500">No lifecycle events yet.</div>
+          <div v-for="(item, idx) in runtimeLifecycleTimeline.slice(0, 10)" :key="idx" class="flex items-start justify-between gap-2">
+            <span>
+              <el-tag size="small" effect="light" :type="runtimeLifecycleTagTypeFor(item.state)">{{ item.state }}</el-tag>
+            </span>
+            <span class="text-slate-400">{{ item.ts || "—" }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -899,6 +955,10 @@
         <el-select v-model="genesisForm.stack_preset_key" placeholder="Stack preset" style="width: 100%">
           <el-option v-for="preset in stackPresets" :key="preset.key" :label="preset.label" :value="preset.key" />
         </el-select>
+        <div class="text-xs text-slate-500">
+          Selected preset:
+          <span class="font-medium text-slate-700">{{ selectedStackPresetLabel }}</span>
+        </div>
         <el-input v-model="genesisForm.deployment_profile" placeholder="Deployment profile (e.g. local_preview)" />
         <el-checkbox v-model="genesisForm.readiness_enforced">Enforce readiness gate before feature runs</el-checkbox>
         <el-button type="primary" :loading="genesisLoading" :disabled="!projectId" @click="submitGenesisBlueprint">
@@ -1427,6 +1487,8 @@ import {
   fetchLifecycleScoreHistory,
   listDocuments,
   fetchProjectMeta,
+  fetchProjectRuntimeLifecycle,
+  initializeProjectRuntime,
   updateProjectStage,
   listRuns,
   createRun,
@@ -1439,6 +1501,7 @@ import {
   connectProjectRepo,
   preflightProjectRepo,
   bootstrapProjectRepo,
+  triggerFoundationPr,
   fetchGitHubConnectInfo,
   listGitHubInstallationRepositories,
   fetchFoundationReadiness,
@@ -1574,6 +1637,10 @@ const designContractLoading = ref(false);
 const designContractSaveLoading = ref(false);
 const designContractError = ref("");
 const designContractEditorValue = ref("{}");
+const selectedStackPresetLabel = computed(() => {
+  const selected = stackPresets.value.find((preset) => preset.key === genesisForm.value.stack_preset_key);
+  return selected?.label || genesisForm.value.stack_preset_key || "—";
+});
 const showDesignAdvancedEditor = ref(false);
 const selectedDesignPreset = ref("");
 const componentPolicyOptions = [
@@ -1707,6 +1774,42 @@ const lifecycleScore = ref<any | null>(null);
 const lifecycleError = ref("");
 const lifecycleHistory = ref<any[]>([]);
 const lifecycleHistoryError = ref("");
+const runtimeLifecycle = ref<any | null>(null);
+const runtimeLifecycleError = ref("");
+const runtimeLifecycleTimeline = computed(() => {
+  const rows = Array.isArray(runtimeLifecycle.value?.timeline) ? [...runtimeLifecycle.value.timeline] : [];
+  return rows.sort((a: any, b: any) => Date.parse(String(b?.ts || "")) - Date.parse(String(a?.ts || "")));
+});
+const runtimeLifecycleLastError = computed(() => {
+  const direct = String(runtimeLifecycle.value?.last_error || "").trim();
+  return direct;
+});
+const runtimeLifecycleHistoricalFailure = computed(() => {
+  const rows = Array.isArray(runtimeLifecycle.value?.timeline) ? runtimeLifecycle.value.timeline : [];
+  const failed = rows
+    .slice()
+    .sort((a: any, b: any) => Date.parse(String(b?.ts || "")) - Date.parse(String(a?.ts || "")))
+    .find((row: any) => String(row?.state || "").toUpperCase() === "FAILED");
+  return String(failed?.error || failed?.reason || "").trim();
+});
+const runtimeLifecycleTagTypeFor = (state: string): "success" | "warning" | "danger" | "info" => {
+  const value = String(state || "").toUpperCase();
+  if (value === "ACTIVE") return "success";
+  if (value === "FAILED") return "danger";
+  if (value.endsWith("_READY")) return "success";
+  if (value === "REPAIRING" || value === "PAUSED") return "warning";
+  return "info";
+};
+const runtimeLifecycleStateTagType = computed(() =>
+  runtimeLifecycleTagTypeFor(String(runtimeLifecycle.value?.state || "CREATED"))
+);
+const runtimeLifecycleCanInitialize = computed(() => {
+  const state = String(runtimeLifecycle.value?.state || "CREATED").toUpperCase();
+  return ["CREATED", "FAILED", "PAUSED", "REPAIRING"].includes(state);
+});
+const runtimeLifecycleInitializing = ref(false);
+const foundationPrSubmitting = ref(false);
+const foundationPrMessage = ref("");
 
 const designContractIdentityName = computed(
   () => String(designContract.value?.identity?.name || "Product").trim() || "Product"
@@ -3724,6 +3827,50 @@ async function loadProjectMeta() {
   }
 }
 
+async function loadProjectRuntimeLifecycle() {
+  if (!projectId.value) return;
+  try {
+    runtimeLifecycle.value = await fetchProjectRuntimeLifecycle(projectId.value);
+    runtimeLifecycleError.value = "";
+  } catch (err: any) {
+    runtimeLifecycleError.value = err?.message || "Runtime lifecycle failed";
+  }
+}
+
+async function runRuntimeInitialization() {
+  if (!projectId.value) return;
+  runtimeLifecycleInitializing.value = true;
+  try {
+    runtimeLifecycle.value = await initializeProjectRuntime(projectId.value);
+    runtimeLifecycleError.value = "";
+    ElMessage.success("Runtime initialization started");
+  } catch (err: any) {
+    runtimeLifecycleError.value = err?.message || "Runtime initialization failed";
+  } finally {
+    runtimeLifecycleInitializing.value = false;
+  }
+}
+
+async function raiseFoundationPrManually() {
+  if (!projectId.value) return;
+  foundationPrSubmitting.value = true;
+  try {
+    const result = await triggerFoundationPr(projectId.value);
+    const prLabel = result.pull_request_url ? ` PR: ${result.pull_request_url}` : "";
+    foundationPrMessage.value = (result.message || "Foundation PR action completed.") + prLabel;
+    if (result.pull_request_url) {
+      ElMessage.success("Foundation PR ready");
+    } else {
+      ElMessage.info(result.message || "No foundation PR created");
+    }
+  } catch (err: any) {
+    foundationPrMessage.value = err?.message || "Failed to raise foundation PR";
+    ElMessage.error(foundationPrMessage.value);
+  } finally {
+    foundationPrSubmitting.value = false;
+  }
+}
+
 async function loadProjectSummary() {
   if (!projectId.value) return;
   try {
@@ -4270,6 +4417,7 @@ onMounted(async () => {
     await loadFoundationReadiness();
     await loadGenesisState();
   await loadProjectMeta();
+  await loadProjectRuntimeLifecycle();
   await loadRuns();
   await loadDesignContract();
   await loadProjectRepo();

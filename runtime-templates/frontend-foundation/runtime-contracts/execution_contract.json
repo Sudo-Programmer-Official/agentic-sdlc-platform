@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "scope_mode": "minimal_patch",
+  "validation_steps": [
+    "WRITE_TESTS",
+    "REVIEW_DIFF",
+    "RUN_TESTS",
+    "PREVIEW_VALIDATE",
+    "REVIEW_INTEGRATION"
+  ],
+  "allowed_command_prefixes": [
+    "git",
+    "pytest",
+    "python",
+    "python3",
+    "npm",
+    "pnpm",
+    "yarn",
+    "node",
+    "npx",
+    "uv",
+    "bash",
+    "sh"
+  ],
+  "risk_level": "LOW",
+  "file_budget": 5,
+  "hard_file_budget": 15,
+  "preview_command": "npm -C apps/web run dev -- --host $HOST --port $PORT"
+}

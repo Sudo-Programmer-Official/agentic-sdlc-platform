@@ -253,7 +253,7 @@
       <h3>Teams describe Prompt2PR as the bridge between AI output and production trust.</h3>
       <div class="voices-grid">
         <article v-for="voice in voices" :key="voice.role" class="voice-card">
-          <p class="voice-quote">“{{ voice.quote }}”</p>
+          <p class="voice-quote">"{{ voice.quote }}"</p>
           <div class="voice-meta">
             <div class="voice-role">{{ voice.role }}</div>
             <div class="voice-impact">{{ voice.impact }}</div>

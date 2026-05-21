@@ -1,0 +1,36 @@
+{
+  "blueprint_key": "fullstack_monorepo",
+  "repo_layout": {
+    "label": "Monorepo",
+    "monorepo": true,
+    "packages": [
+      {"name": "apps/web", "kind": "frontend"},
+      {"name": "apps/api", "kind": "backend"},
+      {"name": "packages/shared", "kind": "shared"},
+      {"name": "packages/contracts", "kind": "shared"},
+      {"name": "packages/ui", "kind": "frontend_shared"},
+      {"name": "packages/runtime-types", "kind": "runtime_shared"}
+    ]
+  },
+  "safe_zones": [
+    "apps/web/src",
+    "apps/api/app",
+    "packages/shared",
+    "packages/contracts",
+    "packages/ui",
+    "packages/runtime-types"
+  ],
+  "protected_zones": [
+    "runtime-contracts",
+    "governance"
+  ],
+  "commands": {
+    "workspace_install": "pnpm install",
+    "frontend_start": "npm -C apps/web run dev -- --host 0.0.0.0 --port 4173",
+    "frontend_build": "npm -C apps/web run build",
+    "frontend_test": "npm -C apps/web run test",
+    "backend_start": "python3 apps/api/main.py",
+    "api_tests": "pytest -q apps/api/tests",
+    "preview": "npm -C apps/web run dev -- --host 0.0.0.0 --port 4173"
+  }
+}

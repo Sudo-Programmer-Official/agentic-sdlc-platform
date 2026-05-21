@@ -612,6 +612,96 @@ async def test_mission_control_overview_preview_panel_exposes_active_vs_stale_ur
 
 
 @pytest.mark.anyio
+async def test_mission_control_overview_preview_panel_prefers_latest_run_preview_over_older_deliverable_preview(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Latest preview priority", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    older_started = datetime.utcnow() - timedelta(minutes=10)
+    older_deliverable_run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/older-deliverable",
+        workspace_status="SEEDED",
+        started_at=older_started,
+        finished_at=older_started + timedelta(seconds=60),
+        summary={
+            "goal": "Older deliverable preview",
+            "remote_branch_pushed": True,
+            "preview": {
+                "status": "FAILED",
+                "preview_url": "http://127.0.0.1:62305",
+                "frontend": {
+                    "url": "http://127.0.0.1:62305",
+                    "port": 62305,
+                    "log_path": "/tmp/older/frontend-preview.log",
+                },
+                "verification_note": "stale older preview",
+            },
+        },
+    )
+    session.add(older_deliverable_run)
+    await session.flush()
+    session.add(
+        Artifact(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            run_id=older_deliverable_run.id,
+            type="git_diff",
+            uri="workspace://patches/older.patch",
+            version=1,
+            extra_metadata={"content": "diff --git a/a b/a\n"},
+        )
+    )
+
+    latest_started = datetime.utcnow() - timedelta(minutes=2)
+    latest_run = Run(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        status="COMPLETED",
+        executor="codex",
+        branch_name="run/latest-preview",
+        workspace_status="SEEDED",
+        started_at=latest_started,
+        finished_at=latest_started + timedelta(seconds=40),
+        summary={
+            "goal": "Latest focused preview",
+            "preview": {
+                "status": "READY",
+                "preview_url": "http://127.0.0.1:51405",
+                "runtime_classification": "MONOREPO_VITE_FASTAPI",
+                "preview_strategy": "VITE_DEV",
+                "frontend": {
+                    "url": "http://127.0.0.1:51405",
+                    "port": 51405,
+                    "log_path": "/tmp/latest/frontend-preview.log",
+                },
+                "diagnostics": {
+                    "frontend_install_status": "cached",
+                },
+            },
+        },
+    )
+    session.add(latest_run)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/mission-control/overview")
+
+    assert response.status_code == 200, response.text
+    panel = response.json()["previews_and_prs"]
+    assert panel["run_id"] == str(latest_run.id)
+    assert panel["branch_name"] == "run/latest-preview"
+    assert panel["preview_status"] == "READY"
+    assert panel["active_preview_url"] == "http://127.0.0.1:51405"
+    assert panel["frontend_log_path"] == "/tmp/latest/frontend-preview.log"
+    assert panel["runtime_classification"] == "MONOREPO_VITE_FASTAPI"
+
+
+@pytest.mark.anyio
 async def test_execution_console_surfaces_execution_contract_telemetry(db_session):
     session, tenant_id = db_session
     project = Project(name="Execution console telemetry", tenant_id=tenant_id)

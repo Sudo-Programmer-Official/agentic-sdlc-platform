@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from enum import Enum
+from pathlib import Path, PurePosixPath
+import re
 from typing import Any
 
 from sqlalchemy import select, func
@@ -32,7 +34,84 @@ RECOVERY_TIER_BY_FAILURE_CLASS: dict[str, str] = {
     "fix_applied": "deterministic",
     "patch_apply_failure": "cheap_recovery",
     "output_contract_invalid": "cheap_recovery",
+    "structural_contract_violation": "architectural_recovery",
+    "stack_test_strategy_mismatch": "code_repair",
+    "layout_composition_failure": "architectural_recovery",
+    "zone_composition_failure": "architectural_recovery",
+    "incomplete_zone_replacement": "architectural_recovery",
+    "visual_quality_failure": "architectural_recovery",
+    "frontend_syntax_failure": "code_repair",
+    "mutation_authority_violation": "architectural_recovery",
+    "foundation_bootstrap_required": "architectural_recovery",
 }
+
+
+class FrontendReadinessState(str, Enum):
+    FOUNDATION_BROKEN = "FOUNDATION_BROKEN"
+    TOPOLOGY_BROKEN = "TOPOLOGY_BROKEN"
+    COMPOSITION_BROKEN = "COMPOSITION_BROKEN"
+    LAYOUT_DEGRADED = "LAYOUT_DEGRADED"
+    READY = "PREVIEW_READY"
+
+
+def _frontend_readiness_state_from_error_text(text: str) -> FrontendReadinessState:
+    lowered = str(text or "").lower()
+    if any(
+        token in lowered
+        for token in (
+            "run genesis_foundation repair before code_frontend",
+            "landingpage missing required zone markers",
+            "foundation prerequisite violation",
+            "landingpage.vue does not exist",
+            "patch could not be applied because apps/web/src/pages/landingpage.vue does not exist",
+            "app.vue does not exist",
+            "pageshell.vue does not exist",
+            "vite.config",
+            "package.json does not exist",
+            "main.ts",
+        )
+    ):
+        return FrontendReadinessState.FOUNDATION_BROKEN
+    if any(
+        token in lowered
+        for token in (
+            "foundation topology violation",
+            "feature tasks may not create or replace isolated pages",
+            "routing topology",
+            "shell protection violation",
+        )
+    ):
+        return FrontendReadinessState.TOPOLOGY_BROKEN
+    if any(
+        token in lowered
+        for token in (
+            "zone composition violation",
+            "missing required zone markers",
+            "replace_landing_page",
+            "placeholder replacement violation",
+            "incomplete zone replacement",
+            "mutation authority violation",
+        )
+    ):
+        return FrontendReadinessState.COMPOSITION_BROKEN
+    if any(
+        token in lowered
+        for token in (
+            "layout governance violation",
+            "tailwind governance violation",
+            "missing responsive container",
+            "missing max-width/container utility",
+            "potential overflow without overflow safety guard",
+            "unbounded svg dimension",
+            "oversized arbitrary dimension",
+            "visual quality gate",
+            "bounded_svg_icons",
+            "no_overflow",
+            "typography_hierarchy",
+        )
+    ):
+        return FrontendReadinessState.LAYOUT_DEGRADED
+    return FrontendReadinessState.READY
 
 
 def _run_tests_failure_signature(item: WorkItem) -> str:
@@ -72,7 +151,14 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         "rules": (
             RecoveryRule("FAILED", "patch_apply_failure", "retry"),
             RecoveryRule("FAILED", "output_contract_invalid", "retry"),
+            RecoveryRule("FAILED", "structural_contract_violation", "retry"),
             RecoveryRule("FAILED", "design_token_violation", "retry"),
+            RecoveryRule("FAILED", "layout_composition_failure", "spawn_fix_node", "FIX_LAYOUT_COMPOSITION"),
+            RecoveryRule("FAILED", "zone_composition_failure", "spawn_fix_node", "FIX_ZONE_COMPOSITION"),
+            RecoveryRule("FAILED", "frontend_syntax_failure", "spawn_fix_node", "FIX_FRONTEND_SYNTAX"),
+            RecoveryRule("FAILED", "visual_quality_failure", "spawn_fix_node", "FIX_VISUAL_QUALITY"),
+            RecoveryRule("FAILED", "mutation_authority_violation", "spawn_fix_node", "FIX_ZONE_COMPOSITION"),
+            RecoveryRule("FAILED", "foundation_bootstrap_required", "spawn_fix_node", "GENESIS_FOUNDATION"),
             RecoveryRule("FAILED", "transient", "retry"),
         ),
     },
@@ -125,16 +211,41 @@ RECOVERY_POLICIES: dict[str, dict[str, Any]] = {
         "max_retries": 2,
         "rules": (
             RecoveryRule("FAILED", "transient", "retry"),
+            RecoveryRule("FAILED", "stack_test_strategy_mismatch", "spawn_fix_node", "FIX_TEST_FAILURE"),
             RecoveryRule("FAILED", "syntax_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
             RecoveryRule("FAILED", "dependency_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
             RecoveryRule("FAILED", "test_assertion_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
             RecoveryRule("FAILED", "test_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
         ),
     },
+    "FRAMEWORK_VALIDATE": {
+        "max_retries": 1,
+        "rules": (
+            RecoveryRule("FAILED", "transient", "retry"),
+            RecoveryRule("FAILED", "frontend_syntax_failure", "spawn_fix_node", "FIX_FRONTEND_SYNTAX"),
+            RecoveryRule("FAILED", "syntax_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
+            RecoveryRule("FAILED", "dependency_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
+            RecoveryRule("FAILED", "missing_context", "spawn_fix_node", "FIX_TEST_FAILURE"),
+            RecoveryRule("FAILED", "logic_failure", "spawn_fix_node", "FIX_TEST_FAILURE"),
+        ),
+    },
     "FIX_TEST_FAILURE": {
         "max_retries": 2,
         "rules": (
             RecoveryRule("DONE", "fix_applied", "spawn_retry_node", "RUN_TESTS"),
+        ),
+    },
+    "FIX_LAYOUT_COMPOSITION": {
+        "max_retries": 2,
+        "rules": (
+            RecoveryRule("DONE", "fix_applied", "spawn_retry_node", "CODE_FRONTEND"),
+            RecoveryRule("FAILED", "foundation_bootstrap_required", "spawn_fix_node", "GENESIS_FOUNDATION"),
+        ),
+    },
+    "FIX_FRONTEND_SYNTAX": {
+        "max_retries": 2,
+        "rules": (
+            RecoveryRule("DONE", "fix_applied", "spawn_retry_node", "FRAMEWORK_VALIDATE"),
         ),
     },
     "REVIEW_DIFF": {
@@ -170,6 +281,48 @@ def _coerce_path_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return _unique_paths([item for item in value if isinstance(item, str) and item.strip()])
+
+
+def _canonicalize_frontend_recovery_paths(paths: list[str]) -> list[str]:
+    canonical: list[str] = []
+    for raw in paths:
+        path = str(raw or "").strip().replace("\\", "/")
+        if not path:
+            continue
+        lowered = path.lower()
+        if lowered == "index.html":
+            path = "apps/web/index.html"
+        elif lowered in {"landingpage.vue", "src/landingpage.vue"}:
+            path = "apps/web/src/LandingPage.vue"
+        elif lowered == "app.vue":
+            path = "apps/web/src/App.vue"
+        elif lowered.startswith("src/"):
+            path = f"apps/web/{path}"
+        canonical.append(path)
+    return _unique_paths(canonical)
+
+
+def _extract_frontend_paths_from_error_text(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    candidates: list[str] = []
+    for match in re.findall(r"(/[^\s:]+\.(?:vue|ts|tsx|js|jsx|css|scss|sass|html))(?::\d+(?::\d+)?)?", raw):
+        candidates.append(match)
+    for match in re.findall(r"\b(src/[^\s:]+\.(?:vue|ts|tsx|js|jsx|css|scss|sass|html))(?::\d+(?::\d+)?)?", raw):
+        candidates.append(match)
+    normalized: list[str] = []
+    for candidate in candidates:
+        cleaned = str(candidate).strip().replace("\\", "/")
+        if not cleaned:
+            continue
+        marker = "/repo/"
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[1]
+        if cleaned.startswith("/"):
+            continue
+        normalized.append(cleaned)
+    return _canonicalize_frontend_recovery_paths(_unique_paths(normalized))
 
 
 def _backend_recovery_context(work_item: WorkItem) -> dict[str, Any] | None:
@@ -242,7 +395,65 @@ def _fix_recovery_scope(payload: dict[str, Any] | None) -> tuple[list[str], list
             for path in _coerce_path_list(payload.get("expected_files"))
             if _looks_like_test_path(path)
         ]
-    return _unique_paths(implementation_files), _unique_paths(failing_test_files)
+    normalized_impl = _canonicalize_frontend_recovery_paths(_unique_paths(implementation_files))
+    failing_test_files = _canonicalize_frontend_recovery_paths(_unique_paths(failing_test_files))
+    has_frontend_feature_component = any(
+        path.replace("\\", "/").startswith("apps/web/src/components/") and path.endswith(".vue")
+        for path in normalized_impl
+    )
+    if has_frontend_feature_component:
+        # Preserve feature topology during recovery: do not hand page topology files to fix-recovery
+        # when component composition already exists.
+        normalized_impl = [
+            path
+            for path in normalized_impl
+            if path.replace("\\", "/")
+            not in {
+                "apps/web/src/pages/LandingPage.vue",
+                "apps/web/src/LandingPage.vue",
+                "LandingPage.vue",
+            }
+        ]
+    error_text = "\n".join(str(payload.get(key) or "") for key in ("stderr", "stdout", "message", "last_error"))
+    inferred_from_errors = _extract_frontend_paths_from_error_text(error_text)
+    if inferred_from_errors:
+        normalized_impl = _unique_paths([*normalized_impl, *inferred_from_errors])
+    return normalized_impl, _unique_paths(failing_test_files)
+
+
+def _layout_composition_recovery_scope(payload: dict[str, Any] | None, *, repo_path: str | None = None) -> list[str]:
+    """Constrain layout recovery to stable composition shell files.
+
+    Layout repair should avoid section-level component files that may not exist yet
+    (e.g. CTASection.vue) and instead operate on durable topology files.
+    """
+
+    if not isinstance(payload, dict):
+        return ["apps/web/src/pages/LandingPage.vue"]
+
+    candidates = _canonicalize_frontend_recovery_paths(
+        _unique_paths(
+            _coerce_path_list(payload.get("target_files"))
+            + _coerce_path_list(payload.get("related_files"))
+            + _coerce_path_list(payload.get("expected_files"))
+        )
+    )
+    preferred_shell_files = [
+        "apps/web/src/LandingPage.vue",
+        "apps/web/src/pages/LandingPage.vue",
+        "apps/web/src/layouts/PageShell.vue",
+    ]
+    allowed_shell_files = set(preferred_shell_files)
+    scoped = [path for path in candidates if path.replace("\\", "/") in allowed_shell_files]
+    if not scoped:
+        scoped = preferred_shell_files.copy()
+
+    repo_root = Path(repo_path).expanduser() if isinstance(repo_path, str) and repo_path.strip() else None
+    if repo_root is not None:
+        for candidate in preferred_shell_files:
+            if (repo_root / candidate).exists():
+                return [candidate]
+    return _unique_paths(scoped[:1]) or ["apps/web/src/LandingPage.vue"]
 
 
 def _error_text(work_item: WorkItem) -> str:
@@ -255,19 +466,40 @@ def _error_text(work_item: WorkItem) -> str:
     return "\n".join(bits).lower()
 
 
+def _frontend_failure_signature(work_item: WorkItem) -> str:
+    text = _error_text(work_item).strip().lower()
+    if not text:
+        return ""
+    first_line = text.splitlines()[0].strip()
+    return first_line[:220]
+
+
 def recovery_tier_for_failure(failure_class: str) -> str:
     return RECOVERY_TIER_BY_FAILURE_CLASS.get(failure_class, "architectural_recovery")
 
 
 def classify_failure(work_item: WorkItem) -> str:
-    if work_item.type == "FIX_TEST_FAILURE" and work_item.status == "DONE":
+    if work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"} and work_item.status == "DONE":
         return "fix_applied"
     if work_item.type == "REVIEW_DIFF" and work_item.status == "FAILED":
         return "policy_failure"
 
     text = _error_text(work_item)
+    result = work_item.result if isinstance(work_item.result, dict) else {}
+    if work_item.type == "RUN_TESTS" and bool(result.get("stack_mismatch_detected")):
+        return "stack_test_strategy_mismatch"
     if "run_budget_exhausted" in text or "budget_exhausted" in text:
         return "budget_exhausted"
+    if work_item.type in {"CODE_FRONTEND", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_VISUAL_QUALITY", "GENESIS_FOUNDATION", "FOUNDATION_VALIDATE"}:
+        readiness_state = _frontend_readiness_state_from_error_text(text)
+        if readiness_state == FrontendReadinessState.FOUNDATION_BROKEN:
+            return "foundation_bootstrap_required"
+        if readiness_state == FrontendReadinessState.TOPOLOGY_BROKEN:
+            return "zone_composition_failure"
+        if readiness_state == FrontendReadinessState.COMPOSITION_BROKEN:
+            return "zone_composition_failure"
+        if readiness_state == FrontendReadinessState.LAYOUT_DEGRADED:
+            return "layout_composition_failure"
     if any(
         token in text
         for token in (
@@ -294,6 +526,57 @@ def classify_failure(work_item: WorkItem) -> str:
     if any(
         token in text
         for token in (
+            "layout governance violation",
+            "tailwind governance violation",
+            "missing responsive container",
+            "missing max-width/container utility",
+            "potential overflow without overflow safety guard",
+            "unbounded svg dimension",
+            "oversized arbitrary dimension",
+            "foundation topology violation",
+            "placeholder replacement violation",
+        )
+    ):
+        return "layout_composition_failure"
+    if any(
+        token in text
+        for token in (
+            "zone composition violation",
+            "missing required zone markers",
+            "replace_landing_page",
+            "incomplete zone replacement",
+        )
+    ):
+        return "zone_composition_failure"
+    if any(
+        token in text
+        for token in (
+            "visual quality gate",
+            "bounded_svg_icons",
+            "no_overflow",
+            "typography_hierarchy",
+        )
+    ):
+        return "visual_quality_failure"
+    if "mutation authority violation" in text or "shell protection violation" in text:
+        return "mutation_authority_violation"
+    if work_item.type == "FRAMEWORK_VALIDATE" and work_item.status == "FAILED":
+        if any(
+            token in text
+            for token in (
+                "[plugin:vite:vue]",
+                "[plugin:vite:import-analysis]",
+                "vite:vue",
+                "failed to resolve import",
+                "attribute name cannot contain",
+                "single file component can contain only one element",
+                "unterminated string constant",
+            )
+        ):
+            return "frontend_syntax_failure"
+    if any(
+        token in text
+        for token in (
             "syntaxerror",
             "indentationerror",
             "nameerror",
@@ -315,10 +598,11 @@ def classify_failure(work_item: WorkItem) -> str:
             "patch repair output was invalid",
             "output_contract_invalid",
             "unterminated string starting at",
-            "structural contract violation",
         )
     ):
         return "output_contract_invalid"
+    if "structural contract violation" in text:
+        return "structural_contract_violation"
     if any(
         token in text
         for token in (
@@ -362,7 +646,7 @@ def _merge_result_metadata(work_item: WorkItem, **updates: Any) -> None:
 
 
 def _is_recovery_work_item(work_item: WorkItem) -> bool:
-    if work_item.type == "FIX_TEST_FAILURE":
+    if work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"}:
         return True
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     return any(key in payload for key in ("recovery_source_id", "failed_work_item_id", "recovery_action"))
@@ -444,7 +728,7 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         await session.execute(
             select(func.count()).where(
                 WorkItem.run_id == failed_work_item.run_id,
-                WorkItem.type == "FIX_TEST_FAILURE",
+                WorkItem.type.in_(["FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"]),
             )
         )
     ).scalar() or 0
@@ -452,6 +736,12 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         return None
 
     implementation_files, failing_test_files = _fix_recovery_scope(failed_work_item.payload or {})
+    run = await session.get(Run, failed_work_item.run_id)
+    if failure_class == "layout_composition_failure":
+        implementation_files = _layout_composition_recovery_scope(
+            failed_work_item.payload or {},
+            repo_path=run.repo_path if run is not None else None,
+        )
     fix_payload = {
         "test_exit_code": (failed_work_item.result or {}).get("exit_code"),
         "stdout": (failed_work_item.result or {}).get("stdout"),
@@ -461,6 +751,15 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         "recovery_action": "spawn_fix_node",
         "recovery_tier": recovery_tier_for_failure(failure_class),
     }
+    if failure_class == "stack_test_strategy_mismatch":
+        run_test_result = failed_work_item.result if isinstance(failed_work_item.result, dict) else {}
+        fix_payload["stack_mismatch_detected"] = True
+        fix_payload["stack_mismatch_reason"] = run_test_result.get("stack_mismatch_reason")
+        fix_payload["stack_mismatch_repairs"] = run_test_result.get("stack_mismatch_repairs") if isinstance(run_test_result.get("stack_mismatch_repairs"), list) else []
+        fix_payload["test_strategy_before"] = run_test_result.get("test_strategy")
+        fix_payload["test_strategy_after"] = "vitest"
+        fix_payload["framework_router"] = "frontend_vite_vitest"
+        fix_payload["recovery_action"] = "stack_mismatch_repair"
     if implementation_files:
         fix_payload["target_files"] = implementation_files
         fix_payload["files"] = implementation_files
@@ -469,12 +768,21 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         fix_payload["related_files"] = failing_test_files
         fix_payload["failing_test_files"] = failing_test_files
 
+    spawn_type_map = {
+        "layout_composition_failure": "FIX_LAYOUT_COMPOSITION",
+        "zone_composition_failure": "FIX_ZONE_COMPOSITION",
+        "frontend_syntax_failure": "FIX_FRONTEND_SYNTAX",
+        "visual_quality_failure": "FIX_VISUAL_QUALITY",
+        "mutation_authority_violation": "FIX_ZONE_COMPOSITION",
+        "foundation_bootstrap_required": "GENESIS_FOUNDATION",
+    }
+    spawn_type = spawn_type_map.get(failure_class, "FIX_TEST_FAILURE")
     fix = WorkItem(
         project_id=failed_work_item.project_id,
         tenant_id=failed_work_item.tenant_id,
         run_id=failed_work_item.run_id,
-        type="FIX_TEST_FAILURE",
-        key=f"FIX_TEST_FAILURE_{count + 1}",
+        type=spawn_type,
+        key=f"{spawn_type}_{count + 1}",
         status="QUEUED",
         executor="codex",
         priority=9,
@@ -515,7 +823,6 @@ async def _spawn_fix_node(session: AsyncSession, failed_work_item: WorkItem, fai
         recovery_type=fix.type,
         message=f"Auto recovery queued {fix.type} for failed {failed_work_item.type}.",
     )
-    run = await session.get(Run, failed_work_item.run_id)
     if run is not None:
         summary = dict(run.summary or {})
         summary["recovery_in_progress"] = True
@@ -683,6 +990,224 @@ async def _spawn_test_retry(session: AsyncSession, source_work_item: WorkItem) -
     return {"work_item_id": test.id, "type": test.type}
 
 
+async def _spawn_framework_validate_retry(session: AsyncSession, source_work_item: WorkItem) -> dict[str, Any] | None:
+    payload = source_work_item.payload if isinstance(source_work_item.payload, dict) else {}
+    failed_id_raw = str(payload.get("failed_work_item_id") or "").strip()
+    if not failed_id_raw:
+        return None
+    try:
+        failed_id = uuid.UUID(failed_id_raw)
+    except ValueError:
+        return None
+
+    failed_item = await session.get(WorkItem, failed_id)
+    if failed_item is None or failed_item.run_id != source_work_item.run_id:
+        return None
+    if failed_item.type != "FRAMEWORK_VALIDATE" or failed_item.status != "FAILED":
+        return None
+
+    existing_retry = (
+        await session.execute(
+            select(WorkItem).where(
+                WorkItem.run_id == source_work_item.run_id,
+                WorkItem.type == "FRAMEWORK_VALIDATE",
+                WorkItem.status.in_(["QUEUED", "RUNNING", "CLAIMED", "DONE"]),
+                WorkItem.payload["recovery_source_id"].as_string() == str(source_work_item.id),
+            )
+        )
+    ).scalars().first()
+    if existing_retry is not None:
+        return {"work_item_id": existing_retry.id, "type": existing_retry.type}
+
+    retry_payload = dict(failed_item.payload or {})
+    retry_payload.update(
+        {
+            "recovery_source_id": str(source_work_item.id),
+            "recovery_action": "spawn_retry_node",
+            "failed_work_item_id": str(failed_item.id),
+        }
+    )
+    retry = WorkItem(
+        project_id=source_work_item.project_id,
+        tenant_id=source_work_item.tenant_id,
+        run_id=source_work_item.run_id,
+        type="FRAMEWORK_VALIDATE",
+        key=f"{failed_item.key or failed_item.type}_RECOVERY_{uuid.uuid4().hex[:4]}",
+        status="QUEUED",
+        executor=failed_item.executor or "test",
+        priority=max(int(failed_item.priority or 8), 8),
+        required_capabilities=list(failed_item.required_capabilities or ["test"]),
+        payload=retry_payload,
+        depends_on_count=1,
+    )
+    session.add(retry)
+    await session.flush()
+    await link_run_to_work_item(session, retry)
+
+    session.add(
+        WorkItemEdge(
+            tenant_id=source_work_item.tenant_id,
+            run_id=source_work_item.run_id,
+            from_work_item_id=source_work_item.id,
+            to_work_item_id=retry.id,
+        )
+    )
+
+    outgoing_edges = (
+        await session.execute(
+            select(WorkItemEdge).where(
+                WorkItemEdge.run_id == failed_item.run_id,
+                WorkItemEdge.from_work_item_id == failed_item.id,
+            )
+        )
+    ).scalars().all()
+    for edge in outgoing_edges:
+        edge.from_work_item_id = retry.id
+        session.add(edge)
+
+    failed_result = dict(failed_item.result or {})
+    failed_result["superseded"] = True
+    failed_result["superseded_by"] = str(retry.id)
+    failed_result["superseded_reason"] = "framework_validate_retry_spawned"
+    failed_item.result = failed_result
+    session.add(failed_item)
+
+    session.add(
+        Trace(
+            tenant_id=failed_item.tenant_id,
+            project_id=failed_item.project_id,
+            from_type="work_item",
+            from_id=failed_item.id,
+            to_type="work_item",
+            to_id=retry.id,
+            relation_type="supersedes",
+            relation_strength=1.0,
+        )
+    )
+    await record_event(
+        session,
+        project_id=retry.project_id,
+        run_id=retry.run_id,
+        work_item_id=retry.id,
+        event_type="WORK_ITEM_CREATED",
+        actor_type="SYSTEM",
+        payload={"work_item_id": str(retry.id), "type": retry.type},
+        tenant_id=retry.tenant_id,
+    )
+    await _emit_recovery_event(
+        session,
+        source_work_item,
+        failure_class="fix_applied",
+        action="spawn_retry_node",
+        recovery_work_item_id=retry.id,
+        recovery_type=retry.type,
+        message=f"Recovery queued {retry.type} retry after {source_work_item.type}.",
+    )
+    return {"work_item_id": retry.id, "type": retry.type}
+
+
+async def _spawn_code_frontend_retry(session: AsyncSession, source_work_item: WorkItem) -> dict[str, Any] | None:
+    payload = source_work_item.payload if isinstance(source_work_item.payload, dict) else {}
+    failed_id_raw = str(payload.get("failed_work_item_id") or "").strip()
+    if not failed_id_raw:
+        return None
+    try:
+        failed_id = uuid.UUID(failed_id_raw)
+    except ValueError:
+        return None
+
+    failed_item = await session.get(WorkItem, failed_id)
+    if failed_item is None or failed_item.run_id != source_work_item.run_id:
+        return None
+    if failed_item.type != "CODE_FRONTEND" or failed_item.status != "FAILED":
+        return None
+
+    existing_retry = (
+        await session.execute(
+            select(WorkItem).where(
+                WorkItem.run_id == source_work_item.run_id,
+                WorkItem.type == "CODE_FRONTEND",
+                WorkItem.status.in_(["QUEUED", "RUNNING", "CLAIMED", "DONE"]),
+                WorkItem.payload["recovery_source_id"].as_string() == str(source_work_item.id),
+            )
+        )
+    ).scalars().first()
+    if existing_retry is not None:
+        return {"work_item_id": existing_retry.id, "type": existing_retry.type}
+
+    retry_payload = dict(failed_item.payload or {})
+    signature = _frontend_failure_signature(failed_item)
+    prior_signature_retries = 0
+    if signature:
+        prior_signature_retries = (
+            await session.execute(
+                select(func.count()).where(
+                    WorkItem.run_id == source_work_item.run_id,
+                    WorkItem.type == "CODE_FRONTEND",
+                    WorkItem.payload["recovery_failure_signature"].as_string() == signature,
+                )
+            )
+        ).scalar() or 0
+    retry_payload.update(
+        {
+            "recovery_source_id": str(source_work_item.id),
+            "recovery_action": "spawn_retry_node",
+            "failed_work_item_id": str(failed_item.id),
+            "recovery_strategy": "layout_composition_repair",
+            "recovery_failure_signature": signature,
+            "recovery_same_failure_count": int(prior_signature_retries) + 1,
+        }
+    )
+    if prior_signature_retries >= 1:
+        retry_payload["recovery_strategy"] = "write_file_preferred"
+        retry_payload["layout_auto_normalize"] = True
+        retry_payload["recovery_escalation"] = "deterministic_overflow_repair"
+    retry = WorkItem(
+        project_id=source_work_item.project_id,
+        tenant_id=source_work_item.tenant_id,
+        run_id=source_work_item.run_id,
+        type="CODE_FRONTEND",
+        key=f"{failed_item.key or failed_item.type}_RECOVERY_{uuid.uuid4().hex[:4]}",
+        status="QUEUED",
+        executor=failed_item.executor or "codex",
+        priority=max(int(failed_item.priority or 8), 8),
+        required_capabilities=list(failed_item.required_capabilities or ["code"]),
+        payload=retry_payload,
+        depends_on_count=1,
+    )
+    session.add(retry)
+    await session.flush()
+    await link_run_to_work_item(session, retry)
+
+    session.add(
+        WorkItemEdge(
+            tenant_id=source_work_item.tenant_id,
+            run_id=source_work_item.run_id,
+            from_work_item_id=source_work_item.id,
+            to_work_item_id=retry.id,
+        )
+    )
+    outgoing_edges = (
+        await session.execute(
+            select(WorkItemEdge).where(
+                WorkItemEdge.run_id == failed_item.run_id,
+                WorkItemEdge.from_work_item_id == failed_item.id,
+            )
+        )
+    ).scalars().all()
+    for edge in outgoing_edges:
+        edge.from_work_item_id = retry.id
+        session.add(edge)
+
+    failed_result = dict(failed_item.result or {})
+    failed_result["superseded"] = True
+    failed_result["superseded_by"] = str(retry.id)
+    failed_result["superseded_reason"] = "code_frontend_retry_spawned"
+    failed_item.result = failed_result
+    session.add(failed_item)
+    return {"work_item_id": retry.id, "type": retry.type}
+
+
 async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> dict[str, Any] | None:
     runtime_recovery = RuntimeRecoveryService(session)
     failure_class = classify_failure(work_item)
@@ -830,8 +1355,15 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
             if failure_class == "output_contract_invalid":
                 payload["strict_output_contract_mode"] = True
                 payload["prior_output_contract_failures"] = int(payload.get("prior_output_contract_failures") or 0) + 1
+            if failure_class == "structural_contract_violation":
+                payload["strict_output_contract_mode"] = True
+                payload["prior_output_contract_failures"] = int(payload.get("prior_output_contract_failures") or 0) + 1
+                payload["componentization_repair_attempts"] = int(payload.get("componentization_repair_attempts") or 0) + 1
             payload["recovery_action"] = recovery_action
-            if recovery_action == "retry_with_write_file":
+            if failure_class == "structural_contract_violation":
+                payload["recovery_strategy"] = "componentization_repair"
+                payload["recovery_reason"] = "structural_contract_violation"
+            elif recovery_action == "retry_with_write_file":
                 payload["recovery_strategy"] = "write_file_preferred"
                 payload["recovery_reason"] = "patch_apply_failed"
             elif recovery_action == "retry_with_smaller_patch":
@@ -896,7 +1428,24 @@ async def maybe_apply_recovery(session: AsyncSession, work_item: WorkItem) -> di
         _merge_result_metadata(work_item, retry_state=RetryState.PENDING)
         session.add(work_item)
         await session.flush()
-        created = await _spawn_test_retry(session, work_item)
+        created: dict[str, Any] | None
+        if work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_FRONTEND_SYNTAX"}:
+            fix_payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+            failed_id_raw = str(fix_payload.get("failed_work_item_id") or "").strip()
+            failed_item: WorkItem | None = None
+            if failed_id_raw:
+                try:
+                    failed_item = await session.get(WorkItem, uuid.UUID(failed_id_raw))
+                except ValueError:
+                    failed_item = None
+            if failed_item is not None and failed_item.type == "FRAMEWORK_VALIDATE":
+                created = await _spawn_framework_validate_retry(session, work_item)
+            elif failed_item is not None and failed_item.type == "CODE_FRONTEND":
+                created = await _spawn_code_frontend_retry(session, work_item)
+            else:
+                created = await _spawn_test_retry(session, work_item)
+        else:
+            created = await _spawn_test_retry(session, work_item)
         outcome = {"action": rule.action, "created": created}
 
     elif rule.action == "block_run":

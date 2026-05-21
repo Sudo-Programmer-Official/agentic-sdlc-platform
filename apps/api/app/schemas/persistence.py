@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
@@ -17,6 +17,7 @@ class ProjectCreate(BaseModel):
     starter_blueprint_key: str = "fullstack_monorepo"
     starter_stack_preset_key: str = "vue_fastapi"
     starter_deployment_profile: str = "local_preview"
+    project_intent: dict[str, Any] | None = None
 
 
 class ProjectOut(BaseModel):
@@ -30,6 +31,22 @@ class ProjectOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class RuntimeLifecycleTransitionOut(BaseModel):
+    state: str
+    from_state: str | None = None
+    ts: datetime
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class RuntimeLifecycleOut(BaseModel):
+    state: str = "CREATED"
+    updated_at: datetime | None = None
+    timeline: list[RuntimeLifecycleTransitionOut] = Field(default_factory=list)
+    last_error: str | None = None
+    retry_count: int = 0
 
 
 class DocumentCreate(BaseModel):
@@ -508,6 +525,16 @@ class ProjectRepositoryBootstrapOut(BaseModel):
     commit_sha: Optional[str] = None
     message: str
     error: Optional[str] = None
+
+
+class FoundationPrOut(BaseModel):
+    ok: bool
+    attempted: bool
+    classification: Optional[str] = None
+    branch_name: Optional[str] = None
+    pull_request_url: Optional[str] = None
+    pull_request_number: Optional[int] = None
+    message: Optional[str] = None
 
 
 class ProjectRepositoryOut(BaseModel):

@@ -135,3 +135,30 @@ async def test_log_activity_serializes_uuid_metadata():
     assert entry.extra_metadata["impacted_tasks"] == [str(task_id)]
     assert entry.previous_state["task_id"] == str(task_id)
     assert entry.new_state["task_ids"] == [str(task_id)]
+
+
+@pytest.mark.anyio
+async def test_log_activity_trims_overlong_string_fields():
+    class DummySession:
+        def __init__(self):
+            self.entries = []
+
+        def add(self, entry):
+            self.entries.append(entry)
+
+    session = DummySession()
+    await log_activity(
+        session,
+        project_id=uuid.uuid4(),
+        entity_type="x" * 80,
+        entity_id=uuid.uuid4(),
+        action_type="y" * 80,
+        event_type="z" * 80,
+        actor="a" * 180,
+    )
+
+    entry = session.entries[0]
+    assert len(entry.entity_type) == 32
+    assert len(entry.action_type) == 32
+    assert len(entry.event_type) == 32
+    assert len(entry.actor) == 100

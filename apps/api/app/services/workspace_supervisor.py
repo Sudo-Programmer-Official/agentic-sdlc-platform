@@ -137,6 +137,74 @@ def _seed_repo(source: Path, destination: Path) -> bool:
     return True
 
 
+def _normalize_frontend_workspace_bootstrap(repo_root: Path) -> list[str]:
+    web_src = repo_root / "apps" / "web" / "src"
+    if not web_src.exists():
+        return []
+    repaired: list[str] = []
+    main_ts = web_src / "main.ts"
+    app_vue = web_src / "App.vue"
+    pages_dir = web_src / "pages"
+    landing_page = pages_dir / "LandingPage.vue"
+    legacy_landing = web_src / "LandingPage.vue"
+    app_fallback = "<template>\n  <main>\n    <h1>Landing Page</h1>\n  </main>\n</template>\n"
+
+    def _app_shell_content() -> str:
+        if landing_page.exists():
+            return (
+                "<template>\n  <LandingPage />\n</template>\n\n"
+                "<script setup lang=\"ts\">\n"
+                'import LandingPage from "./pages/LandingPage.vue";\n'
+                "</script>\n"
+            )
+        if legacy_landing.exists():
+            return (
+                "<template>\n  <LandingPage />\n</template>\n\n"
+                "<script setup lang=\"ts\">\n"
+                'import LandingPage from "./LandingPage.vue";\n'
+                "</script>\n"
+            )
+        return app_fallback
+
+    if not main_ts.exists():
+        if not app_vue.exists():
+            app_vue.write_text(_app_shell_content(), encoding="utf-8")
+            repaired.append("apps/web/src/App.vue")
+        main_ts.write_text(
+            'import { createApp } from "vue";\n'
+            'import App from "./App.vue";\n\n'
+            'createApp(App).mount("#app");\n',
+            encoding="utf-8",
+        )
+        repaired.append("apps/web/src/main.ts")
+        return repaired
+
+    try:
+        content = main_ts.read_text(encoding="utf-8")
+    except OSError:
+        return repaired
+
+    if "./App.vue" in content and not app_vue.exists():
+        app_vue.write_text(_app_shell_content(), encoding="utf-8")
+        repaired.append("apps/web/src/App.vue")
+
+    if "./pages/LandingPage.vue" in content and not landing_page.exists():
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        landing_page.write_text(
+            "<template>\n  <main>\n    <h1>Landing Page</h1>\n  </main>\n</template>\n",
+            encoding="utf-8",
+        )
+        repaired.append("apps/web/src/pages/LandingPage.vue")
+    if "./LandingPage.vue" in content and not legacy_landing.exists():
+        legacy_landing.write_text(
+            "<template>\n  <main>\n    <h1>Landing Page</h1>\n  </main>\n</template>\n",
+            encoding="utf-8",
+        )
+        repaired.append("apps/web/src/LandingPage.vue")
+
+    return repaired
+
+
 async def ensure_run_workspace(
     session: AsyncSession,
     run: Run,
@@ -217,6 +285,8 @@ async def ensure_run_workspace(
                 work_branch=paths.branch_name,
             )
             repo_seeded = True
+        if repo_seeded:
+            _normalize_frontend_workspace_bootstrap(paths.repo)
 
         run.workspace_root = str(paths.root)
         run.repo_path = str(paths.repo)

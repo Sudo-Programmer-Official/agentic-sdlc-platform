@@ -128,6 +128,8 @@ async def test_public_runs_list_auto_finalizes_stale_running_run_when_work_is_te
     )
     session.add(run)
     await session.flush()
+    run_id = run.id
+    run_id = run.id
 
     session.add(
         WorkItem(
@@ -1021,3 +1023,170 @@ async def test_public_run_resume_rehydrates_workspace_from_durable_checkpoint(db
     assert run.summary["resume_state"]["last_resume_restore_source"] == "database_patch"
     assert run.summary["resume_state"]["last_resume_workspace_rehydrated"] is True
     assert run.summary["resume_state"]["durable_checkpoint_count"] >= 1
+
+
+@pytest.mark.anyio
+async def test_public_run_resume_retry_failed_step_mode_requeues_only_failed_node(db_session, tmp_path: Path):
+    session, tenant_id = db_session
+    project = Project(name="Resume mode retry failed step", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    workspace_root = tmp_path / "workspace-retry-failed"
+    repo_root = workspace_root / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "tests@example.com"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Runtime Tests"], cwd=repo_root, check=True, capture_output=True)
+    target_file = repo_root / "app.py"
+    target_file.write_text("print('safe')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "safe"], cwd=repo_root, check=True, capture_output=True)
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="FAILED",
+        executor="codex",
+        branch_name="run/retry-failed-step",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+        workspace_status="SEEDED",
+        summary={"goal": "Retry only failed step"},
+    )
+    session.add(run)
+    await session.flush()
+    run_id = run.id
+
+    plan_item = WorkItem(project_id=project.id, tenant_id=tenant_id, run_id=run.id, type="PLAN_DAG", key="PLAN_DAG", status="DONE", priority=10, executor="codex")
+    code_item = WorkItem(project_id=project.id, tenant_id=tenant_id, run_id=run.id, type="CODE_BACKEND", key="CODE_BACKEND", status="DONE", priority=9, executor="codex")
+    failed_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="CODE_FRONTEND",
+        key="CODE_FRONTEND",
+        status="FAILED",
+        priority=8,
+        executor="codex",
+        payload={"blocking": True},
+        result={"failure_class": "structural_contract_violation"},
+        last_error="CODE_FRONTEND structural contract violation in index.html",
+    )
+    canceled_downstream = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="WRITE_TESTS",
+        key="WRITE_TESTS",
+        status="CANCELED",
+        priority=7,
+        executor="codex",
+    )
+    session.add_all([plan_item, code_item, failed_item, canceled_downstream])
+    await session.flush()
+    failed_item_id = failed_item.id
+    session.add(
+        WorkItemEdge(
+            tenant_id=tenant_id,
+            run_id=run.id,
+            from_work_item_id=failed_item.id,
+            to_work_item_id=canceled_downstream.id,
+        )
+    )
+    await session.flush()
+
+    await capture_run_checkpoint(session, run, work_item=code_item, checkpoint_kind="safe")
+    await sync_run_resume_state(session, run, failed_work_item=failed_item)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/runs/{run_id}/resume",
+            json={"start_now": False, "mode": "retry_failed_step", "failed_work_item_id": str(failed_item_id)},
+        )
+
+    assert response.status_code == 200, response.text
+    session.expire_all()
+    resumed = (
+        await session.execute(select(WorkItem).where(WorkItem.run_id == run_id).order_by(WorkItem.created_at.asc()))
+    ).scalars().all()
+    statuses = {item.key: item.status for item in resumed}
+    assert statuses["PLAN_DAG"] == "DONE"
+    assert statuses["CODE_BACKEND"] == "DONE"
+    assert statuses["CODE_FRONTEND"] == "QUEUED"
+    assert statuses["WRITE_TESTS"] == "CANCELED"
+
+
+@pytest.mark.anyio
+async def test_public_run_resume_replay_with_repair_injects_strategy(db_session, tmp_path: Path):
+    session, tenant_id = db_session
+    project = Project(name="Resume mode repair inject", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    workspace_root = tmp_path / "workspace-repair"
+    repo_root = workspace_root / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "tests@example.com"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Runtime Tests"], cwd=repo_root, check=True, capture_output=True)
+    (repo_root / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    subprocess.run(["git", "add", "index.html"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo_root, check=True, capture_output=True)
+
+    run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="FAILED",
+        executor="codex",
+        branch_name="run/repair-inject",
+        workspace_root=str(workspace_root),
+        repo_path=str(repo_root),
+        workspace_status="SEEDED",
+        summary={"goal": "Repair and continue"},
+    )
+    session.add(run)
+    await session.flush()
+    run_id = run.id
+
+    done_item = WorkItem(project_id=project.id, tenant_id=tenant_id, run_id=run.id, type="PLAN_DAG", key="PLAN_DAG", status="DONE", priority=10, executor="codex")
+    failed_item = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        type="CODE_FRONTEND",
+        key="CODE_FRONTEND",
+        status="FAILED",
+        priority=8,
+        executor="codex",
+        payload={"blocking": True},
+        result={"failure_class": "structural_contract_violation"},
+        last_error="CODE_FRONTEND structural contract violation in index.html",
+    )
+    session.add_all([done_item, failed_item])
+    await session.flush()
+    failed_item_id = failed_item.id
+
+    await capture_run_checkpoint(session, run, work_item=done_item, checkpoint_kind="safe")
+    await sync_run_resume_state(session, run, failed_work_item=failed_item)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                f"/api/v1/runs/{run_id}/resume",
+                json={
+                    "start_now": False,
+                    "mode": "replay_with_repair",
+                    "failed_work_item_id": str(failed_item_id),
+                    "repair_strategy": "componentization_repair",
+                },
+            )
+    assert response.status_code == 200, response.text
+
+    session.expire_all()
+    updated_failed = await session.get(WorkItem, failed_item_id)
+    assert updated_failed is not None
+    assert updated_failed.status == "QUEUED"
+    assert (updated_failed.payload or {}).get("recovery_strategy") == "componentization_repair"
+    assert (updated_failed.payload or {}).get("recovery_action") == "resume_repair_continue"

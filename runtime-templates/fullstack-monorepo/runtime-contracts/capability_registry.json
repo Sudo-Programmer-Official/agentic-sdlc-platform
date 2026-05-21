@@ -1,0 +1,16 @@
+{
+  "auth": {
+    "backend_zone": "apps/api/app/capabilities",
+    "service_zone": "apps/api/app/services",
+    "schema_zone": "apps/api/app/schemas"
+  },
+  "analytics": {
+    "backend_zone": "apps/api/app/capabilities",
+    "service_zone": "apps/api/app/services"
+  },
+  "crm_sync": {
+    "backend_zone": "apps/api/app/capabilities",
+    "service_zone": "apps/api/app/services",
+    "repository_zone": "apps/api/app/repositories"
+  }
+}

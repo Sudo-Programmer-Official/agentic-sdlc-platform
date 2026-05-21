@@ -530,6 +530,7 @@ export type ProjectCreatePayload = {
   starter_blueprint_key?: string;
   starter_stack_preset_key?: string;
   starter_deployment_profile?: string;
+  project_intent?: Record<string, any> | null;
 };
 
 export async function previewImpact(projectId: string, documentId: string, proposedBody: string) {
@@ -632,6 +633,34 @@ export async function listActivity(projectId: string) {
 
 export async function fetchProjectMeta(projectId: string) {
   const resp = await apiFetch(`${API_BASE}/projects/${projectId}`);
+  return parseApiResponse(resp);
+}
+
+export type RuntimeLifecycleTransition = {
+  state: string;
+  from_state?: string | null;
+  ts: string;
+  diagnostics?: Record<string, any>;
+  error?: string | null;
+};
+
+export type RuntimeLifecycle = {
+  state: string;
+  updated_at?: string | null;
+  timeline: RuntimeLifecycleTransition[];
+  last_error?: string | null;
+  retry_count?: number;
+};
+
+export async function fetchProjectRuntimeLifecycle(projectId: string): Promise<RuntimeLifecycle> {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/runtime-lifecycle`);
+  return parseApiResponse(resp);
+}
+
+export async function initializeProjectRuntime(projectId: string): Promise<RuntimeLifecycle> {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/initialize-runtime`, {
+    method: "POST",
+  });
   return parseApiResponse(resp);
 }
 
@@ -1349,6 +1378,23 @@ export async function bootstrapProjectRepo(projectId: string, payload: RepoBoots
   return parseApiResponse(resp);
 }
 
+export type FoundationPrOut = {
+  ok: boolean;
+  attempted: boolean;
+  classification?: string | null;
+  branch_name?: string | null;
+  pull_request_url?: string | null;
+  pull_request_number?: number | null;
+  message?: string | null;
+};
+
+export async function triggerFoundationPr(projectId: string): Promise<FoundationPrOut> {
+  const resp = await apiFetch(`${API_BASE}/projects/${projectId}/repo/foundation-pr`, {
+    method: "POST",
+  });
+  return parseApiResponse(resp);
+}
+
 export async function fetchProjectPreviewProfile(projectId: string) {
   const resp = await apiFetch(`${API_BASE}/projects/${projectId}/preview-profile`);
   try {
@@ -1798,6 +1844,7 @@ export async function launchRunPreview(
   runId: string,
   payload: {
     reuse_if_healthy?: boolean;
+    repair_action?: string;
   } = {}
 ) {
   const resp = await apiFetch(`${API_BASE}/runs/${runId}/preview`, {

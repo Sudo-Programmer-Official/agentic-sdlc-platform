@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.db.models import Agent, Run, RunEvent, Task, WorkItem, WorkItemEdge
 from app.db.session import SessionLocal
 from app.runtime.leases import reclaim_expired_work_items, reclaim_orphaned_work_items
-from app.runtime.recovery_policy import has_pending_recovery_work, sync_run_recovery_latch
+from app.runtime.recovery_policy import classify_failure, has_pending_recovery_work, plan_recovery, sync_run_recovery_latch
 from app.services.event_log import record_event
 from app.services.runtime_lineage import link_run_to_work_item
 from app.services.run_delivery import publish_run_branch_if_ready
@@ -19,7 +19,7 @@ from app.services.work_item_state import is_blocking_failure, is_dependency_sati
 from app.api.v1.lifecycle_score import lifecycle_score
 settings = get_settings()
 
-VALIDATION_TERMINAL_TYPES = {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
+VALIDATION_TERMINAL_TYPES = {"WRITE_TESTS", "RUN_TESTS", "PREVIEW_VALIDATE", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
 RUN_PROGRESS_EVENT_TYPES = {"WORK_ITEM_CLAIMED", "WORK_ITEM_DONE", "WORK_ITEM_FAILED", "WORK_ITEM_SKIPPED"}
 STALL_TIMEOUT_SECONDS = 90
 STALL_EVENT_THROTTLE_SECONDS = 60
@@ -58,6 +58,19 @@ def _is_recovery_item(item: WorkItem) -> bool:
     return item.type == "FIX_TEST_FAILURE" or any(
         payload.get(key) for key in ("recovery_action", "recovery_source_id", "failed_work_item_id")
     ) or any(result.get(key) for key in ("recovery_action", "retry_state"))
+
+
+def _has_recoverable_blocking_failure(failed_items: list[WorkItem]) -> bool:
+    for item in failed_items:
+        if not is_blocking_failure(item) or is_superseded_failure(item):
+            continue
+        failure_class = classify_failure(item)
+        rule = plan_recovery(item, failure_class)
+        if rule is None:
+            continue
+        if rule.action in {"retry", "spawn_fix_node", "spawn_retry_node"}:
+            return True
+    return False
 
 
 async def _supersede_stale_failed_recoveries(session, run: Run) -> None:
@@ -704,7 +717,7 @@ async def _auto_decompose_operator_confirmation(session, run: Run, *, failed_ite
             )
         predecessor_id = wi.id
 
-    followup_types = ["WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"]
+    followup_types = ["WRITE_TESTS", "RUN_TESTS", "PREVIEW_VALIDATE", "REVIEW_DIFF", "REVIEW_INTEGRATION"]
     last_phase_id = predecessor_id
     for item_type in followup_types:
         candidate = await session.scalar(
@@ -1231,6 +1244,10 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
     source_last_error = str(source.last_error or "").lower()
     source_failure_class = str(source_result.get("failure_class") or "").strip().lower()
     source_failure_type = str(source_result.get("failure_type") or "").strip().lower()
+    structural_contract_violation = (
+        source_failure_class == "structural_contract_violation"
+        or "structural contract violation" in source_last_error
+    )
     output_contract_invalid = (
         source_failure_class == "output_contract_invalid"
         or source_failure_type == "parser_error"
@@ -1239,7 +1256,12 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
     source_payload = source.payload if isinstance(source.payload, dict) else {}
     source_recovery_strategy = str(source_payload.get("recovery_strategy") or "").strip().lower()
     source_strict_contract_mode = bool(source_payload.get("strict_output_contract_mode"))
-    if output_contract_invalid and source_recovery_strategy == "write_file_preferred" and source_strict_contract_mode:
+    if (
+        output_contract_invalid
+        and not structural_contract_violation
+        and source_recovery_strategy == "write_file_preferred"
+        and source_strict_contract_mode
+    ):
         return False
     next_cycle = current_cycles + 1
     recovery_payload = dict(source_payload)
@@ -1250,7 +1272,20 @@ async def _queue_goal_recovery_retry(session, run: Run, failed_items: list[WorkI
             "goal_recovery_cycle": next_cycle,
         }
     )
-    if output_contract_invalid and source.type == "CODE_FRONTEND":
+    if structural_contract_violation and source.type == "CODE_FRONTEND":
+        if source_recovery_strategy == "componentization_repair":
+            return False
+        recovery_payload["recovery_strategy"] = "componentization_repair"
+        recovery_payload["recovery_reason"] = "structural_contract_violation"
+        recovery_payload["strict_output_contract_mode"] = True
+        recovery_payload["prior_output_contract_failures"] = int(
+            recovery_payload.get("prior_output_contract_failures") or 0
+        ) + 1
+        recovery_payload["componentization_repair_attempts"] = int(
+            recovery_payload.get("componentization_repair_attempts") or 0
+        ) + 1
+        recovery_payload["recovery_action"] = "retry_with_componentization_repair"
+    elif output_contract_invalid and source.type == "CODE_FRONTEND":
         recovery_payload["recovery_strategy"] = "write_file_preferred"
         recovery_payload["recovery_reason"] = "output_contract_invalid"
         recovery_payload["strict_output_contract_mode"] = True
@@ -1336,7 +1371,7 @@ async def _requeue_validation_after_recovery(session, run: Run) -> bool:
     for item in work_items:
         by_type.setdefault(item.type, []).append(item)
 
-    validation_types = ["WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"]
+    validation_types = ["WRITE_TESTS", "RUN_TESTS", "PREVIEW_VALIDATE", "REVIEW_DIFF", "REVIEW_INTEGRATION"]
     # Only replay validation if no active/queued validation work exists and there is canceled validation to replay.
     has_live_validation = any(
         any(item.status in {"QUEUED", "RUNNING", "CLAIMED"} for item in by_type.get(item_type, []))
@@ -1351,10 +1386,28 @@ async def _requeue_validation_after_recovery(session, run: Run) -> bool:
         (
             item
             for item in reversed(work_items)
-            if item.type in {"CODE_BACKEND", "CODE_FRONTEND"}
-            and item.status == "DONE"
-            and isinstance(item.payload, dict)
-            and str(item.payload.get("recovery_action") or "") in {"goal_recovery_retry", "auto_phase_decomposition"}
+            if (
+                item.type in {"CODE_BACKEND", "CODE_FRONTEND"}
+                and item.status == "DONE"
+                and isinstance(item.payload, dict)
+                and str(item.payload.get("recovery_action") or "") in {"goal_recovery_retry", "auto_phase_decomposition"}
+            )
+            or (
+                item.type == "FRAMEWORK_VALIDATE"
+                and item.status == "DONE"
+                and (
+                    "_RECOVERY_" in str(item.key or "")
+                    or (
+                        isinstance(item.payload, dict)
+                        and str(item.payload.get("recovery_action") or "") in {
+                            "retry_with_write_file",
+                            "retry_with_smaller_patch",
+                            "retry_with_design_token_normalization",
+                            "refresh_context",
+                        }
+                    )
+                )
+            )
         ),
         None,
     )
@@ -1479,6 +1532,7 @@ async def _requeue_execution_after_plan_recovery(session, run: Run) -> bool:
         "WRITE_TESTS",
         "REVIEW_DIFF",
         "RUN_TESTS",
+        "PREVIEW_VALIDATE",
         "REVIEW_INTEGRATION",
     ]
 
@@ -1621,7 +1675,7 @@ async def _requeue_execution_after_backend_recovery(session, run: Run) -> bool:
         "GENERATE_REPOSITORY",
         "GENERATE_CAPABILITY_BINDING",
     ]
-    validation_stages = ["WRITE_TESTS", "REVIEW_DIFF", "RUN_TESTS", "REVIEW_INTEGRATION"]
+    validation_stages = ["WRITE_TESTS", "REVIEW_DIFF", "RUN_TESTS", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"]
 
     latest_backend_recovery = next(
         (
@@ -1852,7 +1906,15 @@ async def tick(session):
         runnable_items = await _runnable_queued_items(session, run) if queued else []
         if queued and active == 0 and runnable_items:
             await _nudge_worker_if_stalled(session, run, runnable_items, active)
-        if queued and active == 0 and not runnable_items and failed_non_superseded and not recovery_pending:
+        recoverable_blocking_failure = _has_recoverable_blocking_failure(failed_items)
+        if (
+            queued
+            and active == 0
+            and not runnable_items
+            and failed_non_superseded
+            and not recovery_pending
+            and not recoverable_blocking_failure
+        ):
             canceled_count = await _cancel_terminally_blocked_items(session, run)
             if canceled_count:
                 await record_event(
@@ -1999,7 +2061,7 @@ async def tick(session):
                     await _mark_run_failed(session, run, reason="stalled_no_progress")
                 continue
 
-        if failed_non_superseded and active == 0 and queued and not recovery_pending:
+        if failed_non_superseded and active == 0 and queued and not recovery_pending and not recoverable_blocking_failure:
             runnable_queued = len(runnable_items)
             if runnable_queued == 0:
                 canceled_count = await _cancel_terminally_blocked_items(session, run)

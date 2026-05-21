@@ -10,11 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Run, WorkItem
+from app.db.models import CostLedger, Run, RunLedger, StageLedger, WorkItem
 from app.schemas.mission_control import (
     MissionControlExecutionCommand,
     MissionControlExecutionConsoleResponse,
     MissionControlExecutionEnvironment,
+    MissionControlRunLedgerAggregate,
+    MissionControlStageLedgerEntry,
     MissionControlExecutionStep,
     MissionControlExecutionSummary,
 )
@@ -236,6 +238,31 @@ async def build_run_execution_console(
     )
 
     commands = _merge_command_audit_records(_load_command_records(environment.command_audit_log))
+    stage_rows = (
+        await session.execute(
+            select(StageLedger)
+            .where(StageLedger.run_id == run_id, StageLedger.tenant_id == tenant_id)
+            .order_by(StageLedger.created_at.desc())
+            .limit(16)
+        )
+    ).scalars().all()
+    latest_run_ledger = await session.scalar(
+        select(RunLedger)
+        .where(RunLedger.run_id == run_id, RunLedger.tenant_id == tenant_id)
+        .order_by(RunLedger.created_at.desc())
+        .limit(1)
+    )
+    cost_rows = (
+        await session.execute(
+            select(CostLedger)
+            .where(CostLedger.run_id == run_id, CostLedger.tenant_id == tenant_id)
+            .order_by(CostLedger.created_at.desc())
+        )
+    ).scalars().all()
+    cost_by_work_item: dict[uuid.UUID, CostLedger] = {}
+    for row in cost_rows:
+        if row.work_item_id and row.work_item_id not in cost_by_work_item:
+            cost_by_work_item[row.work_item_id] = row
     active_step = next((wi for wi in work_items if wi.status in {"RUNNING", "CLAIMED"}), None)
     queued_step = next((wi for wi in work_items if wi.status == "QUEUED"), None)
     current_step = active_step or queued_step
@@ -284,11 +311,90 @@ async def build_run_execution_console(
         active_command_count=sum(1 for command in commands if command.status == "RUNNING"),
         last_updated_at=max((value for value in last_updated_candidates if value is not None), default=None),
         execution_contract=build_execution_contract_telemetry(run.summary if isinstance(run.summary, dict) else None),
+        ledger=(
+            MissionControlRunLedgerAggregate(
+                total_cost_cents=latest_run_ledger.total_cost_cents,
+                total_duration_ms=latest_run_ledger.total_duration_ms,
+                recovery_overhead_pct=latest_run_ledger.recovery_overhead_pct,
+                preview_failures=latest_run_ledger.preview_failures,
+                drift_events=latest_run_ledger.drift_events,
+                targeted_stage_count=int((latest_run_ledger.payload or {}).get("targeted_stage_count") or 0),
+                component_reuse_ratio=float((latest_run_ledger.payload or {}).get("component_reuse_ratio") or 0.0),
+                module_reuse_ratio=float((latest_run_ledger.payload or {}).get("module_reuse_ratio") or 0.0),
+                avg_reuse_ratio=float((latest_run_ledger.payload or {}).get("avg_reuse_ratio") or 0.0),
+                package_drift_count=int((latest_run_ledger.payload or {}).get("package_drift_count") or 0),
+                monolith_risk_max=float((latest_run_ledger.payload or {}).get("monolith_risk_max") or 0.0),
+                preview_continuity_score=float((latest_run_ledger.payload or {}).get("preview_continuity_score") or 0.0),
+                avg_targeting_confidence_delta=float((latest_run_ledger.payload or {}).get("avg_targeting_confidence_delta") or 0.0),
+                decisive_targeting_count=int((latest_run_ledger.payload or {}).get("decisive_targeting_count") or 0),
+                moderate_targeting_count=int((latest_run_ledger.payload or {}).get("moderate_targeting_count") or 0),
+                close_targeting_count=int((latest_run_ledger.payload or {}).get("close_targeting_count") or 0),
+            )
+            if latest_run_ledger is not None
+            else None
+        ),
     )
+
+    stage_telemetry = [
+        MissionControlStageLedgerEntry(
+            stage_name=row.stage_name,
+            lifecycle_state=row.lifecycle_state,
+            duration_ms=row.duration_ms,
+            retries=row.retries,
+            recovery_count=row.recovery_count,
+            model_tier=row.model_tier,
+            prompt_tokens=cost_by_work_item.get(row.work_item_id).prompt_tokens if row.work_item_id in cost_by_work_item else 0,
+            completion_tokens=cost_by_work_item.get(row.work_item_id).completion_tokens if row.work_item_id in cost_by_work_item else 0,
+            estimated_cost_cents=cost_by_work_item.get(row.work_item_id).estimated_cost_cents if row.work_item_id in cost_by_work_item else 0.0,
+            files_touched=row.files_touched,
+            lines_added=row.lines_added,
+            lines_removed=row.lines_removed,
+            architecture_compliance_score=row.architecture_compliance_score,
+            package_affinity=row.package_affinity,
+            layer_affinity=row.layer_affinity,
+            topology_zone=row.topology_zone,
+            targeting_strategy=str((row.payload or {}).get("targeting_strategy") or "") or None,
+            target_file_count=int((row.payload or {}).get("target_file_count") or 0),
+            selected_existing_files_count=int((row.payload or {}).get("selected_existing_files_count") or 0),
+            neighbor_files_count=int((row.payload or {}).get("neighbor_files_count") or 0),
+            component_reuse_preferred=bool((row.payload or {}).get("component_reuse_preferred")),
+            module_reuse_preferred=bool((row.payload or {}).get("module_reuse_preferred")),
+            reuse_ratio=float((row.payload or {}).get("reuse_ratio") or 0.0),
+            primary_targeting_reasons=[
+                str(item)
+                for item in ((row.payload or {}).get("primary_targeting_reasons") or [])
+                if isinstance(item, str)
+            ],
+            primary_target_score=(
+                float((row.payload or {}).get("primary_target_score"))
+                if isinstance((row.payload or {}).get("primary_target_score"), (int, float))
+                else None
+            ),
+            runner_up_target_score=(
+                float((row.payload or {}).get("runner_up_target_score"))
+                if isinstance((row.payload or {}).get("runner_up_target_score"), (int, float))
+                else None
+            ),
+            targeting_confidence_delta=(
+                float((row.payload or {}).get("targeting_confidence_delta"))
+                if isinstance((row.payload or {}).get("targeting_confidence_delta"), (int, float))
+                else None
+            ),
+            targeting_confidence_label=str((row.payload or {}).get("targeting_confidence_label") or "") or None,
+            top_ranked_candidates=[
+                item
+                for item in ((row.payload or {}).get("top_ranked_candidates") or [])
+                if isinstance(item, dict)
+            ][:4],
+            created_at=row.created_at,
+        )
+        for row in stage_rows
+    ]
 
     return MissionControlExecutionConsoleResponse(
         summary=summary,
         environment=environment,
         commands=commands,
         steps=steps,
+        stage_telemetry=stage_telemetry,
     )

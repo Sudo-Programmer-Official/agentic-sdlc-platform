@@ -153,6 +153,22 @@ async def test_architecture_profile_bootstrap_and_summary_endpoints(db_session):
 
 
 @pytest.mark.anyio
+async def test_stack_presets_list_includes_element_plus(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Preset list project", tenant_id=tenant_id)
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/projects/{project.id}/stack-presets")
+        assert response.status_code == 200, response.text
+        presets = response.json()
+        keys = {item["key"] for item in presets}
+        assert "vue_fastapi" in keys
+        assert "vue_element_plus" in keys
+
+
+@pytest.mark.anyio
 async def test_architecture_profile_patch_merges_sections_and_rederives(db_session):
     session, tenant_id = db_session
     project = Project(name="Patchable architecture", tenant_id=tenant_id)
@@ -462,6 +478,46 @@ async def test_architecture_profile_bootstrap_includes_blueprint_sections_when_p
         assert payload["profile_json"]["deployment_blueprint"]["profile"] == "local_preview"
         assert payload["profile_json"]["environment_blueprint"]["logical"] == ["PREVIEW", "STAGING", "PRODUCTION"]
         assert payload["profile_json"]["governance_blueprint"]["level"] == "governed"
+
+
+@pytest.mark.anyio
+async def test_architecture_profile_bootstrap_tracks_element_plus_blueprint_contract(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Element Plus aware architecture", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectBlueprint(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            blueprint_key="fullstack_monorepo",
+            stack_preset_key="vue_element_plus",
+            deployment_profile="local_preview",
+            architecture="fullstack_monorepo",
+            status="ACTIVE",
+            readiness_enforced=True,
+            generated_modules=["apps/web", "apps/api"],
+            generated_contracts=["contracts/project_contract.json"],
+            metadata_json={
+                "stack": {"frontend": "vue", "backend": "fastapi", "ui_library": "element-plus"},
+                "environment": {"logical": ["PREVIEW", "STAGING", "PRODUCTION"]},
+                "governance": {"level": "governed", "bounded_execution": True},
+            },
+            created_by="ui-user",
+        )
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        bootstrap_response = await client.post(
+            f"/api/v1/projects/{project.id}/architecture-profile/bootstrap",
+            json={"created_by": "ui-user"},
+        )
+        assert bootstrap_response.status_code == 200, bootstrap_response.text
+        payload = bootstrap_response.json()
+        assert payload["profile_json"]["blueprint_key"] == "fullstack_monorepo"
+        assert payload["profile_json"]["stack_profile"]["frontend_frameworks"] == ["vite", "vue", "element-plus"]
+        assert payload["profile_json"]["stack_profile"]["frontend_libraries"] == ["element-plus"]
 
 
 @pytest.mark.anyio

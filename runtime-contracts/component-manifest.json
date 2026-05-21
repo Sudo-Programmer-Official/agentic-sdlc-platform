@@ -1,0 +1,408 @@
+{
+  "version": 1,
+  "components": {
+    "AdminConsole": {
+      "path": "apps/web/src/views/AdminConsole.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "AgentPanel": {
+      "path": "apps/web/src/components/AgentPanel.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "AgentRuns": {
+      "path": "apps/web/src/views/AgentRuns.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "AiOperatorPanel": {
+      "path": "apps/web/src/components/AiOperatorPanel.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "AiOpsDashboard": {
+      "path": "apps/web/src/views/AiOpsDashboard.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "App": {
+      "path": "apps/web/src/App.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "AppIcon": {
+      "path": "apps/web/src/components/AppIcon.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "Approvals": {
+      "path": "apps/web/src/views/Approvals.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "AuditTimeline": {
+      "path": "apps/web/src/components/AuditTimeline.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "AutomationMap": {
+      "path": "apps/web/src/views/AutomationMap.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "CTASection": {
+      "path": "apps/web/src/components/governed/CTASection.vue",
+      "zone_owner": "CTAZone",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "CTAZone": {
+      "path": "apps/web/src/components/zones/CTAZone.vue",
+      "zone_owner": "CTAZone",
+      "primitive_type": "zone",
+      "topology_role": "zone"
+    },
+    "ChangePanel": {
+      "path": "apps/web/src/components/ChangePanel.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ContentEditorPanel": {
+      "path": "apps/web/src/components/ContentEditorPanel.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ContentGrid": {
+      "path": "apps/web/src/components/ui/ContentGrid.vue",
+      "zone_owner": "shared",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive"
+    },
+    "ContentSlot": {
+      "path": "apps/web/src/components/ContentSlot.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "DataDeletion": {
+      "path": "apps/web/src/views/DataDeletion.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "DeploymentTrustSurfaceCard": {
+      "path": "apps/web/src/components/DeploymentTrustSurfaceCard.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "E2ESmokeHarness": {
+      "path": "apps/web/src/views/E2ESmokeHarness.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ExecutionConsolePanel": {
+      "path": "apps/web/src/components/workbench/ExecutionConsolePanel.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ExecutionTimeline": {
+      "path": "apps/web/src/components/ExecutionTimeline.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "FeatureGrid": {
+      "path": "apps/web/src/components/governed/FeatureGrid.vue",
+      "zone_owner": "FeatureZone",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "FeatureZone": {
+      "path": "apps/web/src/components/zones/FeatureZone.vue",
+      "zone_owner": "FeatureZone",
+      "primitive_type": "zone",
+      "topology_role": "zone"
+    },
+    "Footer": {
+      "path": "apps/web/src/components/layout/Footer.vue",
+      "zone_owner": "shared",
+      "primitive_type": "layout",
+      "topology_role": "shell_component"
+    },
+    "FormAction": {
+      "path": "apps/web/src/components/runtime/FormAction.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "HeroSection": {
+      "path": "apps/web/src/components/governed/HeroSection.vue",
+      "zone_owner": "HeroZone",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "HeroZone": {
+      "path": "apps/web/src/components/zones/HeroZone.vue",
+      "zone_owner": "HeroZone",
+      "primitive_type": "zone",
+      "topology_role": "zone"
+    },
+    "KnowledgeArtifactDetail": {
+      "path": "apps/web/src/views/KnowledgeArtifactDetail.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "KnowledgeEventDetail": {
+      "path": "apps/web/src/views/KnowledgeEventDetail.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "KnowledgeInbox": {
+      "path": "apps/web/src/views/KnowledgeInbox.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "KnowledgeProposalDetail": {
+      "path": "apps/web/src/views/KnowledgeProposalDetail.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "LandingPage": {
+      "path": "apps/web/src/pages/LandingPage.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "MetricCard": {
+      "path": "apps/web/src/components/MetricCard.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "MissionControl": {
+      "path": "apps/web/src/views/MissionControl.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "MobileNav": {
+      "path": "apps/web/src/components/layout/MobileNav.vue",
+      "zone_owner": "shared",
+      "primitive_type": "layout",
+      "topology_role": "shell_component"
+    },
+    "Navbar": {
+      "path": "apps/web/src/components/layout/Navbar.vue",
+      "zone_owner": "shared",
+      "primitive_type": "layout",
+      "topology_role": "shell_component"
+    },
+    "OperatorActionChips": {
+      "path": "apps/web/src/components/operator/OperatorActionChips.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "OperatorConsole": {
+      "path": "apps/web/src/components/operator/OperatorConsole.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "OperatorDashboard": {
+      "path": "apps/web/src/views/OperatorDashboard.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "OperatorDrawer": {
+      "path": "apps/web/src/components/operator/OperatorDrawer.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "OperatorFab": {
+      "path": "apps/web/src/components/operator/OperatorFab.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "OperatorMessage": {
+      "path": "apps/web/src/components/operator/OperatorMessage.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "PageShell": {
+      "path": "apps/web/src/layouts/PageShell.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "shell"
+    },
+    "PricingCard": {
+      "path": "apps/web/src/components/governed/PricingCard.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "PrimaryButton": {
+      "path": "apps/web/src/components/ui/PrimaryButton.vue",
+      "zone_owner": "shared",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive"
+    },
+    "PrivacyPolicy": {
+      "path": "apps/web/src/views/PrivacyPolicy.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ProblemSolutionSection": {
+      "path": "apps/web/src/components/governed/ProblemSolutionSection.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ProjectEnvironmentCenter": {
+      "path": "apps/web/src/views/ProjectEnvironmentCenter.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ProjectOverview": {
+      "path": "apps/web/src/views/ProjectOverview.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "PublicLanding": {
+      "path": "apps/web/src/views/PublicLanding.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "Requirements": {
+      "path": "apps/web/src/views/Requirements.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "ReviewSurfacePanel": {
+      "path": "apps/web/src/components/workbench/ReviewSurfacePanel.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "RunGuide": {
+      "path": "apps/web/src/views/RunGuide.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "SdlcTimeline": {
+      "path": "apps/web/src/views/SdlcTimeline.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "SectionContainer": {
+      "path": "apps/web/src/components/ui/SectionContainer.vue",
+      "zone_owner": "shared",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive"
+    },
+    "SectionHeading": {
+      "path": "apps/web/src/components/ui/SectionHeading.vue",
+      "zone_owner": "shared",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive"
+    },
+    "SecurityOverview": {
+      "path": "apps/web/src/views/SecurityOverview.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "SignIn": {
+      "path": "apps/web/src/views/SignIn.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "Stack": {
+      "path": "apps/web/src/components/ui/Stack.vue",
+      "zone_owner": "shared",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive"
+    },
+    "StageBadge": {
+      "path": "apps/web/src/components/StageBadge.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "TaskQueuePanel": {
+      "path": "apps/web/src/components/workbench/TaskQueuePanel.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "TaskTable": {
+      "path": "apps/web/src/components/TaskTable.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "TermsOfService": {
+      "path": "apps/web/src/views/TermsOfService.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "TestimonialsZone": {
+      "path": "apps/web/src/components/zones/TestimonialsZone.vue",
+      "zone_owner": "TestimonialsZone",
+      "primitive_type": "zone",
+      "topology_role": "zone"
+    },
+    "TopBar": {
+      "path": "apps/web/src/components/TopBar.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "WorkspaceDashboard": {
+      "path": "apps/web/src/views/WorkspaceDashboard.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    },
+    "WorkspaceHome": {
+      "path": "apps/web/src/views/WorkspaceHome.vue",
+      "zone_owner": "shared",
+      "primitive_type": "feature_component",
+      "topology_role": "component"
+    }
+  },
+  "source": "filesystem_scan"
+}

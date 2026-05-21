@@ -17,6 +17,7 @@ from app.api.v1.generation import router as gen_router, public_router as public_
 from app.api.v1.impact import router as impact_router, public_router as public_impact_router
 from app.api.v1.activity import router as activity_router, public_router as public_activity_router
 from app.api.v1.mission_control import public_router as public_mission_control_router
+from app.api.v1.execution_intelligence import public_router as public_execution_intelligence_router
 from app.api.v1.operator import public_router as public_operator_router
 from app.api.v1.repo_map import public_router as public_repo_map_router
 from app.api.v1.architecture_profile import router as architecture_profile_router, public_router as public_architecture_profile_router
@@ -214,6 +215,7 @@ def create_app() -> FastAPI:
     app.include_router(public_impact_router, prefix=settings.api_prefix)
     app.include_router(public_activity_router, prefix=settings.api_prefix)
     app.include_router(public_mission_control_router, prefix=settings.api_prefix)
+    app.include_router(public_execution_intelligence_router, prefix=settings.api_prefix)
     app.include_router(public_operator_router, prefix=settings.api_prefix)
     app.include_router(public_repo_map_router, prefix=settings.api_prefix)
     app.include_router(public_architecture_profile_router, prefix=settings.api_prefix)

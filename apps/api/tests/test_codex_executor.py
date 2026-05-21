@@ -24,6 +24,11 @@ from app.runtime.codex_executor import (
     _is_bootstrap_or_genesis_scope,
     _normalize_frontend_design_tokens,
     _operator_confirmation_next_action,
+    replace_zone,
+    _sanitize_frontend_scope_paths,
+    _runtime_governance_mode,
+    _emergency_warning_violation,
+    _stability_warning_violation,
     _should_block_on_human_review_for_work_item,
     _should_block_for_operator_confirmation,
     _is_static_frontend_scope,
@@ -43,6 +48,7 @@ from app.runtime.content_binding import build_binding_registry, extract_literals
 from app.runtime.schemas.executor_io import Action
 from app.schemas.run_narrative import RunPatchVerificationFinding, RunPatchVerificationSummary
 from app.services.ai_policy import AIJobManager
+from app.core.config import get_settings
 
 
 class SequencePlanClient:
@@ -692,6 +698,88 @@ def test_write_tests_writable_scope_falls_back_to_scoped_tests_when_targets_are_
     assert writable_scope == ["tests/test_nav.py"]
 
 
+def test_replace_zone_preserves_markers_and_replaces_body():
+    original = (
+        "<template>\n"
+        "<!-- zone:hero:start -->\n"
+        "<HeroPlaceholder />\n"
+        "<!-- zone:hero:end -->\n"
+        "</template>\n"
+    )
+    updated = replace_zone(original, "hero", "<HeroSection />")
+    assert "<!-- zone:hero:start -->" in updated
+    assert "<!-- zone:hero:end -->" in updated
+    assert "<HeroSection />" in updated
+    assert "<HeroPlaceholder />" not in updated
+
+
+def test_runtime_governance_mode_defaults_to_stability_for_early_repository_state():
+    assert _runtime_governance_mode({"repository_state": "GENESIS"}) == "stability"
+    assert _runtime_governance_mode({"repository_state": "EARLY_BUILD"}) == "stability"
+    assert _runtime_governance_mode({"repository_state": "ACTIVE_PRODUCT"}) == "stability"
+    assert _runtime_governance_mode({"runtime_governance_mode": "governed", "repository_state": "GENESIS"}) == "governed"
+
+
+def test_runtime_governance_mode_defaults_to_stability_when_unspecified():
+    assert _runtime_governance_mode({}) == "stability"
+    assert _runtime_governance_mode({"runtime_governance_mode": "", "repository_state": ""}) == "stability"
+    assert _runtime_governance_mode({"runtime_governance_mode": "emergency"}) == "emergency"
+
+
+def test_stability_warning_violation_matches_topology_and_primitive_failures():
+    assert _stability_warning_violation("CODE_FRONTEND foundation topology violation in apps/web/src/pages/LandingPage.vue")
+    assert _stability_warning_violation("CODE_FRONTEND primitive composition violation in component")
+    assert _stability_warning_violation("Tailwind governance violation in apps/web/src/components/landing/HeroSection.vue: missing max-width/container utility.")
+    assert _stability_warning_violation("visual quality gate: typography_hierarchy")
+    assert _stability_warning_violation("Mutation authority violation: operation 'write_file' is not allowed for class POLISH.")
+    assert _stability_warning_violation("SyntaxError in app.py") is False
+
+
+def test_emergency_warning_violation_keeps_only_cosmetic_frontend_issues_non_blocking():
+    assert _emergency_warning_violation("CODE_FRONTEND foundation topology violation in apps/web/src/pages/LandingPage.vue")
+    assert _emergency_warning_violation("CODE_FRONTEND primitive composition violation in component")
+    assert _emergency_warning_violation("visual quality gate: typography_hierarchy")
+    assert _emergency_warning_violation("Project contract violation: missing max-width/container wrapper")
+    assert _emergency_warning_violation("CODE_FRONTEND import normalization violation: patch touches files outside the planned scope")
+    assert _emergency_warning_violation("Frontend import normalization could not resolve components: PrimaryButton.") is False
+    assert _emergency_warning_violation("Capability governance violation: raw webhook URL detected") is False
+
+
+def test_fix_recovery_normalizes_frontend_imports_deterministically(tmp_path: Path):
+    repo_root = tmp_path
+    (repo_root / "apps/web/src/components/ui").mkdir(parents=True, exist_ok=True)
+    (repo_root / "apps/web/src/components/ui/Button.vue").write_text("<template><button /></template>\n", encoding="utf-8")
+    content = (
+        "<template>\n"
+        "  <main><PrimaryButton /></main>\n"
+        "</template>\n"
+        "<script setup>\n"
+        "import PrimaryButton from \"../../components/PrimaryButton.vue\";\n"
+        "</script>\n"
+    )
+    action = Action(type="write_file", path="apps/web/src/pages/LandingPage.vue", content=content)
+    work_item = SimpleNamespace(type="FIX_TEST_FAILURE")
+    executor = CodexExecutor()
+
+    normalized_actions, telemetry, violations = executor._normalize_frontend_import_actions(
+        work_item=work_item,
+        repo_root=repo_root,
+        actions=[action],
+    )
+    assert violations == []
+    assert telemetry["import_normalization_repairs"] >= 1
+    assert telemetry["resolved_component_imports"]
+    assert "../components/ui/Button.vue" in normalized_actions[0].content
+
+    normalized_actions_2, telemetry_2, violations_2 = executor._normalize_frontend_import_actions(
+        work_item=work_item,
+        repo_root=repo_root,
+        actions=normalized_actions,
+    )
+    assert violations_2 == []
+    assert telemetry_2["import_normalization_repairs"] == 0
+
+
 def test_select_mutation_strategy_prefers_write_file_for_single_file_static_frontend():
     executor = CodexExecutor()
     work_item = SimpleNamespace(type="CODE_FRONTEND")
@@ -874,6 +962,20 @@ def test_instructions_for_write_tests_discourage_new_third_party_dependencies():
     assert "html.parser" in instructions
 
 
+def test_instructions_for_write_tests_frontend_uses_vitest_contract():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="WRITE_TESTS",
+        payload={"expected_files": ["apps/web/src/components/landing/TestimonialsSection.vue"], "package_affinity": "apps/web"},
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "Framework-native test contract: this is a Vue/Vite frontend package." in instructions
+    assert "Vitest + Vue Test Utils tests in TypeScript (*.spec.ts)" in instructions
+    assert "Never generate Python test files for frontend Vue components." in instructions
+
+
 def test_instructions_for_fix_test_failure_allow_scoped_test_refresh_for_stale_assertions():
     executor = CodexExecutor()
     work_item = SimpleNamespace(
@@ -924,6 +1026,38 @@ def test_instructions_for_static_frontend_recovery_write_file_override():
 
     assert "Recovery override: previous patch application drifted." in instructions
     assert "prefer write_file with full contents for the primary scoped file" in instructions
+
+
+def test_instructions_include_frontend_mutation_contract_layer():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={"expected_files": ["apps/web/src/pages/LandingPage.vue"]})
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "governed Vue 3 + Vite + Tailwind system" in instructions
+    assert "Pages compose sections; sections compose governed components." in instructions
+    assert "Forbidden patterns: style=, <style> blocks, raw hex colors, rgb(" in instructions
+
+
+def test_instructions_include_component_topology_recovery_memory():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "expected_files": ["apps/web/src/components/landing/TestimonialsSection.vue"],
+            "task_title": "Add Testimonials Section",
+            "goal": "Add Testimonials section with reusable component",
+            "recovery_reason": "design_token_violation",
+        },
+        last_error="inline style attributes are disallowed",
+    )
+
+    instructions = executor._instructions_for(work_item)
+
+    assert "Topology-constrained component repair is active." in instructions
+    assert "Never mutate index.html, App.vue, or unrelated components" in instructions
+    assert "Previous attempt failed because:" in instructions
+    assert "Specifically avoid: style=, <style>, #fff, #000, rgb(" in instructions
 
 
 def test_instructions_enable_strict_output_contract_mode_when_recovery_flagged():
@@ -1183,6 +1317,57 @@ def test_design_validation_records_include_structured_fields():
     assert any(record.get("rule") == "allowed_components" and "RoguePanel" in str(record.get("value")) for record in records)
 
 
+def test_design_validation_recovery_auto_normalizes_inline_and_hex():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={"recovery_strategy": "design_token_auto_normalize"})
+    action = SimpleNamespace(
+        type="write_file",
+        path="apps/web/src/components/landing/TestimonialsSection.vue",
+        content='<section style="background:#fff;color:#ff0000">Hello</section>',
+    )
+    project_contract = {
+        "design_contract": {
+            "token_registry": {"colors": {"primary": "#2563eb"}},
+        },
+        "enforcement": {
+            "disallow_inline_styles": True,
+            "enforce_color_tokens": True,
+        },
+    }
+
+    records = executor._design_validation_records(
+        work_item=work_item,
+        actions=[action],
+        project_contract=project_contract,
+    )
+
+    assert records == []
+    assert 'style="' not in action.content
+
+
+def test_design_validation_strips_style_blocks_before_violation_escalation():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={})
+    action = SimpleNamespace(
+        type="write_file",
+        path="apps/web/src/components/landing/TestimonialsSection.vue",
+        content="<template><div>ok</div></template><style>.x{color:#fff}</style>",
+    )
+    project_contract = {
+        "design_contract": {"token_registry": {"colors": {"primary": "#2563eb"}}},
+        "enforcement": {"enforce_color_tokens": True},
+    }
+
+    records = executor._design_validation_records(
+        work_item=work_item,
+        actions=[action],
+        project_contract=project_contract,
+    )
+
+    assert records == []
+    assert "<style" not in action.content
+
+
 def test_bootstrap_scope_detects_genesis_setup_and_early_build_state():
     assert _is_bootstrap_or_genesis_scope(SimpleNamespace(payload={"task_source": "genesis_setup"}))
     assert _is_bootstrap_or_genesis_scope(SimpleNamespace(payload={"task_source": "genesis.foundation"}))
@@ -1243,11 +1428,518 @@ def test_content_binding_pass_skips_raw_html_entrypoints():
         )
     ]
 
-    violations, records = executor._content_binding_pass(work_item=work_item, actions=actions)
+    violations, records, telemetry = executor._content_binding_pass(work_item=work_item, actions=actions)
 
     assert violations == []
     assert records == []
+    assert telemetry["content_binding_enabled"] is False
     assert "<ContentSlot" not in actions[0].content
+
+
+def test_content_binding_disabled_does_not_introduce_contentslot():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={})
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/components/landing/TestimonialsSection.vue",
+            content="<template><blockquote>{{ testimonial.quote }}</blockquote></template>",
+        )
+    ]
+
+    violations, records, telemetry = executor._content_binding_pass(work_item=work_item, actions=actions)
+
+    assert violations == []
+    assert records == []
+    assert telemetry["content_binding_enabled"] is False
+    assert "ContentSlot" not in actions[0].content
+
+
+def test_content_binding_disabled_falls_back_plain_text_when_contentslot_present():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={})
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/components/landing/TestimonialsSection.vue",
+            content=(
+                '<template><blockquote><ContentSlot content-key="quote" :fallback="testimonial.quote" />'
+                "</blockquote></template>"
+            ),
+        )
+    ]
+
+    violations, records, telemetry = executor._content_binding_pass(work_item=work_item, actions=actions)
+
+    assert violations == []
+    assert records == []
+    assert telemetry["content_binding_fallback_used"] is True
+    assert "ContentSlot" not in actions[0].content
+    assert "{{ testimonial.quote }}" in actions[0].content
+
+
+def test_content_binding_enabled_allows_contentslot_in_design_contract(monkeypatch):
+    monkeypatch.setenv("CONTENT_BINDING_ENABLED", "true")
+    get_settings.cache_clear()
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(type="CODE_FRONTEND", payload={"content_binding_enabled": True})
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/components/landing/TestimonialsSection.vue",
+            content='<template><ContentSlot content-key="quote" :fallback="testimonial.quote" /></template>',
+        )
+    ]
+    project_contract = {
+        "design_contract": {
+            "enforcement": {"enabled": True},
+            "allowed_components": ["HeroSection"],
+            "components": {"registry": ["HeroSection"]},
+        }
+    }
+
+    violations = executor._design_validation_records(
+        work_item=work_item,
+        actions=actions,
+        project_contract=project_contract,
+    )
+    assert not violations
+
+
+def test_feature_mode_blocks_full_shell_replacement_in_code_frontend():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "task_source": "feature",
+            "repository_state": "ACTIVE_PRODUCT",
+            "target_files": ["apps/web/src/pages/LandingPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><main>full rewrite</main></template>",
+        )
+    ]
+
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("foundation topology violation" in item for item in violations)
+
+
+def test_testimonials_task_requires_placeholder_replacement():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "task_source": "feature",
+            "repository_state": "ACTIVE_PRODUCT",
+            "task_title": "Add testimonials section",
+            "target_files": ["apps/web/src/pages/LandingPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><PageShell><TestimonialsPlaceholder /></PageShell></template>",
+        )
+    ]
+
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("incomplete zone replacement" in item for item in violations)
+
+
+def test_feature_task_cannot_create_isolated_pages():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "task_source": "feature",
+            "repository_state": "ACTIVE_PRODUCT",
+            "task_title": "Add testimonials section",
+            "target_files": ["apps/web/src/pages/DashboardPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/DashboardPage.vue",
+            content="<template><main>new page</main></template>",
+        )
+    ]
+
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("composition zone violation" in item for item in violations)
+
+
+def test_feature_task_must_preserve_landing_composition_zones():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "task_source": "feature",
+            "repository_state": "ACTIVE_PRODUCT",
+            "task_title": "Add testimonials section",
+            "target_files": ["apps/web/src/pages/LandingPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><PageShell><TestimonialsZone /></PageShell></template>",
+        )
+    ]
+
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("composition zones must be preserved" in item for item in violations)
+
+
+def test_feature_task_allows_landingpage_composition_mutation_when_topology_is_preserved():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "task_source": "feature",
+            "repository_state": "ACTIVE_PRODUCT",
+            "task_title": "Add hero section",
+            "target_files": ["apps/web/src/pages/LandingPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content=(
+                "<template><PageShell>"
+                "<HeroZone><HeroSection /></HeroZone>"
+                "<FeatureZone />"
+                "<TestimonialsZone />"
+                "<CTAZone />"
+                "</PageShell></template>"
+            ),
+        )
+    ]
+
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert not any("foundation topology violation" in item for item in violations)
+    assert not any("composition zone violation" in item for item in violations)
+
+
+def test_feature_can_replace_testimonials_placeholder_inside_testimonials_zone():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"mutation_class": "FEATURE", "repository_state": "ACTIVE_PRODUCT", "task_title": "Add testimonials section"},
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content=(
+                "<template><PageShell>"
+                "<HeroZone />"
+                "<FeatureZone />"
+                "<TestimonialsZone><TestimonialsSection /></TestimonialsZone>"
+                "<CTAZone />"
+                "</PageShell></template>"
+            ),
+        )
+    ]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert not any("incomplete zone replacement" in item for item in violations)
+
+
+def test_feature_can_insert_hero_section_inside_hero_zone():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "mutation_class": "FEATURE",
+            "repository_state": "ACTIVE_PRODUCT",
+            "target_files": ["apps/web/src/pages/LandingPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content=(
+                "<template><PageShell>"
+                "<HeroZone><HeroSection /></HeroZone>"
+                "<FeatureZone />"
+                "<TestimonialsZone />"
+                "<CTAZone />"
+                "</PageShell></template>"
+            ),
+        )
+    ]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert not any("foundation topology violation" in item for item in violations)
+    assert not any("composition zone violation" in item for item in violations)
+
+
+def test_landing_zone_auto_normalization_restores_missing_required_zones():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"mutation_class": "FEATURE", "runtime_governance_mode": "stability"},
+    )
+    actions = [
+        Action(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><PageShell><section>Generated</section></PageShell></template>",
+        )
+    ]
+    updated, warnings, violations = executor._auto_normalize_landing_zone_actions(work_item=work_item, actions=actions)
+    assert not violations
+    assert len(updated) == 1
+    normalized = updated[0].content or ""
+    assert "<HeroZone>" in normalized
+    assert "<FeatureZone>" in normalized
+    assert "<TestimonialsZone>" in normalized
+    assert "<CTAZone>" in normalized
+    assert warnings == []
+
+
+def test_landing_zone_auto_normalization_places_hero_inside_hero_zone():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"mutation_class": "FEATURE", "runtime_governance_mode": "stability"},
+    )
+    actions = [
+        Action(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><PageShell><HeroSection /></PageShell></template>",
+        )
+    ]
+    updated, _, violations = executor._auto_normalize_landing_zone_actions(work_item=work_item, actions=actions)
+    assert not violations
+    normalized = updated[0].content or ""
+    assert "<HeroZone>" in normalized
+    assert "<HeroSection />" in normalized
+
+
+def test_landing_zone_auto_normalization_inserts_placeholders_for_missing_zones():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"mutation_class": "POLISH", "runtime_governance_mode": "stability"},
+    )
+    actions = [
+        Action(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><PageShell><HeroSection /></PageShell></template>",
+        )
+    ]
+    updated, _, violations = executor._auto_normalize_landing_zone_actions(work_item=work_item, actions=actions)
+    assert not violations
+    normalized = updated[0].content or ""
+    assert "<TestimonialsPlaceholder />" in normalized
+    assert "<CTAPlaceholder />" in normalized
+
+
+def test_normalized_landingpage_passes_patch_guard():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"mutation_class": "FEATURE", "runtime_governance_mode": "stability"},
+    )
+    actions = [
+        Action(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><main>no zones</main></template>",
+        )
+    ]
+    normalized_actions, _, violations = executor._auto_normalize_landing_zone_actions(work_item=work_item, actions=actions)
+    assert not violations
+    decision = evaluate_patch_guard(
+        actions=normalized_actions,
+        allowed_files=["apps/web/src/pages/LandingPage.vue"],
+        file_budget=4,
+        hard_file_budget=8,
+        work_item_type="CODE_FRONTEND",
+        work_item_payload={"mutation_class": "FEATURE", "zone_composer_required": True},
+    )
+    assert decision.ok
+
+
+def test_stability_mode_does_not_fail_feature_landing_without_pageshell():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "mutation_class": "FEATURE",
+            "runtime_governance_mode": "stability",
+            "target_files": ["apps/web/src/pages/LandingPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content=(
+                "<template><main>"
+                "<HeroZone><HeroSection /></HeroZone>"
+                "<FeatureZone><FeaturePlaceholder /></FeatureZone>"
+                "<TestimonialsZone><TestimonialsPlaceholder /></TestimonialsZone>"
+                "<CTAZone><CTAPlaceholder /></CTAZone>"
+                "</main></template>"
+            ),
+        )
+    ]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert not any("LandingPage shell must preserve PageShell" in item for item in violations)
+
+
+def test_feature_zone_composer_rewrites_landingpage_deterministically(tmp_path: Path):
+    repo_root = tmp_path
+    landing = repo_root / "apps/web/src/pages/LandingPage.vue"
+    landing.parent.mkdir(parents=True, exist_ok=True)
+    landing.write_text(
+        "<template><PageShell>\n"
+        "<!-- zone:hero:start -->\n<HeroPlaceholder />\n<!-- zone:hero:end -->\n"
+        "<!-- zone:feature:start -->\n<FeatureZone />\n<!-- zone:feature:end -->\n"
+        "<!-- zone:testimonials:start -->\n<TestimonialsPlaceholder />\n<!-- zone:testimonials:end -->\n"
+        "<!-- zone:cta:start -->\n<CTAZone />\n<!-- zone:cta:end -->\n"
+        "</PageShell></template>\n",
+        encoding="utf-8",
+    )
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={"mutation_class": "FEATURE", "task_title": "Add hero section", "repository_state": "ACTIVE_PRODUCT"},
+    )
+    actions = [
+        Action(type="write_file", path="apps/web/src/components/landing/HeroSection.vue", content="<template><section>Hero</section></template>"),
+        Action(type="write_file", path="apps/web/src/pages/LandingPage.vue", content="<template><main>bad rewrite</main></template>"),
+    ]
+    updated_actions, violations = executor._enforce_feature_zone_composer(
+        work_item=work_item,
+        repo_root=repo_root,
+        actions=actions,
+    )
+    assert not violations
+    landing_actions = [a for a in updated_actions if a.path == "apps/web/src/pages/LandingPage.vue"]
+    assert len(landing_actions) == 1
+    assert "<!-- zone:hero:start -->" in (landing_actions[0].content or "")
+    assert "<HeroSection />" in (landing_actions[0].content or "")
+    assert "<main>bad rewrite</main>" not in (landing_actions[0].content or "")
+
+
+def test_feature_cannot_delete_cta_zone():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "mutation_class": "FEATURE",
+            "repository_state": "ACTIVE_PRODUCT",
+            "target_files": ["apps/web/src/pages/LandingPage.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/pages/LandingPage.vue",
+            content="<template><PageShell><HeroZone /><FeatureZone /><TestimonialsZone /></PageShell></template>",
+        )
+    ]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("CTAZone" in item and "composition zones must be preserved" in item for item in violations)
+
+
+def test_feature_cannot_replace_landingpage_with_bare_main():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "mutation_class": "FEATURE",
+            "repository_state": "ACTIVE_PRODUCT",
+            "target_files": ["apps/web/src/App.vue", "apps/web/src/layouts/PageShell.vue"],
+        },
+    )
+    actions = [SimpleNamespace(type="write_file", path="apps/web/src/pages/LandingPage.vue", content="<template><main>minimal</main></template>")]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("LandingPage shell must preserve PageShell" in item for item in violations)
+
+
+def test_feature_cannot_mutate_app_or_pageshell_files():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "mutation_class": "FEATURE",
+            "repository_state": "ACTIVE_PRODUCT",
+            "target_files": ["apps/web/src/App.vue", "apps/web/src/layouts/PageShell.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(type="write_file", path="apps/web/src/App.vue", content="<template><PageShell /></template>"),
+        SimpleNamespace(type="write_file", path="apps/web/src/layouts/PageShell.vue", content="<template><main/></template>"),
+    ]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert sum("may not fully replace App.vue or PageShell.vue" in item for item in violations) == 2
+
+
+def test_testimonials_component_must_compose_governed_primitives():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "task_source": "feature",
+            "repository_state": "ACTIVE_PRODUCT",
+            "runtime_governance_mode": "governed",
+            "task_title": "Add testimonials section",
+            "target_files": ["apps/web/src/components/landing/TestimonialsSection.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/components/landing/TestimonialsSection.vue",
+            content="<template><section><h2>What Customers Say</h2><div>raw card</div></section></template>",
+        )
+    ]
+
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("primitive composition violation" in item for item in violations)
+
+
+def test_stability_mode_blocks_unverified_testimonial_primitives():
+    executor = CodexExecutor()
+    work_item = SimpleNamespace(
+        type="CODE_FRONTEND",
+        payload={
+            "task_source": "feature",
+            "repository_state": "ACTIVE_PRODUCT",
+            "runtime_governance_mode": "stability",
+            "task_title": "Add testimonials section",
+            "primitive_registry": {
+                "SectionContainer": {"status": "verified_visual"},
+                "SectionHeading": {"status": "stable"},
+                "ContentGrid": {"status": "experimental"},
+                "TestimonialCard": {"status": "verified_visual"},
+            },
+            "target_files": ["apps/web/src/components/landing/TestimonialsSection.vue"],
+        },
+    )
+    actions = [
+        SimpleNamespace(
+            type="write_file",
+            path="apps/web/src/components/landing/TestimonialsSection.vue",
+            content="<template><SectionContainer><SectionHeading/>"
+            "<ContentGrid><TestimonialCard/></ContentGrid></SectionContainer></template>",
+        )
+    ]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("stability mode forbids unverified primitives" in item for item in violations)
 
 
 def test_adjacent_scope_expansion_allows_dependency_file_in_genesis_repair():
@@ -1319,6 +2011,23 @@ def test_write_tests_stage_rejects_non_test_file_mutations():
 
     assert violations == [
         "WRITE_TESTS may only modify Python test files; received out-of-scope file index.html."
+    ]
+
+
+def test_write_tests_stage_frontend_rejects_python_test_mutations():
+    work_item = SimpleNamespace(
+        type="WRITE_TESTS",
+        payload={"package_affinity": "apps/web", "architecture_profile": {"frontend_stack": "vue_vite"}},
+    )
+
+    violations = _stage_scope_violations(
+        work_item,
+        [],
+        ["apps/web/src/components/landing/test_TestimonialsSection_vue.py"],
+    )
+
+    assert violations == [
+        "WRITE_TESTS(frontend) may only modify JS/TS test files (*.spec.*|*.test.*) under frontend scope; received out-of-scope file apps/web/src/components/landing/test_TestimonialsSection_vue.py."
     ]
 
 
@@ -1402,6 +2111,109 @@ def test_patch_guard_rejects_pycache_and_compiled_artifacts():
 
     assert decision.ok is False
     assert any("runtime cache artifacts" in msg for msg in decision.violations)
+
+
+def test_patch_guard_rejects_db_logic_inside_route_layer():
+    action = Action(
+        type="write_file",
+        path="apps/api/app/routes/leads.py",
+        content=(
+            "from fastapi import APIRouter\n"
+            "router = APIRouter()\n"
+            "@router.post('/leads')\n"
+            "def create_lead(session):\n"
+            "    session.execute('select 1')\n"
+            "    return {'ok': True}\n"
+        ),
+    )
+    decision = evaluate_patch_guard(
+        actions=[action],
+        allowed_files=["apps/api/app/routes/leads.py"],
+        work_item_type="GENERATE_ROUTE",
+        work_item_payload={
+            "backend_topology_plan": {
+                "planned_files": ["apps/api/app/routes/leads.py"],
+                "routes": ["apps/api/app/routes/leads.py"],
+                "services": ["apps/api/app/services/leads_service.py"],
+                "repositories": ["apps/api/app/repositories/leads_repository.py"],
+                "capability_modules": ["apps/api/app/capabilities/crm_sync_binding.py"],
+                "allowed_capabilities": ["crm_sync"],
+            }
+        },
+    )
+    assert decision.ok is False
+    assert any("Routes must not include DB logic" in message for message in decision.violations)
+
+
+def test_patch_guard_rejects_oversized_backend_entrypoint_rewrite():
+    dense_backend = "\n".join([f"def handler_{idx}(): return {idx}" for idx in range(220)]) + "\n"
+    action = Action(type="write_file", path="apps/api/app/main.py", content=dense_backend)
+    decision = evaluate_patch_guard(
+        actions=[action],
+        allowed_files=["apps/api/app/main.py"],
+        work_item_type="CODE_BACKEND",
+        work_item_payload={
+            "backend_topology_plan": {
+                "planned_files": ["apps/api/app/main.py"],
+                "routes": [],
+                "services": [],
+                "repositories": [],
+                "capability_modules": [],
+                "allowed_capabilities": ["crm_sync"],
+            }
+        },
+    )
+    assert decision.ok is False
+    assert any("oversized entrypoint mutation" in message for message in decision.violations)
+
+
+def test_patch_guard_blocks_polish_rewrite_of_landing_page():
+    action = Action(
+        type="write_file",
+        path="apps/web/src/pages/LandingPage.vue",
+        content="<template><main>replaced</main></template>\n",
+    )
+    decision = evaluate_patch_guard(
+        actions=[action],
+        allowed_files=["apps/web/src/pages/LandingPage.vue"],
+        work_item_type="CODE_FRONTEND",
+        work_item_payload={
+            "mutation_class": "POLISH",
+            "allowed_operations": ["apply_patch"],
+            "forbidden_operations": ["replace_landing_page"],
+            "protected_files": ["apps/web/src/pages/LandingPage.vue"],
+            "zone_composer_required": True,
+        },
+    )
+    assert decision.ok is False
+    assert any("Mutation authority violation" in message or "Shell protection violation" in message for message in decision.violations)
+
+
+def test_patch_guard_allows_feature_zone_patch_without_explicit_zone_markers():
+    action = Action(
+        type="apply_patch",
+        path="apps/web/src/pages/LandingPage.vue",
+        patch=(
+            "diff --git a/apps/web/src/pages/LandingPage.vue b/apps/web/src/pages/LandingPage.vue\n"
+            "--- a/apps/web/src/pages/LandingPage.vue\n"
+            "+++ b/apps/web/src/pages/LandingPage.vue\n"
+            "@@ -1 +1 @@\n"
+            "-<template><main /></template>\n"
+            "+<template><main class='p-6' /></template>\n"
+        ),
+    )
+    decision = evaluate_patch_guard(
+        actions=[action],
+        allowed_files=["apps/web/src/pages/LandingPage.vue"],
+        work_item_type="CODE_FRONTEND",
+        work_item_payload={
+            "mutation_class": "FEATURE",
+            "allowed_operations": ["apply_patch", "write_file"],
+            "zone_composer_required": True,
+        },
+    )
+    assert decision.ok is True
+    assert not any("Zone composition violation" in message for message in decision.violations)
 
 
 def test_codex_executor_patch_parsers_preserve_index_html_paths():
@@ -3693,6 +4505,53 @@ def test_frontend_writefile_violations_detect_repeated_inline_sections_without_g
     assert any("repeated inline section patterns detected" in violation for violation in violations)
 
 
+def test_frontend_materialization_blocks_empty_primary_button_for_hero_cta_task():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="QUEUED",
+        payload={
+            "task_title": "Implement Hero Section with Primary CTA",
+            "goal": "Implement hero section with call-to-action button",
+            "target_files": ["index.html"],
+        },
+    )
+    patch = (
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -10,1 +10,2 @@\n"
+        "-  <PrimaryButton>Get Started</PrimaryButton>\n"
+        "+  <PrimaryButton></PrimaryButton>\n"
+        "+  <PrimaryButton tone=\"brand-primary\">Get Started</PrimaryButton>\n"
+    )
+    actions = [SimpleNamespace(type="apply_patch", path="index.html", patch=patch)]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("empty PrimaryButton" in violation for violation in violations)
+
+
+def test_frontend_materialization_blocks_negligible_hero_cta_delta():
+    executor = CodexExecutor(repo_root=Path.cwd())
+    work_item = WorkItem(
+        type="CODE_FRONTEND",
+        status="QUEUED",
+        payload={
+            "task_title": "Implement Hero Section with Primary CTA",
+            "goal": "Implement hero section with primary cta",
+            "target_files": ["index.html"],
+        },
+    )
+    patch = (
+        "--- a/index.html\n"
+        "+++ b/index.html\n"
+        "@@ -20,1 +20,1 @@\n"
+        "-  <PrimaryButton tone=\"secondary\">Request Demo</PrimaryButton>\n"
+        "+  <PrimaryButton tone=\"brand-accent\">Request Demo</PrimaryButton>\n"
+    )
+    actions = [SimpleNamespace(type="apply_patch", path="index.html", patch=patch)]
+    violations = executor._frontend_writefile_violations(work_item=work_item, actions=actions)
+    assert any("negligible or non-perceptible UI delta" in violation for violation in violations)
+
+
 def test_frontend_topology_rejects_non_governed_paths():
     actions = [SimpleNamespace(type="write_file", path="src/random/NewPanel.vue", content="<template><div /></template>")]
     violations = validate_frontend_topology(actions=actions, enforce=True)
@@ -3755,6 +4614,49 @@ def test_derive_frontend_topology_plan_for_static_root_scope():
     assert plan["root_file"] == "index.html"
     assert isinstance(plan.get("component_files"), list)
     assert any(str(path).endswith("HeroSection.vue") for path in plan["component_files"])
+
+
+def test_static_frontend_scope_accepts_vite_entrypoint_ts():
+    assert _is_static_frontend_scope({"target_files": ["apps/web/src/main.ts"]}) is True
+
+
+def test_target_files_from_payload_canonicalizes_apps_web_entrypoint_scope():
+    resolved = _target_files_from_payload(
+        {
+            "package_affinity": "apps/web",
+            "target_files": ["src/main.ts", "index.html"],
+        }
+    )
+    assert "apps/web/src/main.ts" in resolved
+    assert "apps/web/index.html" in resolved
+    assert "src/main.ts" not in resolved
+    assert "index.html" not in resolved
+
+
+def test_frontend_scope_sanitizer_drops_root_component_files():
+    scoped = _sanitize_frontend_scope_paths(
+        [
+            "App.vue",
+            "LandingPage.vue",
+            "apps/web/src/pages/LandingPage.vue",
+            "apps/web/src/main.ts",
+        ]
+    )
+    assert "App.vue" not in scoped
+    assert "LandingPage.vue" not in scoped
+    assert "apps/web/src/pages/LandingPage.vue" in scoped
+    assert "apps/web/src/main.ts" in scoped
+
+
+def test_derive_frontend_topology_plan_for_vite_main_ts_scope():
+    work_item = WorkItem(type="CODE_FRONTEND", status="QUEUED", payload={"target_files": ["apps/web/src/main.ts"]})
+    plan = _derive_frontend_topology_plan(
+        work_item=work_item,
+        payload=work_item.payload,
+        target_files=["apps/web/src/main.ts"],
+    )
+    assert isinstance(plan, dict)
+    assert plan["root_file"] == "apps/web/src/main.ts"
 
 
 def test_frontend_writefile_violations_require_planned_component_writes():

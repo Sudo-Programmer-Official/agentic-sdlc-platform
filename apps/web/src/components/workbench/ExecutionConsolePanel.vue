@@ -53,6 +53,116 @@
       </div>
     </div>
 
+    <div v-if="ledger || stageTelemetry.length" class="execution-console__insights">
+      <div v-if="ledger" class="execution-console__insight-card">
+        <div class="execution-console__sidebar-title">Targeting Metrics</div>
+        <div class="execution-console__metrics-grid">
+          <div class="execution-console__metric-chip">
+            <span class="execution-console__metric-label">Targeted stages</span>
+            <strong>{{ ledger.targeted_stage_count || 0 }}</strong>
+          </div>
+          <div class="execution-console__metric-chip">
+            <span class="execution-console__metric-label">Component reuse</span>
+            <strong>{{ formatPercent(ledger.component_reuse_ratio) }}</strong>
+          </div>
+          <div class="execution-console__metric-chip">
+            <span class="execution-console__metric-label">Module reuse</span>
+            <strong>{{ formatPercent(ledger.module_reuse_ratio) }}</strong>
+          </div>
+          <div class="execution-console__metric-chip">
+            <span class="execution-console__metric-label">Preview continuity</span>
+            <strong>{{ formatPercent(ledger.preview_continuity_score) }}</strong>
+          </div>
+          <div class="execution-console__metric-chip">
+            <span class="execution-console__metric-label">Avg target margin</span>
+            <strong>{{ formatSignedDecimal(ledger.avg_targeting_confidence_delta) }}</strong>
+          </div>
+        </div>
+        <div class="execution-console__insight-meta">
+          Avg reuse {{ formatPercent(ledger.avg_reuse_ratio) }}
+          · package drift {{ ledger.package_drift_count || 0 }}
+          · monolith risk {{ formatDecimal(ledger.monolith_risk_max) }}
+          · decisive {{ ledger.decisive_targeting_count || 0 }}
+          · moderate {{ ledger.moderate_targeting_count || 0 }}
+          · close {{ ledger.close_targeting_count || 0 }}
+        </div>
+      </div>
+
+      <div v-if="stageTelemetry.length" class="execution-console__insight-card">
+        <div class="execution-console__sidebar-title">Recent Stage Targeting</div>
+        <div class="execution-console__sidebar-list">
+          <article
+            v-for="entry in stageTelemetry.slice(0, 6)"
+            :key="`${entry.stage_name}-${entry.created_at || entry.lifecycle_state}`"
+            class="execution-console__sidebar-item"
+          >
+            <div class="execution-console__sidebar-item-top">
+              <div class="execution-console__sidebar-item-title">{{ humanizeStatus(entry.stage_name) }}</div>
+              <span class="execution-console__mini-pill" :class="statusClass(entry.lifecycle_state)">
+                {{ humanizeStatus(entry.lifecycle_state) }}
+              </span>
+            </div>
+            <div class="execution-console__sidebar-item-command">
+              {{ entry.targeting_strategy ? humanizeStatus(entry.targeting_strategy) : "No targeting strategy" }}
+              <span v-if="entry.package_affinity"> · {{ entry.package_affinity }}</span>
+              <span v-if="entry.layer_affinity"> · {{ entry.layer_affinity }}</span>
+            </div>
+            <div class="execution-console__sidebar-item-meta">
+              targets {{ entry.target_file_count || 0 }}
+              · reused {{ entry.selected_existing_files_count || 0 }}
+              <span v-if="entry.neighbor_files_count"> · neighbors {{ entry.neighbor_files_count }}</span>
+              · reuse {{ formatPercent(entry.reuse_ratio) }}
+              <span v-if="entry.topology_zone"> · zone {{ entry.topology_zone }}</span>
+            </div>
+            <div v-if="entry.primary_targeting_reasons?.length" class="execution-console__reason-row">
+              <span
+              v-for="reason in entry.primary_targeting_reasons.slice(0, 4)"
+              :key="`${entry.stage_name}-${reason}`"
+                class="execution-console__reason-chip"
+              >
+                {{ humanizeReason(reason) }}
+              </span>
+            </div>
+            <div
+              v-if="entry.targeting_confidence_delta !== null && entry.targeting_confidence_delta !== undefined"
+              class="execution-console__candidate-delta"
+              :class="confidenceClass(entry.targeting_confidence_label)"
+            >
+              Winner margin
+              <strong>{{ formatSignedDecimal(entry.targeting_confidence_delta) }}</strong>
+              <span v-if="entry.targeting_confidence_label" class="execution-console__candidate-delta-label">
+                {{ humanizeStatus(entry.targeting_confidence_label) }}
+              </span>
+            </div>
+            <details v-if="entry.top_ranked_candidates?.length" class="execution-console__candidate-drawer">
+              <summary class="execution-console__candidate-summary">Compare ranked candidates</summary>
+              <div class="execution-console__candidate-list">
+                <div
+                  v-for="candidate in entry.top_ranked_candidates.slice(0, 4)"
+                  :key="`${entry.stage_name}-${candidate.path}`"
+                  class="execution-console__candidate-item"
+                >
+                  <div class="execution-console__candidate-path">
+                    {{ shortPath(candidate.path) }}
+                    <span class="execution-console__candidate-score">score {{ candidate.score ?? "—" }}</span>
+                  </div>
+                  <div v-if="Array.isArray(candidate.reasons) && candidate.reasons.length" class="execution-console__reason-row">
+                    <span
+                      v-for="reason in candidate.reasons.slice(0, 4)"
+                      :key="`${candidate.path}-${reason}`"
+                      class="execution-console__reason-chip execution-console__reason-chip--muted"
+                    >
+                      {{ humanizeReason(reason) }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </article>
+        </div>
+      </div>
+    </div>
+
     <div class="execution-console__grid">
       <article class="execution-console__terminal">
         <div class="execution-console__terminal-top">
@@ -183,8 +293,10 @@ const summary = computed(() => props.consoleData?.summary || {});
 const environment = computed(() => props.consoleData?.environment || {});
 const commandRows = computed(() => (Array.isArray(props.consoleData?.commands) ? props.consoleData.commands : []));
 const stepRows = computed(() => (Array.isArray(props.consoleData?.steps) ? props.consoleData.steps : []));
+const stageTelemetry = computed(() => (Array.isArray(props.consoleData?.stage_telemetry) ? props.consoleData.stage_telemetry : []));
 const executionContract = computed(() => summary.value.execution_contract || null);
 const executionBudget = computed(() => executionContract.value?.budget || null);
+const ledger = computed(() => summary.value.ledger || null);
 const primaryCommand = computed(() => commandRows.value.find((command: any) => command.status === "RUNNING") || commandRows.value[0] || null);
 const primaryStatus = computed(() => String(primaryCommand.value?.status || summary.value.run_status || props.runStatus || "IDLE"));
 const primaryStatusLabel = computed(() => humanizeStatus(primaryStatus.value));
@@ -318,9 +430,47 @@ function humanizeStatus(value: string) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function humanizeReason(value: string) {
+  return String(value || "")
+    .replace(/[:]/g, " ")
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function confidenceClass(value?: string | null) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "decisive") return "execution-console__candidate-delta--decisive";
+  if (normalized === "moderate") return "execution-console__candidate-delta--moderate";
+  if (normalized === "close") return "execution-console__candidate-delta--close";
+  return "";
+}
+
+function shortPath(value?: string | null) {
+  if (!value) return "Unknown target";
+  const normalized = String(value);
+  const parts = normalized.split("/");
+  return parts.length <= 4 ? normalized : parts.slice(-4).join("/");
+}
+
 function formatBudgetCents(value?: number | null) {
   if (typeof value !== "number" || Number.isNaN(value)) return "—";
   return `${value.toFixed(2)}c`;
+}
+
+function formatDecimal(value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return value.toFixed(2);
+}
+
+function formatSignedDecimal(value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function formatPercent(value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${Math.round(value * 100)}%`;
 }
 
 function formatTokenBudget(used?: number | null, max?: number | null) {
@@ -564,6 +714,52 @@ function humanDuration(durationMs: number) {
   overflow: hidden;
 }
 
+.execution-console__insights {
+  margin-top: 1rem;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+}
+
+.execution-console__insight-card {
+  border-radius: 18px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.95rem 1rem;
+}
+
+[data-theme="light"] .execution-console__insight-card {
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.execution-console__metrics-grid {
+  margin-top: 0.8rem;
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+}
+
+.execution-console__metric-chip {
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0.75rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.execution-console__metric-label {
+  font-size: 0.78rem;
+  color: var(--text-soft);
+}
+
+.execution-console__insight-meta {
+  margin-top: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+
 .execution-console__terminal {
   min-width: 0;
   border-radius: 22px;
@@ -690,6 +886,107 @@ function humanDuration(durationMs: number) {
   border: 1px solid rgba(148, 163, 184, 0.16);
   background: rgba(255, 255, 255, 0.03);
   padding: 0.8rem 0.85rem;
+}
+
+.execution-console__reason-row {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.execution-console__reason-chip {
+  border-radius: 999px;
+  border: 1px solid rgba(91, 156, 255, 0.22);
+  background: rgba(91, 156, 255, 0.12);
+  padding: 0.18rem 0.5rem;
+  font-size: 0.72rem;
+  color: var(--text-soft);
+}
+
+.execution-console__reason-chip--muted {
+  border-color: rgba(148, 163, 184, 0.2);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.execution-console__candidate-drawer {
+  margin-top: 0.65rem;
+}
+
+.execution-console__candidate-delta {
+  margin-top: 0.55rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-soft);
+}
+
+.execution-console__candidate-delta--decisive {
+  color: #156f4a;
+}
+
+.execution-console__candidate-delta--moderate {
+  color: #8a5b00;
+}
+
+.execution-console__candidate-delta--close {
+  color: #8c2f39;
+}
+
+.execution-console__candidate-delta-label {
+  border-radius: 999px;
+  padding: 0.12rem 0.4rem;
+  border: 1px solid rgba(91, 156, 255, 0.2);
+  background: rgba(91, 156, 255, 0.08);
+}
+
+.execution-console__candidate-delta--decisive .execution-console__candidate-delta-label {
+  border-color: rgba(21, 111, 74, 0.22);
+  background: rgba(21, 111, 74, 0.12);
+}
+
+.execution-console__candidate-delta--moderate .execution-console__candidate-delta-label {
+  border-color: rgba(138, 91, 0, 0.22);
+  background: rgba(138, 91, 0, 0.12);
+}
+
+.execution-console__candidate-delta--close .execution-console__candidate-delta-label {
+  border-color: rgba(140, 47, 57, 0.22);
+  background: rgba(140, 47, 57, 0.12);
+}
+
+.execution-console__candidate-summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  user-select: none;
+}
+
+.execution-console__candidate-list {
+  margin-top: 0.6rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.execution-console__candidate-item {
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 0.55rem 0.65rem;
+}
+
+.execution-console__candidate-path {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  word-break: break-word;
+}
+
+.execution-console__candidate-score {
+  white-space: nowrap;
 }
 
 .execution-console__sidebar-item-title {

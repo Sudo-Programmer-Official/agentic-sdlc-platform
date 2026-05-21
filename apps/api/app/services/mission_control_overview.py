@@ -478,6 +478,42 @@ def _build_preview_panel(
         backend_url=backend.get("url") if backend else None,
         frontend_port=int(frontend.get("port")) if frontend and frontend.get("port") is not None else None,
         backend_port=int(backend.get("port")) if backend and backend.get("port") is not None else None,
+        runtime_classification=str(preview_summary.get("runtime_classification") or "") or None,
+        preview_strategy=str(preview_summary.get("preview_strategy") or "") or None,
+        active_preview_command=str(preview_summary.get("active_preview_command") or "") or None,
+        upstream_preview_port=(
+            int(preview_summary.get("upstream_preview_port"))
+            if isinstance(preview_summary.get("upstream_preview_port"), int)
+            else None
+        ),
+        frontend_install_status=(
+            str((preview_summary.get("diagnostics") or {}).get("frontend_install_status") or "") or None
+            if isinstance(preview_summary.get("diagnostics"), dict)
+            else None
+        ),
+        backend_install_status=(
+            str((preview_summary.get("diagnostics") or {}).get("backend_install_status") or "") or None
+            if isinstance(preview_summary.get("diagnostics"), dict)
+            else None
+        ),
+        runtime_boot_duration_seconds=(
+            float((preview_summary.get("diagnostics") or {}).get("runtime_boot_duration_seconds"))
+            if isinstance(preview_summary.get("diagnostics"), dict)
+            and isinstance((preview_summary.get("diagnostics") or {}).get("runtime_boot_duration_seconds"), (int, float))
+            else None
+        ),
+        dependency_repair_attempts=(
+            int((preview_summary.get("diagnostics") or {}).get("dependency_repair_attempts") or 0)
+            if isinstance(preview_summary.get("diagnostics"), dict)
+            else 0
+        ),
+        cached_hydration_state=(
+            (preview_summary.get("diagnostics") or {}).get("cached_hydration_state")
+            if isinstance(preview_summary.get("diagnostics"), dict)
+            and isinstance((preview_summary.get("diagnostics") or {}).get("cached_hydration_state"), dict)
+            else {}
+        ),
+        preview_diagnostics=preview_summary.get("diagnostics") if isinstance(preview_summary.get("diagnostics"), dict) else {},
         frontend_log_path=frontend.get("log_path") if frontend else None,
         backend_log_path=backend.get("log_path") if backend else None,
         preview_checked_at=datetime.fromisoformat(preview_summary["last_checked_at"]) if isinstance(preview_summary.get("last_checked_at"), str) else None,
@@ -517,6 +553,13 @@ def _is_delivery_candidate(
             preview_status != "NOT_CONFIGURED",
         )
     )
+
+
+def _has_preview_state(run: Run | None) -> bool:
+    if run is None or not isinstance(run.summary, dict):
+        return False
+    preview_summary = run.summary.get("preview")
+    return isinstance(preview_summary, dict) and bool(preview_summary)
 
 
 def _build_strategy_learning(runs: list[Run]) -> list[MissionControlStrategyInsight]:
@@ -889,17 +932,27 @@ async def build_mission_control_overview(
         )
         workspace_name = workspace.name if workspace else None
     runs = list(run_by_id.values())
-    # Preview and delivery controls should follow the latest deliverable run
-    # (branch push / patch-bearing / PR-capable context), not the latest noop.
+    preview_summary = latest_summary
+    preview_run = latest_run
+    preview_patch = latest_patch
+    preview_change_impact = change_impact
+    # Prefer the latest focused run when it has explicit preview state. Only
+    # fall back to the latest deliverable run when the latest run has no preview
+    # lifecycle at all.
+    if not _has_preview_state(preview_run) and delivery_summary is not None:
+        preview_summary = delivery_summary
+        preview_run = delivery_run
+        preview_patch = delivery_patch
+        preview_change_impact = delivery_change_impact
     preview_panel = _build_preview_panel(
         project,
         workspace_name,
         project_repo,
         preview_profile,
-        delivery_summary,
-        delivery_patch,
-        delivery_change_impact,
-        delivery_run,
+        preview_summary,
+        preview_patch,
+        preview_change_impact,
+        preview_run,
     )
     architecture_summary = await summarize_architecture_profile(
         session,

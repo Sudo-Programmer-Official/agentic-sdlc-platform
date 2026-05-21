@@ -41,6 +41,8 @@ from app.db.models.admin_audit_log import AdminAuditLog
 from app.db.models.impersonation_session import ImpersonationSession
 from app.db.models.run_summary import RunSummary
 from app.db.models.recovery_attempt import RecoveryAttempt
+from app.db.models.runtime_execution_ledger import RunLedger, StageLedger, CostLedger, PatchLedger, RecoveryLedger
+from app.db.models.runtime_estimation import EstimationFeatureSnapshot, EstimationOutcomeSnapshot
 from app.db.models.recovery_memory import RecoveryMemoryProfile
 from app.db.models.project_evolution import ProjectEvolutionEvent, MemorySummaryArtifact
 from app.db.models.improvement_request import ImprovementRequest
@@ -122,6 +124,13 @@ __all__ = [
     "WorkspaceEntitlement",
     "RunSummary",
     "RecoveryAttempt",
+    "RunLedger",
+    "StageLedger",
+    "CostLedger",
+    "PatchLedger",
+    "RecoveryLedger",
+    "EstimationFeatureSnapshot",
+    "EstimationOutcomeSnapshot",
     "RecoveryMemoryProfile",
     "ProjectEvolutionEvent",
     "MemorySummaryArtifact",

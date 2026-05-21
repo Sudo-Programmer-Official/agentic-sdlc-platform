@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "source": "filesystem_scan",
+  "components": {
+    "CTAZone": {
+      "path": "apps/web/src/components/zones/CTAZone.vue",
+      "primitive_type": "zone",
+      "topology_role": "zone",
+      "zone_owner": "CTAZone"
+    },
+    "ContentGrid": {
+      "path": "apps/web/src/components/ui/ContentGrid.vue",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive",
+      "zone_owner": "shared"
+    },
+    "FeatureZone": {
+      "path": "apps/web/src/components/zones/FeatureZone.vue",
+      "primitive_type": "zone",
+      "topology_role": "zone",
+      "zone_owner": "FeatureZone"
+    },
+    "Footer": {
+      "path": "apps/web/src/components/layout/Footer.vue",
+      "primitive_type": "layout",
+      "topology_role": "shell_component",
+      "zone_owner": "shared"
+    },
+    "HeroZone": {
+      "path": "apps/web/src/components/zones/HeroZone.vue",
+      "primitive_type": "zone",
+      "topology_role": "zone",
+      "zone_owner": "HeroZone"
+    },
+    "MobileNav": {
+      "path": "apps/web/src/components/layout/MobileNav.vue",
+      "primitive_type": "layout",
+      "topology_role": "shell_component",
+      "zone_owner": "shared"
+    },
+    "Navbar": {
+      "path": "apps/web/src/components/layout/Navbar.vue",
+      "primitive_type": "layout",
+      "topology_role": "shell_component",
+      "zone_owner": "shared"
+    },
+    "PageShell": {
+      "path": "apps/web/src/layouts/PageShell.vue",
+      "primitive_type": "feature_component",
+      "topology_role": "shell",
+      "zone_owner": "shared"
+    },
+    "PrimaryButton": {
+      "path": "apps/web/src/components/ui/PrimaryButton.vue",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive",
+      "zone_owner": "shared"
+    },
+    "SectionContainer": {
+      "path": "apps/web/src/components/ui/SectionContainer.vue",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive",
+      "zone_owner": "shared"
+    },
+    "SectionHeading": {
+      "path": "apps/web/src/components/ui/SectionHeading.vue",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive",
+      "zone_owner": "shared"
+    },
+    "Stack": {
+      "path": "apps/web/src/components/ui/Stack.vue",
+      "primitive_type": "primitive",
+      "topology_role": "layout_primitive",
+      "zone_owner": "shared"
+    },
+    "TestimonialsZone": {
+      "path": "apps/web/src/components/zones/TestimonialsZone.vue",
+      "primitive_type": "zone",
+      "topology_role": "zone",
+      "zone_owner": "TestimonialsZone"
+    }
+  }
+}

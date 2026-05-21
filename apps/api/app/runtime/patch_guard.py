@@ -32,6 +32,9 @@ _BACKEND_COMPOSITION_WORK_ITEM_TYPES = {
     "GENERATE_REPOSITORY",
     "GENERATE_CAPABILITY_BINDING",
 }
+_MONOLITH_BACKEND_ENTRYPOINTS = {"app.py", "main.py", "apps/api/app/main.py"}
+_SHELL_INFRA_FILES = {"apps/web/src/App.vue", "apps/web/src/layouts/PageShell.vue", "apps/web/src/pages/LandingPage.vue"}
+_LANDING_PAGE_FILE = "apps/web/src/pages/LandingPage.vue"
 
 
 def _normalize_path(path: str) -> str:
@@ -53,6 +56,19 @@ def _path_matches_prefix(path: str, prefix: str) -> bool:
     if len(prefix_parts) > len(path_parts):
         return False
     return path_parts[: len(prefix_parts)] == prefix_parts
+
+
+def _is_allowed_path(path: str, allowed_paths: list[str]) -> bool:
+    normalized_path = _normalize_path(path)
+    for allowed in allowed_paths:
+        normalized_allowed = _normalize_path(allowed)
+        if not normalized_allowed:
+            continue
+        if normalized_path == normalized_allowed:
+            return True
+        if not PurePosixPath(normalized_allowed).suffix and _path_matches_prefix(normalized_path, normalized_allowed):
+            return True
+    return False
 
 
 def _matching_zones(paths: list[str], zones: list[str]) -> list[str]:
@@ -513,7 +529,7 @@ def evaluate_patch_guard(
         )
 
     if resolved_allowed_files:
-        extra_files = [path for path in touched_files if path not in resolved_allowed_files]
+        extra_files = [path for path in touched_files if not _is_allowed_path(path, resolved_allowed_files)]
         if extra_files:
             violations.append(
                 "Patch touches files outside the planned scope: "
@@ -570,6 +586,61 @@ def evaluate_patch_guard(
         )
     item_type = str(work_item_type or "").strip().upper()
     payload = work_item_payload if isinstance(work_item_payload, dict) else {}
+    mutation_class = str(payload.get("mutation_class") or "").strip().upper()
+    allowed_ops = {
+        str(item).strip()
+        for item in _coerce_string_list(payload.get("allowed_operations"))
+        if str(item).strip()
+    }
+    forbidden_ops = {
+        str(item).strip()
+        for item in _coerce_string_list(payload.get("forbidden_operations"))
+        if str(item).strip()
+    }
+    protected_files = {
+        _normalize_path(item)
+        for item in _coerce_string_list(payload.get("protected_files"))
+        if str(item).strip()
+    } | _SHELL_INFRA_FILES
+    zone_composer_required = bool(payload.get("zone_composer_required"))
+    if allowed_ops or forbidden_ops:
+        for action in actions:
+            action_type = str(action.type or "").strip()
+            if action_type and allowed_ops and action_type not in allowed_ops:
+                violations.append(f"Mutation authority violation: operation '{action_type}' is not allowed for class {mutation_class or 'UNKNOWN'}.")
+            if action_type and action_type in forbidden_ops:
+                violations.append(f"Mutation authority violation: operation '{action_type}' is forbidden for class {mutation_class or 'UNKNOWN'}.")
+    for action in actions:
+        path = _normalize_path(action.path) if isinstance(action.path, str) and action.path.strip() else None
+        if not path:
+            continue
+        if action.type == "delete_file" and any(
+            _path_matches_prefix(path, prefix)
+            for prefix in (
+                "apps/api/app",
+                "apps/web/src",
+                "runtime-contracts",
+                "runtime-templates",
+            )
+        ):
+            violations.append(f"Destructive delete violation: {path} cannot be deleted by autonomous runs.")
+        landing_mutation_class = mutation_class in {"FEATURE", "POLISH", "RECOVERY"}
+        is_landing_page = path == _LANDING_PAGE_FILE
+        if path in protected_files and mutation_class != "FOUNDATION":
+            if action.type == "write_file":
+                if not (is_landing_page and landing_mutation_class):
+                    violations.append(
+                        f"Shell protection violation: {path} is infrastructure-owned and cannot be replaced by {mutation_class or 'NON_FOUNDATION'} tasks."
+                    )
+        if zone_composer_required and is_landing_page and action.type == "write_file":
+            if not landing_mutation_class:
+                violations.append("Zone composition violation: LandingPage.vue must be patched by zone markers, not rewritten.")
+        if zone_composer_required and is_landing_page and action.type == "apply_patch":
+            if landing_mutation_class:
+                continue
+            patch_text = action.patch or ""
+            if "<!-- zone:" not in patch_text:
+                violations.append("Zone composition violation: LandingPage.vue patch is missing required zone markers.")
     topology = payload.get("backend_topology_plan") if isinstance(payload.get("backend_topology_plan"), dict) else None
     if item_type in _BACKEND_COMPOSITION_WORK_ITEM_TYPES and isinstance(topology, dict):
         planned_files = [
@@ -598,6 +669,10 @@ def evaluate_patch_guard(
         disallowed_cap_hits: list[str] = []
         for path, lines in lines_by_file.items():
             lowered_lines = "\n".join(lines).lower()
+            if path in _MONOLITH_BACKEND_ENTRYPOINTS and len(lines) > 140:
+                layer_contract_hits.append(
+                    f"{path} oversized entrypoint mutation ({len(lines)} added lines); split changes into route/service/repository modules"
+                )
             if path in route_files:
                 if any(token in lowered_lines for token in ("session.execute(", "create_engine(", "select(", "insert(", "update(", "delete(")):
                     route_db_hits.append(path)

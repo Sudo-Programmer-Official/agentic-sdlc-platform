@@ -55,6 +55,7 @@ class ProjectPreviewProfileOut(BaseModel):
 
 class RunPreviewLaunchRequest(BaseModel):
     reuse_if_healthy: bool = True
+    repair_action: str | None = None
 
 
 class RunPreviewServiceRef(BaseModel):
@@ -90,3 +91,13 @@ class RunPreviewOut(BaseModel):
     verification_note: str | None = None
     profile_configured: bool = False
     repository_connected: bool = False
+    runtime_classification: str | None = None
+    preview_strategy: str | None = None
+    active_preview_command: str | None = None
+    upstream_preview_port: int | None = None
+    frontend_install_status: str | None = None
+    backend_install_status: str | None = None
+    runtime_boot_duration_seconds: float | None = None
+    dependency_repair_attempts: int = 0
+    cached_hydration_state: dict[str, object] = Field(default_factory=dict)
+    preview_diagnostics: dict[str, object] = Field(default_factory=dict)

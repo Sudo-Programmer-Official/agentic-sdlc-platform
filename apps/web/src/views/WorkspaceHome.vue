@@ -145,19 +145,71 @@
           <span class="topbar-chip">New</span>
         </div>
         <div class="mt-5 grid gap-3">
-          <el-input ref="projectNameInput" v-model="projectName" placeholder="Project name" />
-          <el-input v-model="projectDescription" placeholder="Describe the mission or product area" />
-          <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-            <div class="text-xs uppercase tracking-wide text-slate-400">Starter Blueprint</div>
-            <el-select v-model="starterBlueprintPreset" class="mt-2 w-full">
-              <el-option label="Vue + FastAPI SaaS Platform (Recommended)" value="vue_fastapi_saas" />
+          <el-steps :active="onboardingStep" finish-status="success" simple class="onboarding-stepper">
+            <el-step title="Blueprint" />
+            <el-step title="Stack" />
+            <el-step title="Mission" />
+          </el-steps>
+
+          <div v-if="onboardingStep === 0" class="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div class="text-xs uppercase tracking-wide text-slate-400">Setup Experience</div>
+            <el-radio-group v-model="setupExperience" class="mt-2">
+              <el-radio label="recommended">
+                Recommended Setup: platform initializes architecture, runtime, and defaults automatically.
+              </el-radio>
+              <el-radio label="existing_repo">
+                Start From Existing Repo: create project now, connect/import repository next.
+              </el-radio>
+              <el-radio label="minimal">
+                Minimal Prototype: lightweight setup for quick experimentation.
+              </el-radio>
+              <el-radio label="advanced">
+                Advanced Configuration: power-user flow with manual architecture control.
+              </el-radio>
+            </el-radio-group>
+            <el-select v-model="repoType" class="mt-3 w-full">
+              <el-option label="Create New Repository" value="new_repo" />
+              <el-option label="Use Existing Repository" value="existing_repo" />
             </el-select>
-            <div class="mt-2 text-xs text-slate-500">
-              Project topology, architecture contract, and initial setup tasks are derived automatically.
+            <div class="mt-3 text-xs text-slate-500">
+              You can start fast with Recommended and switch to advanced controls later.
             </div>
           </div>
+
+          <div v-else-if="onboardingStep === 1" class="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div class="text-xs uppercase tracking-wide text-slate-400">Stack and Runtime</div>
+            <el-select v-model="starterBlueprintPreset" class="mt-2 w-full">
+              <el-option label="Vue + FastAPI SaaS Platform (Recommended)" value="vue_fastapi_saas" />
+              <el-option label="Vue + Element Plus SaaS Platform" value="vue_element_plus_saas" />
+            </el-select>
+            <el-select v-model="deploymentProfile" class="mt-2 w-full">
+              <el-option label="Local Preview (Recommended)" value="local_preview" />
+            </el-select>
+            <div class="mt-3 text-xs text-slate-500">
+              Additional framework adapters can be added later without changing this setup flow.
+            </div>
+          </div>
+
+          <div v-else class="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div class="text-xs uppercase tracking-wide text-slate-400">Mission Details</div>
+            <el-input ref="projectNameInput" v-model="projectName" placeholder="Project name" class="mt-2" />
+            <el-input v-model="projectDescription" placeholder="Describe the mission or product area" class="mt-2" />
+            <div class="mt-3 text-xs text-slate-500">
+              We use this to scope initial files and generate a component/module-aware DAG.
+            </div>
+            <div class="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+              <div class="font-semibold text-slate-700">Resulting Project Intent Contract</div>
+              <div class="mt-1">{{ projectIntentPreview }}</div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-2">
+            <el-button v-if="onboardingStep > 0" @click="onboardingStep -= 1">Back</el-button>
+            <el-button v-if="onboardingStep < 2" type="primary" @click="onboardingStep += 1">Next</el-button>
+          </div>
+
           <div class="flex flex-wrap gap-3">
-            <el-button type="primary" :loading="loading" @click="createProject">Create Project</el-button>
+            <el-button type="primary" :loading="loading" :disabled="onboardingStep < 2" @click="createProject">Create Project</el-button>
             <el-button plain @click="seedDemoContent">Use Demo Values</el-button>
           </div>
           <div v-if="error" class="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-600">
@@ -298,11 +350,40 @@ const projectDescription = ref("");
 const projectId = ref("");
 const loading = ref(false);
 const error = ref("");
-const starterBlueprintPreset = ref("vue_fastapi_saas");
+const onboardingStep = ref(0);
+const setupExperience = ref<"recommended" | "existing_repo" | "minimal" | "advanced">("recommended");
+const starterBlueprintPreset = ref<"vue_fastapi_saas" | "vue_element_plus_saas">("vue_fastapi_saas");
+const deploymentProfile = ref("local_preview");
+const repoType = ref<"new_repo" | "existing_repo">("new_repo");
 const recentProjects = ref<Array<{ id: string; name: string }>>([]);
 const workspaces = ref<Array<{ id: string; name: string }>>([]);
 const selectedWorkspaceId = ref("");
 const environment = ref("production");
+
+const STARTER_PRESET_MAP: Record<
+  "vue_fastapi_saas" | "vue_element_plus_saas",
+  {
+    label: string;
+    stack: string;
+    frontend_stack: string;
+    starter_stack_preset_key: string;
+    ui_library?: string;
+  }
+> = {
+  vue_fastapi_saas: {
+    label: "Vue + FastAPI SaaS Platform (Recommended)",
+    stack: "Vue + FastAPI",
+    frontend_stack: "vue_vite",
+    starter_stack_preset_key: "vue_fastapi",
+  },
+  vue_element_plus_saas: {
+    label: "Vue + Element Plus SaaS Platform",
+    stack: "Vue + Element Plus",
+    frontend_stack: "vue_vite_element_plus",
+    starter_stack_preset_key: "vue_element_plus",
+    ui_library: "element-plus",
+  },
+};
 
 const connectedProjects = computed(() => recentProjects.value.length);
 const systemStatusLabel = computed(() => (recentProjects.value.length ? "Ready" : "Bootstrapping"));
@@ -312,7 +393,19 @@ const systemStatusDetail = computed(() =>
     : "Create or open a project to initialize the workspace."
 );
 const envLabel = computed(() => environment.value || (uiTheme.mode === "dark" ? "production" : "local"));
-const onboardingProgress = computed(() => (recentProjects.value.length > 0 ? "67% complete" : "33% complete"));
+const onboardingProgress = computed(() => `${Math.round(((onboardingStep.value + 1) / 3) * 100)}% complete`);
+const projectIntentPreview = computed(() => {
+  const setupMap: Record<string, string> = {
+    recommended: "Recommended setup with architecture + runtime initialization.",
+    existing_repo: "Existing repository path with import/connect-first onboarding.",
+    minimal: "Prototype-first setup with minimal automatic scaffolding.",
+    advanced: "Manual architecture control with explicit post-create setup.",
+  };
+  const preset = STARTER_PRESET_MAP[starterBlueprintPreset.value];
+  const stack = preset?.stack || "Custom stack";
+  const uiLibrary = preset?.ui_library ? ` UI: ${preset.ui_library}.` : "";
+  return `${setupMap[setupExperience.value]} Repo: ${repoType.value}. Stack: ${stack}.${uiLibrary} Preview: ${deploymentProfile.value}.`;
+});
 
 onMounted(() => {
   void hydrateGitHubInstallRedirect();
@@ -511,16 +604,38 @@ async function createProject() {
     ElMessage.warning(error.value);
     return;
   }
+  if (onboardingStep.value < 2) {
+    error.value = "Complete all onboarding steps before creating the project.";
+    ElMessage.warning(error.value);
+    return;
+  }
   error.value = "";
   loading.value = true;
   try {
+    const starterEnabled = setupExperience.value === "recommended";
+    const selectedStarterPreset = STARTER_PRESET_MAP[starterBlueprintPreset.value];
+    const projectIntent = {
+      setup_experience: setupExperience.value,
+      repo_type: repoType.value,
+      architecture_mode: starterEnabled ? "guided" : "manual",
+      repo_layout: starterEnabled ? "monorepo" : "unspecified",
+      frontend_stack: selectedStarterPreset?.frontend_stack || "unknown",
+      backend_stack: starterEnabled ? "fastapi" : "unknown",
+      ui_library: selectedStarterPreset?.ui_library || null,
+      deployment_profile: deploymentProfile.value || "local_preview",
+      runtime_defaults: {
+        component_driven_frontend: true,
+        module_driven_backend: true,
+      },
+    };
     const data = await createProjectRequest({
       name: projectName.value,
       description: projectDescription.value || null,
-      starter_blueprint_enabled: true,
+      starter_blueprint_enabled: starterEnabled,
       starter_blueprint_key: "fullstack_monorepo",
-      starter_stack_preset_key: starterBlueprintPreset.value === "vue_fastapi_saas" ? "vue_fastapi" : "vue_fastapi",
-      starter_deployment_profile: "local_preview",
+      starter_stack_preset_key: selectedStarterPreset?.starter_stack_preset_key || "vue_fastapi",
+      starter_deployment_profile: deploymentProfile.value || "local_preview",
+      project_intent: projectIntent,
     });
     updateProjectContext({
       projectId: data.id,
@@ -564,8 +679,9 @@ function openKnownProject(id: string) {
 }
 
 function handlePrimaryCreateAction() {
-  if (!projectName.value.trim()) {
-    error.value = "Enter a project name to create a new workspace.";
+  if (onboardingStep.value < 2) {
+    onboardingStep.value = 2;
+    error.value = "Finish mission details, then create the project.";
     focusCreateProjectForm();
     ElMessage.warning(error.value);
     return;
@@ -587,6 +703,7 @@ function focusProjectInput() {
 function seedDemoContent() {
   projectName.value = "Autonomous Bug Fix Control Plane";
   projectDescription.value = "Governed repo operator flow with healing, replay, comparison, and PR creation.";
+  onboardingStep.value = 2;
 }
 
 function loadRecentProjects() {
@@ -851,6 +968,13 @@ function saveRecentProjects(projects: Array<{ id: string; name: string }>) {
   .landing-guided-flow__grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
+
+.onboarding-stepper {
+  border-radius: 14px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-soft);
+  padding: 0.2rem;
 }
 
 .landing-step {

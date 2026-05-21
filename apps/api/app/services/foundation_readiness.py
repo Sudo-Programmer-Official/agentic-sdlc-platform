@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ArchitectureProfile, ProjectRepository
+from app.db.models import ArchitectureProfile, ProjectRepository, Run
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -57,6 +57,13 @@ def _check(key: str, label: str, passed: bool, detail: str) -> dict[str, str]:
     }
 
 
+def _preview_summary(run: Run | None) -> dict[str, Any]:
+    if run is None or not isinstance(run.summary, dict):
+        return {}
+    preview = run.summary.get("preview")
+    return dict(preview) if isinstance(preview, dict) else {}
+
+
 async def build_foundation_readiness(
     session: AsyncSession,
     *,
@@ -75,14 +82,37 @@ async def build_foundation_readiness(
             ArchitectureProfile.tenant_id == tenant_id,
         )
     )
+    latest_run = await session.scalar(
+        select(Run)
+        .where(Run.project_id == project_id, Run.tenant_id == tenant_id)
+        .order_by(Run.created_at.desc(), Run.id.desc())
+        .limit(1)
+    )
     packages = _profile_packages(profile)
     commands = _profile_commands(profile)
+    preview = _preview_summary(latest_run)
+    preview_diagnostics = preview.get("diagnostics") if isinstance(preview.get("diagnostics"), dict) else {}
     repo_connected = repo is not None
     profile_present = profile is not None
     frontend_present = _has_kind(packages, "frontend")
     backend_present = _has_kind(packages, "backend", "service")
     validation_present = _has_command(commands, "test", "pytest", "vitest", "playwright")
     package_manager_present = _has_command(commands, "npm", "pnpm", "yarn", "uv", "pip", "poetry")
+    preview_present = _has_command(commands, "vite", "preview", "frontend_start", "backend_start", "uvicorn")
+    dependencies_ready_frontend = bool(preview_diagnostics.get("dependencies_ready_frontend"))
+    dependencies_ready_backend = bool(preview_diagnostics.get("dependencies_ready_backend"))
+    preview_runtime_ready = bool(preview_diagnostics.get("preview_runtime_ready"))
+    backend_runtime_ready = bool(preview_diagnostics.get("backend_runtime_ready"))
+    executable_ready = (
+        frontend_present
+        and backend_present
+        and package_manager_present
+        and preview_present
+        and dependencies_ready_frontend
+        and dependencies_ready_backend
+        and preview_runtime_ready
+        and backend_runtime_ready
+    )
 
     checks = [
         _check(
@@ -120,6 +150,52 @@ async def build_foundation_readiness(
             "Package manager/tooling",
             package_manager_present,
             "Tooling command detected." if package_manager_present else "No package manager command detected.",
+        ),
+        _check(
+            "dependencies_ready_frontend",
+            "Frontend dependencies hydrated",
+            dependencies_ready_frontend,
+            (
+                f"Frontend install status: {preview_diagnostics.get('frontend_install_status') or 'ready'}."
+                if dependencies_ready_frontend
+                else "Frontend dependency hydration has not completed yet."
+            ),
+        ),
+        _check(
+            "dependencies_ready_backend",
+            "Backend dependencies hydrated",
+            dependencies_ready_backend,
+            (
+                f"Backend install status: {preview_diagnostics.get('backend_install_status') or 'ready'}."
+                if dependencies_ready_backend
+                else "Backend dependency hydration has not completed yet."
+            ),
+        ),
+        _check(
+            "preview_runtime_ready",
+            "Frontend preview runtime ready",
+            preview_runtime_ready,
+            "Frontend runtime boot and module validation succeeded."
+            if preview_runtime_ready
+            else "Frontend runtime has not passed boot and preview validation yet.",
+        ),
+        _check(
+            "backend_runtime_ready",
+            "Backend runtime ready",
+            backend_runtime_ready,
+            "Backend runtime boot and /health validation succeeded."
+            if backend_runtime_ready
+            else "Backend runtime has not passed import and /health validation yet.",
+        ),
+        _check(
+            "foundation_executable_ready",
+            "Foundation executable ready",
+            executable_ready,
+            (
+                "Frontend and backend hydration, boot validation, preview, and tooling checks passed."
+                if executable_ready
+                else "Executable runtime readiness is incomplete; hydrate dependencies and validate both runtimes."
+            ),
         ),
     ]
     missing = [item["key"] for item in checks if item["status"] != "PASS"]

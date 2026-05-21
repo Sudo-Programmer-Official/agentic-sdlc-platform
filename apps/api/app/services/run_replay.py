@@ -37,6 +37,9 @@ def _fork_summary(source_run: Run, overrides: dict[str, Any] | None) -> dict[str
         "stall_recovery_attempts",
         "goal_state",
         "recovery_pause",
+        # Preview lifecycle is run-local state and must never be inherited by
+        # a forked run, otherwise Mission Control renders stale URLs/log paths.
+        "preview",
     ):
         summary.pop(key, None)
     summary["forked_from_run_id"] = str(source_run.id)
@@ -61,6 +64,36 @@ def _is_recovery_work_item(source_item: WorkItem) -> bool:
     return source_item.type == "FIX_TEST_FAILURE" or any(
         key in payload for key in ("recovery_source_id", "failed_work_item_id", "recovery_action")
     )
+
+
+def _template_web_root() -> Path:
+    repo_root = Path(__file__).resolve().parents[4]
+    foundation = repo_root / "runtime-templates" / "frontend-foundation" / "apps" / "web"
+    if foundation.exists():
+        return foundation
+    return repo_root / "runtime-templates" / "fullstack-monorepo" / "apps" / "web"
+
+
+def _repair_replay_workspace(repo_path: str | None) -> list[str]:
+    if not repo_path:
+        return []
+    root = Path(repo_path)
+    web_root = root / "apps" / "web"
+    if not web_root.exists():
+        return []
+    template_root = _template_web_root()
+    repaired: list[str] = []
+    for rel in ("package.json", "vite.config.ts", "src/main.ts", "index.html"):
+        target = web_root / rel
+        if target.exists():
+            continue
+        source = template_root / rel
+        if not source.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        repaired.append(f"apps/web/{rel}")
+    return repaired
 
 
 async def fork_run(
@@ -131,6 +164,22 @@ async def fork_run(
             finished_at=None,
             last_error=None,
         )
+        payload = cloned.payload if isinstance(cloned.payload, dict) else {}
+        if cloned.type in {"FRAMEWORK_VALIDATE", "WRITE_TESTS", "RUN_TESTS", "PREVIEW_VALIDATE"}:
+            package_affinity = str(payload.get("package_affinity") or "").strip()
+            if not package_affinity:
+                scoped = [str(item) for item in (payload.get("target_files") or payload.get("expected_files") or []) if isinstance(item, str)]
+                if any(path.replace("\\", "/").startswith("apps/web/") for path in scoped):
+                    payload["package_affinity"] = "apps/web"
+                elif any(path.replace("\\", "/").startswith("apps/api/") for path in scoped):
+                    payload["package_affinity"] = "apps/api"
+            if str(payload.get("package_affinity") or "").strip().lower().startswith("apps/web"):
+                payload.setdefault("framework_router", "frontend_vite_vitest")
+                payload.setdefault("test_strategy", "vitest")
+            else:
+                payload.setdefault("framework_router", "backend_pytest")
+                payload.setdefault("test_strategy", "pytest")
+            cloned.payload = payload
         session.add(cloned)
         await session.flush()
         item_id_map[source_item.id] = cloned.id
@@ -212,6 +261,27 @@ async def fork_run(
     )
     await session.commit()
     await session.refresh(forked_run)
+    repaired_files = _repair_replay_workspace(forked_run.repo_path)
+    if repaired_files:
+        summary = dict(forked_run.summary or {})
+        summary["replay_workspace_repaired"] = True
+        summary["replay_workspace_repairs"] = repaired_files
+        forked_run.summary = summary
+        session.add(forked_run)
+        await record_event(
+            session,
+            project_id=forked_run.project_id,
+            run_id=forked_run.id,
+            event_type="RUN_WORKSPACE_REPAIRED",
+            actor_type="SYSTEM",
+            tenant_id=forked_run.tenant_id,
+            payload={
+                "replay_workspace_repaired": True,
+                "replay_workspace_repairs": repaired_files,
+            },
+        )
+        await session.commit()
+        await session.refresh(forked_run)
 
     if start_now:
         run_id = forked_run.id

@@ -790,6 +790,134 @@ async def test_fork_run_clears_inherited_degraded_summary_flags(db_session):
     assert "goal_state" not in forked_run.summary
     assert "stall_recovery_attempts" not in forked_run.summary
 
+
+@pytest.mark.anyio
+async def test_fork_run_clears_inherited_preview_summary(db_session):
+    session, tenant_id, _tmp_path = db_session
+    project = Project(name="Fork preview summary reset", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        summary={
+            "goal": "stale preview summary should not propagate",
+            "preview": {
+                "status": "FAILED",
+                "preview_url": "http://127.0.0.1:62305",
+                "frontend": {
+                    "url": "http://127.0.0.1:62305",
+                    "log_path": "/private/tmp/old-run/logs/preview/frontend-preview.log",
+                },
+                "verification_note": "stale preview verifier note",
+            },
+        },
+    )
+    session.add(source_run)
+    await session.flush()
+
+    plan = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="PLAN_DAG",
+        key="PLAN_DAG",
+        status="DONE",
+        executor="codex",
+        priority=1,
+        depends_on_count=0,
+        payload={},
+        result={},
+    )
+    session.add(plan)
+    await session.commit()
+
+    forked_run = await run_replay.fork_run(
+        session,
+        source_run=source_run,
+        executor="codex",
+        start_now=False,
+    )
+
+    assert isinstance(forked_run.summary, dict)
+    assert forked_run.summary.get("forked_from_run_id") == str(source_run.id)
+    assert "preview" not in forked_run.summary
+
+
+@pytest.mark.anyio
+async def test_fork_run_repairs_workspace_and_preserves_test_strategy_payload(db_session):
+    session, tenant_id, tmp_path = db_session
+    source_workspace_root = tmp_path / "workspaces" / "fork-consistency" / "source-run"
+    source_repo_path = source_workspace_root / "repo"
+    (source_repo_path / "apps" / "web" / "src").mkdir(parents=True, exist_ok=True)
+    (source_repo_path / "apps" / "web" / "src" / "main.ts").write_text("console.log('boot')\n", encoding="utf-8")
+    # Intentionally missing apps/web/package.json + vite.config.ts + index.html
+
+    project = Project(name="Fork workspace consistency project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+
+    source_run = Run(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        status="COMPLETED",
+        executor="codex",
+        workspace_root=str(source_workspace_root),
+        repo_path=str(source_repo_path),
+        workspace_status="SEEDED",
+        summary={"goal": "fork consistency"},
+    )
+    session.add(source_run)
+    await session.flush()
+
+    write_tests = WorkItem(
+        project_id=project.id,
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        type="WRITE_TESTS",
+        key="WRITE_TESTS",
+        status="DONE",
+        executor="codex",
+        priority=5,
+        depends_on_count=0,
+        payload={"target_files": ["apps/web/src/components/landing/tests/TestimonialsSection.spec.ts"]},
+        result={},
+    )
+    session.add(write_tests)
+    await session.commit()
+
+    forked_run = await run_replay.fork_run(
+        session,
+        source_run=source_run,
+        executor="codex",
+        start_now=False,
+    )
+
+    assert isinstance(forked_run.summary, dict)
+    assert forked_run.summary.get("replay_workspace_repaired") is True
+    repaired = forked_run.summary.get("replay_workspace_repairs")
+    assert isinstance(repaired, list)
+    assert "apps/web/package.json" in repaired
+    assert "apps/web/vite.config.ts" in repaired
+    assert "apps/web/index.html" in repaired
+
+    forked_repo = Path(forked_run.repo_path or "")
+    assert (forked_repo / "apps" / "web" / "package.json").exists()
+    assert (forked_repo / "apps" / "web" / "vite.config.ts").exists()
+    assert (forked_repo / "apps" / "web" / "index.html").exists()
+
+    cloned_write_tests = await session.scalar(
+        select(WorkItem).where(WorkItem.run_id == forked_run.id, WorkItem.key == "WRITE_TESTS")
+    )
+    assert cloned_write_tests is not None
+    assert isinstance(cloned_write_tests.payload, dict)
+    assert cloned_write_tests.payload.get("package_affinity") == "apps/web"
+    assert cloned_write_tests.payload.get("test_strategy") == "vitest"
+    assert cloned_write_tests.payload.get("framework_router") == "frontend_vite_vitest"
+
 @pytest.mark.anyio
 async def test_create_pr_from_patch_artifact_creates_branch_and_pr_artifact(db_session, monkeypatch):
     session, tenant_id, tmp_path = db_session

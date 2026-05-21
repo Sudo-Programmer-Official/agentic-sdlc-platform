@@ -24,6 +24,7 @@ STABLE_FAILURE_TYPES = {
     "preview_failed",
     "push_failed",
     "unknown",
+    "architecture_violation",
 }
 
 
@@ -39,6 +40,7 @@ STABLE_RECOVERY_ACTIONS = {
     "escalate_to_human",
     "fail_safely",
     "retry_with_design_token_normalization",
+    "retry_with_componentization_repair",
 }
 
 
@@ -54,6 +56,7 @@ FAILURE_CLASS_MAP = {
     "missing_context": "scope_violation",
     "patch_size_violation": "scope_violation",
     "design_token_violation": "validation_drift",
+    "structural_contract_violation": "architecture_violation",
 }
 
 
@@ -98,6 +101,10 @@ class RuntimeRecoveryService:
         if failure_type == "validation_drift":
             if attempt_number == 1:
                 return "retry_with_design_token_normalization"
+            return "refresh_context"
+        if failure_type == "architecture_violation":
+            if attempt_number <= 2:
+                return "retry_with_componentization_repair"
             return "refresh_context"
         mapped = ACTION_MAP.get(rule_action, "fail_safely")
         return mapped if mapped in STABLE_RECOVERY_ACTIONS else "fail_safely"

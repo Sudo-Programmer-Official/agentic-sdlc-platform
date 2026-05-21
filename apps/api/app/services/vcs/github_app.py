@@ -8,6 +8,7 @@ import time
 import urllib.request
 import urllib.error
 import base64
+from urllib.parse import quote
 from typing import Dict, List, Optional
 
 import jwt
@@ -142,6 +143,36 @@ class GitHubAppAdapter(VCSAdapter):
             message = detail or f"GitHub API error while creating PR (HTTP {exc.code})"
             raise ValueError(message) from exc
 
+    def find_open_pull_request(
+        self,
+        *,
+        repo: str,
+        head_branch: str,
+        base_branch: str,
+        installation_id: int | None = None,
+    ) -> dict | None:
+        token = self._token_for_installation(installation_id)
+        owner = repo.split("/", 1)[0]
+        head = quote(f"{owner}:{head_branch}", safe=":")
+        base = quote(base_branch, safe="")
+        url = f"https://api.github.com/repos/{repo}/pulls?state=open&head={head}&base={base}&per_page=1"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "agentic-sdlc",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode())
+                if isinstance(payload, list) and payload:
+                    return payload[0]
+        except Exception:
+            return None
+        return None
+
     def list_installation_repositories(self, installation_id: int) -> List[dict]:
         token = self.get_installation_token(installation_id)
         req = urllib.request.Request(
@@ -172,6 +203,70 @@ class GitHubAppAdapter(VCSAdapter):
                     }
                 )
             return normalized
+
+    def create_repository(
+        self,
+        *,
+        installation_id: int,
+        owner: str,
+        name: str,
+        private: bool = True,
+        description: str | None = None,
+    ) -> dict:
+        token = self.get_installation_token(installation_id)
+        payload = {
+            "name": name,
+            "private": bool(private),
+            "auto_init": False,
+        }
+        if description:
+            payload["description"] = description
+        owner_type = self._resolve_owner_type(owner=owner, token=token)
+        if owner_type == "Organization":
+            self.assert_org_allowed(owner)
+            endpoint = f"https://api.github.com/orgs/{owner}/repos"
+        else:
+            endpoint = "https://api.github.com/user/repos"
+        req = urllib.request.Request(
+            endpoint,
+            method="POST",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "User-Agent": "agentic-sdlc",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                payload = json.loads(exc.read().decode() or "{}")
+                detail = str(payload.get("message") or "").strip()
+            except Exception:
+                detail = ""
+            raise ValueError(detail or f"GitHub API error while creating repository (HTTP {exc.code})") from exc
+
+    def _resolve_owner_type(self, *, owner: str, token: str) -> str:
+        req = urllib.request.Request(
+            f"https://api.github.com/users/{owner}",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "agentic-sdlc",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode())
+                owner_type = str(payload.get("type") or "").strip()
+                return owner_type or "User"
+        except Exception:
+            # Favor personal endpoint as fallback when owner lookup is unavailable.
+            return "User"
 
     @staticmethod
     def build_clone_url(repo_full_name: str) -> str:

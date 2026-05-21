@@ -3,63 +3,38 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router"
 import { isApiErrorStatus } from "../api/http";
 import { fetchProjectMeta, getActiveTenantId, getActiveWorkspaceId, getAuthToken, removeRecentProjectScoped } from "../api/lifecycle";
 import { updateProjectContext } from "../state/projectContext";
-import WorkspaceHome from "../views/WorkspaceHome.vue";
-import PublicLanding from "../views/PublicLanding.vue";
-import PrivacyPolicy from "../views/PrivacyPolicy.vue";
-import TermsOfService from "../views/TermsOfService.vue";
-import DataDeletion from "../views/DataDeletion.vue";
-import SecurityOverview from "../views/SecurityOverview.vue";
-import WorkspaceDashboard from "../views/WorkspaceDashboard.vue";
-import AdminConsole from "../views/AdminConsole.vue";
-import OperatorDashboard from "../views/OperatorDashboard.vue";
-import ProjectOverview from "../views/ProjectOverview.vue";
-import ProjectEnvironmentCenter from "../views/ProjectEnvironmentCenter.vue";
-import MissionControl from "../views/MissionControl.vue";
-import AutomationMap from "../views/AutomationMap.vue";
-import SdlcTimeline from "../views/SdlcTimeline.vue";
-import Approvals from "../views/Approvals.vue";
-import AgentRuns from "../views/AgentRuns.vue";
-import Requirements from "../views/Requirements.vue";
-import KnowledgeInbox from "../views/KnowledgeInbox.vue";
-import KnowledgeProposalDetail from "../views/KnowledgeProposalDetail.vue";
-import KnowledgeArtifactDetail from "../views/KnowledgeArtifactDetail.vue";
-import KnowledgeEventDetail from "../views/KnowledgeEventDetail.vue";
-import AiOpsDashboard from "../views/AiOpsDashboard.vue";
-import SignIn from "../views/SignIn.vue";
-import E2ESmokeHarness from "../views/E2ESmokeHarness.vue";
-import RunGuide from "../views/RunGuide.vue";
 
 const routes: RouteRecordRaw[] = [
-  { path: "/", name: "public-landing", component: PublicLanding, meta: { layout: "minimal" } },
-  { path: "/features", name: "public-features", component: PublicLanding, meta: { layout: "minimal" } },
-  { path: "/pricing", name: "public-pricing", component: PublicLanding, meta: { layout: "minimal" } },
-  { path: "/docs", name: "public-docs", component: PublicLanding, meta: { layout: "minimal" } },
-  { path: "/privacy", name: "public-privacy", component: PrivacyPolicy, meta: { layout: "minimal" } },
-  { path: "/terms", name: "public-terms", component: TermsOfService, meta: { layout: "minimal" } },
-  { path: "/data-deletion", name: "public-data-deletion", component: DataDeletion, meta: { layout: "minimal" } },
-  { path: "/security", name: "public-security", component: SecurityOverview, meta: { layout: "minimal" } },
-  { path: "/workspace", name: "workspace", component: WorkspaceHome, meta: { requiresAuth: true } },
-  { path: "/workspace/dashboard", name: "workspace-dashboard", component: WorkspaceDashboard, meta: { requiresAuth: true } },
-  { path: "/admin", name: "admin-console", component: AdminConsole, meta: { requiresAuth: true } },
-  { path: "/signin", name: "signin", component: SignIn, meta: { layout: "minimal" } },
-  { path: "/help/run-guide", name: "run-guide", component: RunGuide, meta: { requiresAuth: true } },
-  { path: "/__e2e__/smoke", name: "e2e-smoke", component: E2ESmokeHarness, meta: { layout: "minimal" } },
-  { path: "/projects/:projectId/operator", name: "operator-dashboard", component: OperatorDashboard, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId", name: "project-overview", component: ProjectOverview, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/tasks", name: "project-tasks", component: ProjectOverview, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/environments", name: "project-environment-center", component: ProjectEnvironmentCenter, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/requirements", name: "requirements", component: Requirements, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/run", name: "mission-control", component: MissionControl, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/map", name: "automation-map", component: AutomationMap, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/timeline", name: "timeline", component: SdlcTimeline, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/runs/:runId/debug", name: "run-debug", component: SdlcTimeline, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/approvals", name: "approvals", component: Approvals, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/runs", name: "agent-runs", component: AgentRuns, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/ai-ops", name: "ai-ops", component: AiOpsDashboard, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/knowledge", name: "knowledge-inbox", component: KnowledgeInbox, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/knowledge/proposals/:proposalId", name: "knowledge-proposal", component: KnowledgeProposalDetail, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/knowledge/artifacts/:artifactId", name: "knowledge-artifact", component: KnowledgeArtifactDetail, meta: { requiresAuth: true } },
-  { path: "/projects/:projectId/knowledge/events/:eventId", name: "knowledge-event", component: KnowledgeEventDetail, meta: { requiresAuth: true } }
+  { path: "/", name: "public-landing", component: () => import("../views/PublicLanding.vue"), meta: { layout: "minimal" } },
+  { path: "/features", name: "public-features", component: () => import("../views/PublicLanding.vue"), meta: { layout: "minimal" } },
+  { path: "/pricing", name: "public-pricing", component: () => import("../views/PublicLanding.vue"), meta: { layout: "minimal" } },
+  { path: "/docs", name: "public-docs", component: () => import("../views/PublicLanding.vue"), meta: { layout: "minimal" } },
+  { path: "/privacy", name: "public-privacy", component: () => import("../views/PrivacyPolicy.vue"), meta: { layout: "minimal" } },
+  { path: "/terms", name: "public-terms", component: () => import("../views/TermsOfService.vue"), meta: { layout: "minimal" } },
+  { path: "/data-deletion", name: "public-data-deletion", component: () => import("../views/DataDeletion.vue"), meta: { layout: "minimal" } },
+  { path: "/security", name: "public-security", component: () => import("../views/SecurityOverview.vue"), meta: { layout: "minimal" } },
+  { path: "/workspace", name: "workspace", component: () => import("../views/WorkspaceHome.vue"), meta: { requiresAuth: true } },
+  { path: "/workspace/dashboard", name: "workspace-dashboard", component: () => import("../views/WorkspaceDashboard.vue"), meta: { requiresAuth: true } },
+  { path: "/admin", name: "admin-console", component: () => import("../views/AdminConsole.vue"), meta: { requiresAuth: true } },
+  { path: "/signin", name: "signin", component: () => import("../views/SignIn.vue"), meta: { layout: "minimal" } },
+  { path: "/help/run-guide", name: "run-guide", component: () => import("../views/RunGuide.vue"), meta: { requiresAuth: true } },
+  { path: "/__e2e__/smoke", name: "e2e-smoke", component: () => import("../views/E2ESmokeHarness.vue"), meta: { layout: "minimal" } },
+  { path: "/projects/:projectId/operator", name: "operator-dashboard", component: () => import("../views/OperatorDashboard.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId", name: "project-overview", component: () => import("../views/ProjectOverview.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/tasks", name: "project-tasks", component: () => import("../views/ProjectOverview.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/environments", name: "project-environment-center", component: () => import("../views/ProjectEnvironmentCenter.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/requirements", name: "requirements", component: () => import("../views/Requirements.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/run", name: "mission-control", component: () => import("../views/MissionControl.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/map", name: "automation-map", component: () => import("../views/AutomationMap.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/timeline", name: "timeline", component: () => import("../views/SdlcTimeline.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/runs/:runId/debug", name: "run-debug", component: () => import("../views/SdlcTimeline.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/approvals", name: "approvals", component: () => import("../views/Approvals.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/runs", name: "agent-runs", component: () => import("../views/AgentRuns.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/ai-ops", name: "ai-ops", component: () => import("../views/AiOpsDashboard.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/knowledge", name: "knowledge-inbox", component: () => import("../views/KnowledgeInbox.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/knowledge/proposals/:proposalId", name: "knowledge-proposal", component: () => import("../views/KnowledgeProposalDetail.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/knowledge/artifacts/:artifactId", name: "knowledge-artifact", component: () => import("../views/KnowledgeArtifactDetail.vue"), meta: { requiresAuth: true } },
+  { path: "/projects/:projectId/knowledge/events/:eventId", name: "knowledge-event", component: () => import("../views/KnowledgeEventDetail.vue"), meta: { requiresAuth: true } }
 ];
 
 const router = createRouter({

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 import re
@@ -21,7 +22,7 @@ from app.runtime.patch_guard import (
     evaluate_patch_guard,
     has_mutating_actions,
 )
-from app.runtime.schemas.executor_io import CodexPlan
+from app.runtime.schemas.executor_io import Action, CodexPlan
 from app.runtime.llm.openai_client import OpenAIClient
 from app.runtime.tools.repo_tools import RepoTools
 from app.core.config import get_settings
@@ -39,9 +40,23 @@ from app.runtime.content_binding import (
 )
 from app.services.content_registry import upsert_content_item
 from app.runtime.frontend_topology import validate_frontend_topology
+from app.runtime.frontend_topology_engine import (
+    DEFAULT_LANDING_TOPOLOGY,
+    FrontendTopology,
+    FrontendZone,
+    normalize_landing_graph_content,
+)
+from app.runtime.frontend_import_resolver import (
+    normalize_frontend_imports,
+)
+from app.runtime.frontend_composition_governance import (
+    evaluate_frontend_composition_governance,
+    evaluate_frontend_foundation_governance,
+)
 from app.runtime.component_capability_protocol import build_component_capability_packet
 from app.runtime.mutation_governance import MutationGovernanceDecision, evaluate_mutation_governance
 from app.services.repo_intelligence_graph import get_safe_mutation_scope
+from app.services.frontend_composition_integrity import ensure_frontend_foundation_files
 
 
 SYSTEM_PROMPT = """You are an automated code change worker.
@@ -99,12 +114,21 @@ _JSON_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.D
 _HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 _STYLE_ATTR_RE = re.compile(r"\bstyle\s*=", re.IGNORECASE)
 _INLINE_STYLE_ATTR_RE = re.compile(r"\sstyle\s*=\s*\"[^\"]*\"|\sstyle\s*=\s*'[^']*'", re.IGNORECASE)
+_STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>.*?</style>", re.IGNORECASE | re.DOTALL)
 _COMPONENT_TAG_RE = re.compile(r"<([A-Z][A-Za-z0-9_]*)\b")
+_CONTENT_SLOT_TAG_RE = re.compile(r"<ContentSlot\b([^>]*)\/>", re.IGNORECASE)
+_SLOT_FALLBACK_BOUND_RE = re.compile(r':fallback\s*=\s*"([^"]*)"')
+_SLOT_FALLBACK_LITERAL_RE = re.compile(r'fallback\s*=\s*"([^"]*)"')
+_TAG_WITH_CLASS_RE = re.compile(r"<(section|div)\b([^>]*?)class=(['\"])([^'\"]*)(['\"])([^>]*)>", re.IGNORECASE)
+_SVG_CLASS_TAG_RE = re.compile(r"<svg\b([^>]*?)class=(['\"])([^'\"]*)(['\"])([^>]*)>", re.IGNORECASE)
 _FRONTEND_ROOT_FILES = {
     "index.html",
-    "app.vue",
     "src/app.vue",
+    "src/main.ts",
+    "src/main.js",
     "apps/web/src/app.vue",
+    "apps/web/src/main.ts",
+    "apps/web/src/main.js",
     "apps/web/index.html",
 }
 _GOVERNED_COMPONENT_HINTS = {
@@ -142,12 +166,62 @@ _PROBABLE_SECRET_LEAK_PATTERNS = [
     re.compile(r"(?im)^\s*authorization\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9._\\-]{8,}", re.IGNORECASE),
     re.compile(r"(?i)(api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*['\"][^'\"]{8,}['\"]"),
 ]
+_NON_EMPTY_CTA_RE = re.compile(r"<PrimaryButton[^>]*>\s*[^<\s][^<]*</PrimaryButton>", re.IGNORECASE)
+_EMPTY_CTA_RE = re.compile(r"<PrimaryButton[^>]*>\s*</PrimaryButton>", re.IGNORECASE)
+_LANDING_ZONE_COMPONENTS = ("HeroZone", "FeatureZone", "TestimonialsZone", "CTAZone")
+_LANDING_ZONE_MARKER_RE = re.compile(r"<!--\s*zone:([a-z0-9_-]+):(start|end)\s*-->", re.IGNORECASE)
+_LANDING_ZONE_BLOCK_RE = re.compile(
+    r"(<!--\s*zone:(?P<name>[a-z0-9_-]+):start\s*-->)(?P<body>.*?)(<!--\s*zone:(?P=name):end\s*-->)",
+    re.IGNORECASE | re.DOTALL,
+)
+_LANDING_ZONE_INNER_RE = re.compile(r"<(?P<zone>HeroZone|FeatureZone|TestimonialsZone|CTAZone)\b[^>]*>(?P<body>.*?)</(?P=zone)>", re.IGNORECASE | re.DOTALL)
 
 
 def _contains_probable_secret_leak(text: str) -> bool:
     if not isinstance(text, str) or not text:
         return False
     return any(pattern.search(text) for pattern in _PROBABLE_SECRET_LEAK_PATTERNS)
+
+
+def _landing_topology_signature(content: str) -> dict[str, object]:
+    zone_components = [zone for zone in _LANDING_ZONE_COMPONENTS if f"<{zone}" in content]
+    marker_names = sorted({match.group(1).strip().lower() for match in _LANDING_ZONE_MARKER_RE.finditer(content)})
+    return {
+        "has_page_shell": "<PageShell" in content,
+        "zone_components": zone_components,
+        "zone_markers": marker_names,
+    }
+
+
+def replace_zone(content: str, zone_name: str, replacement: str) -> str:
+    if not isinstance(content, str):
+        return content
+    target = str(zone_name or "").strip().lower()
+    if not target:
+        return content
+
+    def _rewrite(match: re.Match[str]) -> str:
+        if str(match.group("name") or "").strip().lower() != target:
+            return match.group(0)
+        start = match.group(1)
+        end = match.group(4)
+        body = f"\n{replacement.rstrip()}\n"
+        return f"{start}{body}{end}"
+
+    return _LANDING_ZONE_BLOCK_RE.sub(_rewrite, content)
+
+
+def _first_component_markup(content: str, component_name: str) -> str | None:
+    if not isinstance(content, str) or not content:
+        return None
+    token = re.escape(component_name)
+    paired = re.search(rf"<{token}\b[^>]*>.*?</{token}>", content, flags=re.IGNORECASE | re.DOTALL)
+    if paired:
+        return paired.group(0).strip()
+    self_closing = re.search(rf"<{token}\b[^>]*/>", content, flags=re.IGNORECASE)
+    if self_closing:
+        return self_closing.group(0).strip()
+    return None
 
 
 def _added_patch_payload(patch: str) -> str:
@@ -286,10 +360,17 @@ def _target_files_from_payload(payload: dict[str, Any] | None) -> list[str]:
     if isinstance(payload.get("expected_files"), list):
         fallback_values.extend(item for item in payload["expected_files"] if isinstance(item, str))
     values = explicit_values or fallback_values
+    package_affinity = str(payload.get("package_affinity") or "").strip().replace("\\", "/")
     normalized: list[str] = []
     for value in values:
         if isinstance(value, str) and value.strip():
-            normalized.append(value.strip())
+            candidate = value.strip().replace("\\", "/")
+            if package_affinity.startswith("apps/web"):
+                if candidate == "index.html":
+                    candidate = "apps/web/index.html"
+                elif candidate.startswith("src/"):
+                    candidate = f"apps/web/{candidate}"
+            normalized.append(candidate)
     return list(dict.fromkeys(normalized))
 
 
@@ -449,8 +530,156 @@ def _is_bootstrap_or_genesis_scope(work_item: WorkItem) -> bool:
     )
 
 
+def _runtime_governance_mode(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return "stability"
+    explicit = str(payload.get("runtime_governance_mode") or "").strip().lower()
+    if explicit in {"stability", "governed", "emergency"}:
+        return explicit
+    if bool(getattr(get_settings(), "runtime_emergency_ship_mode_enabled", False)):
+        return "emergency"
+    repository_state = str(payload.get("repository_state") or "").strip().upper()
+    if repository_state in {"GENESIS", "EARLY_BUILD", "ACTIVE_PRODUCT"}:
+        return "stability"
+    return "stability"
+
+
+def _stability_warning_violation(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "topology violation",
+            "foundation topology violation",
+            "primitive composition violation",
+            "design contract violation",
+            "patch touches files outside the planned scope",
+            "layout governance violation",
+            "tailwind governance violation",
+            "missing max-width/container utility",
+            "visual quality gate",
+            "polish authority violation",
+            "mutation authority violation: operation 'write_file' is not allowed for class polish",
+        )
+    )
+
+
+def _emergency_warning_violation(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    hard_block_markers = (
+        "unresolved import",
+        "could not resolve components",
+        "missing runtime file",
+        "does not exist",
+        "preview cannot boot",
+        "preview boot",
+        "runtime file",
+        "capability governance violation",
+        "secret",
+        "token",
+        "password",
+        "webhook",
+        "database credential",
+        "api key",
+        "destructive delete",
+        "delete_file",
+        "build failure",
+        "vite build",
+    )
+    if any(marker in text for marker in hard_block_markers):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "topology violation",
+            "foundation topology violation",
+            "primitive composition violation",
+            "design contract violation",
+            "project contract violation",
+            "patch touches files outside the planned scope",
+            "layout governance violation",
+            "tailwind governance violation",
+            "missing max-width/container utility",
+            "visual quality gate",
+            "polish authority violation",
+            "mutation authority violation",
+            "shell protection violation",
+            "zone composition violation",
+            "incomplete zone replacement",
+            "feature materialization violation",
+            "structural contract violation",
+            "frontend import normalization violation",
+            "frontend import normalization could not resolve components",
+        )
+    )
+
+
+_PRIMITIVE_MATURITY_RANK: dict[str, int] = {
+    "experimental": 0,
+    "stable": 1,
+    "verified_visual": 2,
+    "production_ready": 3,
+}
+
+
+def _primitive_maturity_registry(payload: dict[str, Any]) -> dict[str, str]:
+    registry: dict[str, str] = {}
+
+    raw_registry = payload.get("primitive_registry")
+    if isinstance(raw_registry, dict):
+        for name, meta in raw_registry.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if isinstance(meta, dict):
+                status = str(meta.get("status") or meta.get("maturity") or "").strip().lower()
+            else:
+                status = str(meta or "").strip().lower()
+            if status in _PRIMITIVE_MATURITY_RANK:
+                registry[name.strip()] = status
+
+    project_contract = payload.get("project_contract")
+    if isinstance(project_contract, dict):
+        design_contract = project_contract.get("design_contract")
+        if isinstance(design_contract, dict):
+            components = design_contract.get("components")
+            if isinstance(components, dict):
+                maturity = components.get("maturity")
+                if isinstance(maturity, dict):
+                    for name, status in maturity.items():
+                        if not isinstance(name, str) or not name.strip():
+                            continue
+                        normalized = str(status or "").strip().lower()
+                        if normalized in _PRIMITIVE_MATURITY_RANK:
+                            registry[name.strip()] = normalized
+    return registry
+
+
+def _primitive_is_verified_visual_or_higher(name: str, maturity_registry: dict[str, str]) -> bool:
+    status = maturity_registry.get(name)
+    if not status:
+        return False
+    return _PRIMITIVE_MATURITY_RANK.get(status, -1) >= _PRIMITIVE_MATURITY_RANK["verified_visual"]
+
+
+def _feature_section_component_candidates(task_text: str) -> list[str]:
+    lowered = str(task_text or "").lower()
+    section_map = [
+        ("hero", "apps/web/src/components/landing/HeroSection.vue"),
+        ("testimonial", "apps/web/src/components/landing/TestimonialsSection.vue"),
+        ("pricing", "apps/web/src/components/landing/PricingSection.vue"),
+        ("cta", "apps/web/src/components/landing/CTASection.vue"),
+        ("lead", "apps/web/src/components/landing/LeadCaptureSection.vue"),
+    ]
+    matches = [path for marker, path in section_map if marker in lowered]
+    return matches or ["apps/web/src/components/landing/HeroSection.vue"]
+
+
 def _should_block_on_human_review_for_work_item(work_item: WorkItem) -> bool:
-    if work_item.type in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+    if work_item.type in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
         return False
     if _is_bootstrap_or_genesis_scope(work_item):
         return False
@@ -464,9 +693,9 @@ def _allow_adjacent_scope_expansion(
 ) -> bool:
     if not extra_files:
         return False
-    if work_item.type not in {"FIX_TEST_FAILURE", "WRITE_TESTS", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
+    if work_item.type not in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY", "WRITE_TESTS", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
         return False
-    if work_item.type != "FIX_TEST_FAILURE":
+    if work_item.type not in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"}:
         payload = work_item.payload if isinstance(work_item.payload, dict) else {}
         repository_state = str(payload.get("repository_state") or "").strip().upper()
         if repository_state not in {"GENESIS", "EARLY_BUILD"} and not _is_bootstrap_or_genesis_scope(work_item):
@@ -616,8 +845,59 @@ def _is_static_frontend_scope(payload: dict[str, Any] | None) -> bool:
     target_files = _target_files_from_payload(payload)
     if not target_files:
         return False
-    frontend_suffixes = {".html", ".css", ".js", ".mjs", ".cjs"}
+    frontend_suffixes = {".html", ".css", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue"}
     return all(Path(path).suffix.lower() in frontend_suffixes for path in target_files)
+
+
+def _sanitize_frontend_scope_paths(paths: list[str]) -> list[str]:
+    sanitized: list[str] = []
+    for raw in paths:
+        if not isinstance(raw, str):
+            continue
+        path = raw.strip().replace("\\", "/")
+        if not path:
+            continue
+        lowered = path.lower()
+        # Keep explicit root allow-list (index.html, src/main.ts, apps/web/src/main.ts, src/app.vue).
+        # Reject naked root component filenames (e.g. App.vue, LandingPage.vue) that bypass governed topology.
+        if "/" not in path and lowered not in _FRONTEND_ROOT_FILES:
+            suffix = Path(path).suffix.lower()
+            if suffix in {".vue", ".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".html"}:
+                continue
+        sanitized.append(path)
+    return list(dict.fromkeys(sanitized))
+
+
+def _apply_layout_auto_normalization(content: str) -> str:
+    updated = content
+
+    def _add_overflow(match: re.Match[str]) -> str:
+        tag = match.group(1)
+        pre = match.group(2) or ""
+        quote = match.group(3)
+        classes = match.group(4) or ""
+        post = match.group(6) or ""
+        tokens = classes.split()
+        if not any(token.startswith("overflow-") for token in tokens):
+            tokens.append("overflow-hidden")
+        return f"<{tag}{pre}class={quote}{' '.join(tokens)}{quote}{post}>"
+
+    updated = _TAG_WITH_CLASS_RE.sub(_add_overflow, updated, count=1)
+
+    def _bound_svg(match: re.Match[str]) -> str:
+        pre = match.group(1) or ""
+        quote = match.group(2)
+        classes = match.group(3) or ""
+        post = match.group(5) or ""
+        tokens = classes.split()
+        if not any(re.fullmatch(r"(w-\d+|size-\d+)", token) for token in tokens):
+            tokens.append("w-8")
+        if not any(re.fullmatch(r"(h-\d+|size-\d+)", token) for token in tokens):
+            tokens.append("h-8")
+        return f"<svg{pre}class={quote}{' '.join(tokens)}{quote}{post}>"
+
+    updated = _SVG_CLASS_TAG_RE.sub(_bound_svg, updated)
+    return updated
 
 
 def _is_python_backend_scope(payload: dict[str, Any] | None) -> bool:
@@ -668,6 +948,7 @@ def _derive_frontend_topology_plan(
         "sections": section_names,
         "component_files": component_files,
         "composition_file": "apps/web/src/pages/LandingPage.vue",
+        "composition_zones": ["HeroZone", "FeatureZone", "TestimonialsZone", "CTAZone"],
         "content_slots": [f"landing.{name.replace('Section', '').lower()}" for name in section_names],
     }
 
@@ -713,13 +994,33 @@ def _stage_scope_violations(
     violations: list[str] = []
     if "PLAN" in work_item.type and has_mutating_actions(actions):
         violations.append("PLAN work items may only return note actions; mutating file operations are out of scope.")
-    if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"} and has_mutating_actions(actions):
+    if work_item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"} and has_mutating_actions(actions):
         violations.append("REVIEW work items may only return note actions; mutating file operations are out of scope.")
     if work_item.type != "WRITE_TESTS":
         return violations
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    package_affinity = str(payload.get("package_affinity") or "").strip().lower()
+    architecture = payload.get("architecture_profile") if isinstance(payload.get("architecture_profile"), dict) else {}
+    frontend_stack = str(architecture.get("frontend_stack") or "").strip().lower()
+    frontend_mode = package_affinity.startswith("apps/web") or "vue" in frontend_stack or "vite" in frontend_stack
     for path in touched_files:
         name = Path(path).name
-        if not (name.startswith("test_") and Path(path).suffix.lower() == ".py"):
+        normalized_path = str(path).strip().replace("\\", "/").lower()
+        suffix = Path(path).suffix.lower()
+        is_python_test = name.startswith("test_") and suffix == ".py"
+        is_frontend_test = (
+            suffix in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+            and (
+                ".spec." in name.lower()
+                or ".test." in name.lower()
+                or "/tests/" in normalized_path
+            )
+        )
+        if frontend_mode and not is_frontend_test:
+            violations.append(
+                f"WRITE_TESTS(frontend) may only modify JS/TS test files (*.spec.*|*.test.*) under frontend scope; received out-of-scope file {path}."
+            )
+        if (not frontend_mode) and not is_python_test:
             violations.append(
                 f"WRITE_TESTS may only modify Python test files; received out-of-scope file {path}."
             )
@@ -904,7 +1205,7 @@ class CodexExecutor(TaskExecutor):
         return "apply_patch", ["write_file"], reasons or ["default_apply_patch"], drift_risk_score, 0.65, execution_zone
 
     def _system_prompt_for(self, work_item: WorkItem) -> str:
-        if work_item.type in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        if work_item.type in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
             return REVIEW_SYSTEM_PROMPT
         return SYSTEM_PROMPT
 
@@ -961,7 +1262,7 @@ class CodexExecutor(TaskExecutor):
             "REVIEW_INTEGRATION",
         }:
             return policy.max_model_tier
-        if work_item.type in {"FIX_TEST_FAILURE", "REVIEW_DIFF", "REVIEW_INTEGRATION"} or policy.risk_level == "high":
+        if work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY", "REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"} or policy.risk_level == "high":
             return policy.max_model_tier
         return policy.selected_model_tier
 
@@ -1003,6 +1304,12 @@ class CodexExecutor(TaskExecutor):
         )
         payload = work_item.payload or {}
         task_id = payload.get("task_id") if isinstance(payload.get("task_id"), str) else None
+        if work_item.type in {"PLAN_DAG", "FOUNDATION_VALIDATE", "FRAMEWORK_VALIDATE", "GENESIS_FOUNDATION", "CODE_FRONTEND"}:
+            if _runtime_governance_mode(payload if isinstance(payload, dict) else {}) == "emergency":
+                ensured = ensure_frontend_foundation_files(repo_root=repo_root)
+                if ensured and isinstance(work_item.payload, dict):
+                    work_item.payload.setdefault("foundation_bootstrap_repairs", ensured)
+                    work_item.payload["foundation_bootstrap_mode"] = "emergency"
 
         context_bundle = self._build_context(repo, work_item, contract)
         context_bundle.setdefault("meta", {})
@@ -1021,11 +1328,15 @@ class CodexExecutor(TaskExecutor):
                 plan_snapshot=context.plan_snapshot,
             )
         )
-        if work_item.type == "FIX_TEST_FAILURE":
+        if work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"}:
             writable_scope = _fix_test_failure_writable_scope(work_item.payload, contract, target_files, allowed_files)
             if writable_scope:
                 target_files = writable_scope
                 allowed_files = list(writable_scope)
+                if contract is not None:
+                    # Keep patch guard scope aligned with recovery writable scope.
+                    contract.target_files = list(writable_scope)
+                    contract.allowed_files = list(writable_scope)
         elif work_item.type == "WRITE_TESTS":
             writable_scope = _write_tests_writable_scope(target_files=target_files, allowed_files=allowed_files)
             if writable_scope:
@@ -1033,6 +1344,39 @@ class CodexExecutor(TaskExecutor):
                 allowed_files = list(writable_scope)
         elif target_files:
             allowed_files = list(dict.fromkeys(target_files + allowed_files))
+        if work_item.type in {"CODE_FRONTEND", "GENESIS_FOUNDATION"}:
+            target_files = _sanitize_frontend_scope_paths(target_files)
+            allowed_files = _sanitize_frontend_scope_paths(allowed_files)
+            payload_dict = work_item.payload if isinstance(work_item.payload, dict) else {}
+            mutation_class = str(payload_dict.get("mutation_class") or "").strip().upper()
+            task_text = " ".join(
+                str(payload_dict.get(key) or "").strip()
+                for key in ("task_title", "title", "goal", "task_description")
+            )
+            if work_item.type == "CODE_FRONTEND" and mutation_class == "FEATURE":
+                feature_scope = ["apps/web/src/pages/LandingPage.vue", *_feature_section_component_candidates(task_text)]
+                target_files = list(dict.fromkeys([*feature_scope, *target_files]))
+                allowed_files = list(dict.fromkeys([*feature_scope, *allowed_files]))
+            if _runtime_governance_mode(work_item.payload if isinstance(work_item.payload, dict) else {}) == "emergency":
+                allowed_files = list(
+                    dict.fromkeys(
+                        [
+                            *allowed_files,
+                            "apps/web/src/components",
+                            "apps/web/src/layouts",
+                            "apps/web/src/pages",
+                            "apps/web/src/styles",
+                            "runtime-contracts/component-manifest.json",
+                            "runtime-contracts/foundation_version.json",
+                            "runtime-contracts/topology_hash.json",
+                        ]
+                    )
+                )
+                target_files = list(dict.fromkeys([*target_files, *allowed_files]))
+                ensured = ensure_frontend_foundation_files(repo_root=repo_root)
+                if ensured and isinstance(work_item.payload, dict):
+                    work_item.payload["foundation_bootstrap_repairs"] = ensured
+                    work_item.payload["foundation_bootstrap_mode"] = "emergency"
         session = getattr(context, "session", None)
         if session is not None:
             try:
@@ -1550,7 +1894,65 @@ class CodexExecutor(TaskExecutor):
         stage_scope_repair_attempted = False
         project_contract_repair_attempted = False
         content_binding_records: list[dict[str, Any]] = []
+        content_binding_telemetry: dict[str, Any] = {
+            "content_binding_attempted": False,
+            "content_binding_enabled": False,
+            "content_binding_fallback_used": False,
+        }
+        frontend_composition_telemetry: dict[str, float] = {
+            "layout_integrity_score": 1.0,
+            "responsive_safety_score": 1.0,
+            "overflow_risk_score": 0.0,
+            "typography_consistency_score": 1.0,
+            "visual_composition_score": 1.0,
+        }
+        foundation_quality_telemetry: dict[str, float] = {
+            "foundation_layout_score": 1.0,
+            "navigation_integrity": 1.0,
+            "responsive_shell_score": 1.0,
+            "design_system_score": 1.0,
+        }
+        import_resolution_telemetry: dict[str, Any] = {
+            "import_resolution_attempts": 0,
+            "resolved_component_imports": [],
+            "unresolved_component_imports": [],
+            "import_normalization_repairs": 0,
+        }
         while True:
+            plan.actions, zone_composer_violations = self._enforce_feature_zone_composer(
+                work_item=work_item,
+                repo_root=repo_root,
+                actions=plan.actions,
+            )
+            content_binding_violations, content_binding_records, content_binding_telemetry = self._content_binding_pass(
+                work_item=work_item,
+                actions=plan.actions,
+            )
+            payload_for_recovery = work_item.payload if isinstance(work_item.payload, dict) else {}
+            recovery_strategy = str(payload_for_recovery.get("recovery_strategy") or "").strip().lower()
+            auto_normalize_layout = bool(payload_for_recovery.get("layout_auto_normalize")) or recovery_strategy in {
+                "layout_composition_repair",
+                "write_file_preferred",
+            }
+            if work_item.type == "CODE_FRONTEND" and auto_normalize_layout:
+                for action in plan.actions:
+                    if getattr(action, "type", None) != "write_file":
+                        continue
+                    path = str(getattr(action, "path", "") or "").strip().replace("\\", "/").lower()
+                    content = getattr(action, "content", None)
+                    if not isinstance(content, str) or not path.endswith(".vue"):
+                        continue
+                    if "/components/" in path or path.endswith("/pages/landingpage.vue"):
+                        action.content = _apply_layout_auto_normalization(content)
+            plan.actions, landing_zone_warnings, landing_zone_violations = self._auto_normalize_landing_zone_actions(
+                work_item=work_item,
+                actions=plan.actions,
+            )
+            plan.actions, import_resolution_telemetry, import_resolution_violations = self._normalize_frontend_import_actions(
+                work_item=work_item,
+                repo_root=repo_root,
+                actions=plan.actions,
+            )
             design_violation_records = self._design_validation_records(
                 work_item=work_item,
                 actions=plan.actions,
@@ -1686,11 +2088,12 @@ class CodexExecutor(TaskExecutor):
                         },
                     )
             stage_violations = _stage_scope_violations(work_item, plan.actions, patch_guard.touched_files)
-            content_binding_violations, content_binding_records = self._content_binding_pass(
-                work_item=work_item,
-                actions=plan.actions,
-            )
+            stage_violations.extend(zone_composer_violations)
             stage_violations.extend(content_binding_violations)
+            stage_violations.extend(landing_zone_violations)
+            stage_violations.extend(import_resolution_violations)
+            if landing_zone_warnings:
+                patch_guard.project_warnings.extend(landing_zone_warnings)
             stage_violations.extend(
                 self._frontend_writefile_violations(
                     work_item=work_item,
@@ -1707,6 +2110,28 @@ class CodexExecutor(TaskExecutor):
                 stage_violations.extend(
                     validate_frontend_topology(actions=plan.actions, enforce=True)
                 )
+                composition_assessment = evaluate_frontend_composition_governance(
+                    actions=plan.actions,
+                    enforce=True,
+                    repo_root=repo_root,
+                )
+                frontend_composition_telemetry = {
+                    "layout_integrity_score": composition_assessment.layout_integrity_score,
+                    "responsive_safety_score": composition_assessment.responsive_safety_score,
+                    "overflow_risk_score": composition_assessment.overflow_risk_score,
+                    "typography_consistency_score": composition_assessment.typography_consistency_score,
+                    "visual_composition_score": composition_assessment.visual_composition_score,
+                }
+                stage_violations.extend(composition_assessment.violations)
+            if work_item.type == "GENESIS_FOUNDATION":
+                foundation_assessment = evaluate_frontend_foundation_governance(actions=plan.actions, enforce=True)
+                foundation_quality_telemetry = {
+                    "foundation_layout_score": foundation_assessment.foundation_layout_score,
+                    "navigation_integrity": foundation_assessment.navigation_integrity,
+                    "responsive_shell_score": foundation_assessment.responsive_shell_score,
+                    "design_system_score": foundation_assessment.design_system_score,
+                }
+                stage_violations.extend(foundation_assessment.violations)
             stage_violations.extend(
                 self._mutation_strategy_violations(
                     work_item=work_item,
@@ -1715,8 +2140,29 @@ class CodexExecutor(TaskExecutor):
                 )
             )
             stage_violations.extend(design_violations)
+            payload_dict_for_mode = work_item.payload if isinstance(work_item.payload, dict) else {}
+            runtime_governance_mode = _runtime_governance_mode(payload_dict_for_mode)
             if stage_violations:
-                patch_guard.violations.extend(stage_violations)
+                if runtime_governance_mode == "stability":
+                    downgraded = [item for item in stage_violations if _stability_warning_violation(item)]
+                    blocking = [item for item in stage_violations if item not in downgraded]
+                    if downgraded:
+                        patch_guard.project_warnings.extend(
+                            [f"[stability_mode] {item}" for item in downgraded]
+                        )
+                    if blocking:
+                        patch_guard.violations.extend(blocking)
+                elif runtime_governance_mode == "emergency":
+                    downgraded = [item for item in stage_violations if _emergency_warning_violation(item)]
+                    blocking = [item for item in stage_violations if item not in downgraded]
+                    if downgraded:
+                        patch_guard.project_warnings.extend(
+                            [f"[emergency_mode] {item}" for item in downgraded]
+                        )
+                    if blocking:
+                        patch_guard.violations.extend(blocking)
+                else:
+                    patch_guard.violations.extend(stage_violations)
             if design_violation_records:
                 design_mode = _project_contract_enforcement_mode(
                     context.project_contract if isinstance(context.project_contract, dict) else None
@@ -1751,153 +2197,183 @@ class CodexExecutor(TaskExecutor):
                     reason="operator_confirmation_granted",
                 )
             if governance_decision.requires_confirmation:
-                await self._job_manager.fail_job(
-                    prepared.job_id,
-                    reason="human_review_required",
-                    next_action=_operator_confirmation_next_action(verification),
-                    error_kind="human_review_required",
-                    input_tokens=usage_input_tokens,
-                    output_tokens=usage_output_tokens,
-                    actual_cost_cents=usage_cost_cents,
-                    approval_state="pending",
-                    status="blocked",
-                    details={
-                        "verification": verification.model_dump(),
-                        "mutation_governance": {
-                            "mutation_class": governance_decision.mutation_class,
-                            "reason": governance_decision.reason,
-                        },
-                    },
-                )
-                return {
-                    "status": "FAILED",
-                    "message": "Patch execution requires operator confirmation before mutating the repository.",
-                    "payload": {
-                        "approval_required": True,
-                        "stop_reason": "human_review_required",
-                        "error": "operator_confirmation_required",
-                        "actions": [a.model_dump() for a in plan.actions],
-                        "verification": verification.model_dump(),
-                        "touched_files": patch_guard.touched_files,
-                        "mutation_governance": {
-                            "mutation_class": governance_decision.mutation_class,
-                            "reason": governance_decision.reason,
-                        },
-                    },
-                    "warnings": ["requires_confirmation"],
-                }
-            if not patch_guard.ok:
-                repair_error: Exception | None = None
-                if (
-                    stage_violations
-                    and not stage_scope_repair_attempted
-                    and self._is_stage_scope_repair_candidate(
-                        work_item=work_item,
-                        violations=stage_violations,
+                if runtime_governance_mode == "emergency" and not contains_sensitive_paths(target_files):
+                    governance_decision = MutationGovernanceDecision(
+                        requires_confirmation=False,
+                        mutation_class=governance_decision.mutation_class,
+                        reason="emergency_ship_mode",
                     )
-                ):
-                    stage_scope_repair_attempted = True
-                    await self._job_manager.record_retry(prepared.job_id, "stage_scope_violation")
-                    try:
-                        plan, raw, repair_usage, repair_model_tier, repair_model_name = (
-                            await self._repair_plan_after_stage_scope_violation(
-                                client=client,
-                                prepared=prepared,
-                                user_prompt=user_prompt,
-                                allowed_files=allowed_files,
-                                violations=stage_violations,
-                                work_item=work_item,
-                                contract=contract,
+                else:
+                    await self._job_manager.fail_job(
+                        prepared.job_id,
+                        reason="human_review_required",
+                        next_action=_operator_confirmation_next_action(verification),
+                        error_kind="human_review_required",
+                        input_tokens=usage_input_tokens,
+                        output_tokens=usage_output_tokens,
+                        actual_cost_cents=usage_cost_cents,
+                        approval_state="pending",
+                        status="blocked",
+                        details={
+                            "verification": verification.model_dump(),
+                            "mutation_governance": {
+                                "mutation_class": governance_decision.mutation_class,
+                                "reason": governance_decision.reason,
+                            },
+                        },
+                    )
+                    return {
+                        "status": "FAILED",
+                        "message": "Patch execution requires operator confirmation before mutating the repository.",
+                        "payload": {
+                            "approval_required": True,
+                            "stop_reason": "human_review_required",
+                            "error": "operator_confirmation_required",
+                            "actions": [a.model_dump() for a in plan.actions],
+                            "verification": verification.model_dump(),
+                            "touched_files": patch_guard.touched_files,
+                            "mutation_governance": {
+                                "mutation_class": governance_decision.mutation_class,
+                                "reason": governance_decision.reason,
+                            },
+                        },
+                        "warnings": ["requires_confirmation"],
+                    }
+            if not patch_guard.ok:
+                if runtime_governance_mode == "stability":
+                    downgraded_pg = [item for item in list(patch_guard.violations) if _stability_warning_violation(item)]
+                    if downgraded_pg:
+                        patch_guard = replace(
+                            patch_guard,
+                            project_warnings=[
+                                *patch_guard.project_warnings,
+                                *[f"[stability_mode] {item}" for item in downgraded_pg],
+                            ],
+                            violations=[item for item in patch_guard.violations if item not in downgraded_pg],
+                        )
+                elif runtime_governance_mode == "emergency":
+                    downgraded_pg = [item for item in list(patch_guard.violations) if _emergency_warning_violation(item)]
+                    if downgraded_pg:
+                        patch_guard = replace(
+                            patch_guard,
+                            project_warnings=[
+                                *patch_guard.project_warnings,
+                                *[f"[emergency_mode] {item}" for item in downgraded_pg],
+                            ],
+                            violations=[item for item in patch_guard.violations if item not in downgraded_pg],
+                        )
+                if not patch_guard.ok:
+                    repair_error: Exception | None = None
+                    if (
+                        stage_violations
+                        and not stage_scope_repair_attempted
+                        and self._is_stage_scope_repair_candidate(
+                            work_item=work_item,
+                            violations=stage_violations,
+                        )
+                    ):
+                        stage_scope_repair_attempted = True
+                        await self._job_manager.record_retry(prepared.job_id, "stage_scope_violation")
+                        try:
+                            plan, raw, repair_usage, repair_model_tier, repair_model_name = (
+                                await self._repair_plan_after_stage_scope_violation(
+                                    client=client,
+                                    prepared=prepared,
+                                    user_prompt=user_prompt,
+                                    allowed_files=allowed_files,
+                                    violations=stage_violations,
+                                    work_item=work_item,
+                                    contract=contract,
+                                )
                             )
-                        )
-                    except Exception as repair_exc:
-                        repair_error = repair_exc
-                    else:
-                        repair_input_tokens = int(
-                            repair_usage.get("input_tokens") or estimate_tokens(system_prompt + user_prompt)
-                        )
-                        repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
-                        usage_input_tokens += repair_input_tokens
-                        usage_output_tokens += repair_output_tokens
-                        usage_cost_cents = round(
-                            usage_cost_cents
-                            + self._job_manager.estimate_cost_cents(
-                                repair_model_tier,
-                                repair_input_tokens,
-                                repair_output_tokens,
-                            ),
-                            4,
-                        )
-                        usage = {
-                            "input_tokens": usage_input_tokens,
-                            "output_tokens": usage_output_tokens,
-                        }
-                        attempt_tiers.append(repair_model_tier)
-                        effective_model_tier = repair_model_tier
-                        effective_model_name = repair_model_name
-                        contract = await self._record_execution_budget(
-                            context,
-                            prepared_job_id=str(prepared.job_id),
-                            work_item_id=str(work_item.id),
-                            selected_model_tier=repair_model_tier,
-                            input_tokens=repair_input_tokens,
-                            output_tokens=repair_output_tokens,
-                        )
-                        if contract is not None and contract.budget.budget_mode == "BLOCKED":
-                            next_action = self._budget_next_action(work_item)
-                            await self._job_manager.fail_job(
-                                prepared.job_id,
-                                reason="run_budget_exhausted",
-                                next_action=next_action,
-                                error_kind="run_budget_exhausted",
-                                input_tokens=usage_input_tokens,
-                                output_tokens=usage_output_tokens,
-                                actual_cost_cents=usage_cost_cents,
-                                details={
-                                    "attempt_tiers": attempt_tiers,
-                                    "provider": self.settings.llm_provider,
-                                    "model_name": repair_model_name,
-                                    "budget": contract.budget.to_dict(),
-                                },
+                        except Exception as repair_exc:
+                            repair_error = repair_exc
+                        else:
+                            repair_input_tokens = int(
+                                repair_usage.get("input_tokens") or estimate_tokens(system_prompt + user_prompt)
                             )
-                            return self._run_budget_exhausted_result(
-                                contract=contract,
+                            repair_output_tokens = int(repair_usage.get("output_tokens") or estimate_tokens(raw))
+                            usage_input_tokens += repair_input_tokens
+                            usage_output_tokens += repair_output_tokens
+                            usage_cost_cents = round(
+                                usage_cost_cents
+                                + self._job_manager.estimate_cost_cents(
+                                    repair_model_tier,
+                                    repair_input_tokens,
+                                    repair_output_tokens,
+                                ),
+                                4,
+                            )
+                            usage = {
+                                "input_tokens": usage_input_tokens,
+                                "output_tokens": usage_output_tokens,
+                            }
+                            attempt_tiers.append(repair_model_tier)
+                            effective_model_tier = repair_model_tier
+                            effective_model_name = repair_model_name
+                            contract = await self._record_execution_budget(
+                                context,
                                 prepared_job_id=str(prepared.job_id),
-                                next_action=next_action,
+                                work_item_id=str(work_item.id),
+                                selected_model_tier=repair_model_tier,
+                                input_tokens=repair_input_tokens,
+                                output_tokens=repair_output_tokens,
                             )
-                        continue
-                if repair_error is not None:
-                    patch_guard.violations.append(f"Automatic stage-scope repair failed: {repair_error}")
-                await self._job_manager.fail_job(
-                    prepared.job_id,
-                    reason="patch_guard_violation",
-                    next_action="Reduce the touched file set or adjust the scoped plan before retrying.",
-                    error_kind="patch_guard_violation",
-                    input_tokens=usage_input_tokens,
-                    output_tokens=usage_output_tokens,
-                    actual_cost_cents=usage_cost_cents,
-                    details={
-                        "violations": patch_guard.violations,
-                        "design_violation_records": design_violation_records,
-                    },
-                )
-                return {
-                    "status": "FAILED",
-                    "message": "; ".join(patch_guard.violations),
-                    "payload": {
-                        "actions": [a.model_dump() for a in plan.actions],
-                        "allowed_files": patch_guard.allowed_files,
-                        "touched_files": patch_guard.touched_files,
-                        "protected_zones": patch_guard.protected_zones,
-                        "safe_zones": patch_guard.safe_zones,
-                        "project_rules_applied": patch_guard.project_rules_applied,
-                        "project_warnings": patch_guard.project_warnings,
-                        "project_enforcement_mode": patch_guard.project_enforcement_mode,
-                        "project_violation_records": patch_guard.project_violation_records,
-                        "design_violation_records": design_violation_records,
-                    },
-                    "warnings": ["patch_guard_violation", *([] if not design_violation_records else ["design_contract_violation"])],
-                }
+                            if contract is not None and contract.budget.budget_mode == "BLOCKED":
+                                next_action = self._budget_next_action(work_item)
+                                await self._job_manager.fail_job(
+                                    prepared.job_id,
+                                    reason="run_budget_exhausted",
+                                    next_action=next_action,
+                                    error_kind="run_budget_exhausted",
+                                    input_tokens=usage_input_tokens,
+                                    output_tokens=usage_output_tokens,
+                                    actual_cost_cents=usage_cost_cents,
+                                    details={
+                                        "attempt_tiers": attempt_tiers,
+                                        "provider": self.settings.llm_provider,
+                                        "model_name": repair_model_name,
+                                        "budget": contract.budget.to_dict(),
+                                    },
+                                )
+                                return self._run_budget_exhausted_result(
+                                    contract=contract,
+                                    prepared_job_id=str(prepared.job_id),
+                                    next_action=next_action,
+                                )
+                            continue
+                    if repair_error is not None:
+                        patch_guard.violations.append(f"Automatic stage-scope repair failed: {repair_error}")
+                    await self._job_manager.fail_job(
+                        prepared.job_id,
+                        reason="patch_guard_violation",
+                        next_action="Reduce the touched file set or adjust the scoped plan before retrying.",
+                        error_kind="patch_guard_violation",
+                        input_tokens=usage_input_tokens,
+                        output_tokens=usage_output_tokens,
+                        actual_cost_cents=usage_cost_cents,
+                        details={
+                            "violations": patch_guard.violations,
+                            "design_violation_records": design_violation_records,
+                        },
+                    )
+                    return {
+                        "status": "FAILED",
+                        "message": "; ".join(patch_guard.violations),
+                        "payload": {
+                            "actions": [a.model_dump() for a in plan.actions],
+                            "allowed_files": patch_guard.allowed_files,
+                            "touched_files": patch_guard.touched_files,
+                            "protected_zones": patch_guard.protected_zones,
+                            "safe_zones": patch_guard.safe_zones,
+                            "project_rules_applied": patch_guard.project_rules_applied,
+                            "project_warnings": patch_guard.project_warnings,
+                            "project_enforcement_mode": patch_guard.project_enforcement_mode,
+                            "project_violation_records": patch_guard.project_violation_records,
+                            "design_violation_records": design_violation_records,
+                        },
+                        "warnings": ["patch_guard_violation", *([] if not design_violation_records else ["design_contract_violation"])],
+                    }
 
             total_written = 0
             changed_lines = 0
@@ -2306,6 +2782,22 @@ class CodexExecutor(TaskExecutor):
                     "execution_zone": execution_zone,
                     "transitions": mutation_strategy_transitions,
                 },
+                "content_binding_attempted": bool(content_binding_telemetry.get("content_binding_attempted")),
+                "content_binding_enabled": bool(content_binding_telemetry.get("content_binding_enabled")),
+                "content_binding_fallback_used": bool(content_binding_telemetry.get("content_binding_fallback_used")),
+                "layout_integrity_score": frontend_composition_telemetry.get("layout_integrity_score"),
+                "responsive_safety_score": frontend_composition_telemetry.get("responsive_safety_score"),
+                "overflow_risk_score": frontend_composition_telemetry.get("overflow_risk_score"),
+                "typography_consistency_score": frontend_composition_telemetry.get("typography_consistency_score"),
+                "visual_composition_score": frontend_composition_telemetry.get("visual_composition_score"),
+                "foundation_layout_score": foundation_quality_telemetry.get("foundation_layout_score"),
+                "navigation_integrity": foundation_quality_telemetry.get("navigation_integrity"),
+                "responsive_shell_score": foundation_quality_telemetry.get("responsive_shell_score"),
+                "design_system_score": foundation_quality_telemetry.get("design_system_score"),
+                "import_resolution_attempts": import_resolution_telemetry.get("import_resolution_attempts"),
+                "resolved_component_imports": import_resolution_telemetry.get("resolved_component_imports"),
+                "unresolved_component_imports": import_resolution_telemetry.get("unresolved_component_imports"),
+                "import_normalization_repairs": import_resolution_telemetry.get("import_normalization_repairs"),
             },
         }
 
@@ -2581,7 +3073,7 @@ class CodexExecutor(TaskExecutor):
             return False
         if allowed_files and rel_path not in allowed_files:
             return False
-        if Path(rel_path).suffix.lower() not in {".html", ".css", ".js", ".mjs", ".cjs"}:
+        if Path(rel_path).suffix.lower() not in {".html", ".css", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue"}:
             return False
         return self._apply_patch_by_hunk_replacement(repo=repo, rel_path=rel_path, patch_text=patch_text)
 
@@ -2679,7 +3171,7 @@ class CodexExecutor(TaskExecutor):
             return False
         if "PLAN" in work_item.type:
             return True
-        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        if work_item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
             return True
         if work_item.type == "WRITE_TESTS":
             return any("WRITE_TESTS may only modify Python test files" in violation for violation in violations)
@@ -2706,7 +3198,7 @@ class CodexExecutor(TaskExecutor):
         selected_strategy: str,
         actions: list[Any],
     ) -> list[str]:
-        if work_item.type not in {"CODE_FRONTEND", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
+        if work_item.type not in {"GENESIS_FOUNDATION", "CODE_FRONTEND", "CODE_BACKEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING"}:
             return []
         # Frontend: strategy is a preference signal; only reject mixed mutation output.
         # Backend: write_file_preferred recovery is a hard override for convergence.
@@ -2721,10 +3213,167 @@ class CodexExecutor(TaskExecutor):
             ]
         return []
 
+    def _enforce_feature_zone_composer(
+        self,
+        *,
+        work_item: WorkItem,
+        repo_root: Path,
+        actions: list[Any],
+    ) -> tuple[list[Any], list[str]]:
+        if work_item.type != "CODE_FRONTEND":
+            return actions, []
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        if str(payload.get("mutation_class") or "").strip().upper() != "FEATURE":
+            return actions, []
+
+        landing_rel = "apps/web/src/pages/LandingPage.vue"
+        landing_path = repo_root / landing_rel
+        if not landing_path.exists():
+            return actions, []
+        try:
+            landing_content = landing_path.read_text(encoding="utf-8")
+        except Exception:
+            return actions, []
+
+        zone_names = sorted({str(m.group(1) or "").strip().lower() for m in _LANDING_ZONE_MARKER_RE.finditer(landing_content)})
+        if not zone_names:
+            return actions, [
+                "LandingPage missing required zone markers; run GENESIS_FOUNDATION repair before CODE_FRONTEND."
+            ]
+
+        task_text = " ".join(str(payload.get(key) or "").strip().lower() for key in ("task_title", "title", "goal", "task_description"))
+        target_zone = "hero" if "hero" in task_text else "testimonials" if "testimonial" in task_text else "cta" if "cta" in task_text else "feature"
+        if target_zone not in zone_names:
+            target_zone = zone_names[0]
+
+        component_actions = [
+            action
+            for action in actions
+            if getattr(action, "type", None) == "write_file"
+            and isinstance(getattr(action, "path", None), str)
+            and "/components/landing/" in str(getattr(action, "path", "")).replace("\\", "/").lower()
+            and str(getattr(action, "path", "")).replace("\\", "/").lower().endswith(".vue")
+        ]
+        if not component_actions:
+            return actions, []
+
+        preferred_component = component_actions[0]
+        for action in component_actions:
+            candidate_path = str(getattr(action, "path", "")).lower()
+            if target_zone in candidate_path:
+                preferred_component = action
+                break
+        component_file = str(getattr(preferred_component, "path", "")).replace("\\", "/")
+        component_name = Path(component_file).stem
+        component_tag = f"<{component_name} />"
+
+        composed_landing = replace_zone(landing_content, target_zone, component_tag)
+        updated_actions: list[Any] = []
+        for action in actions:
+            action_type = getattr(action, "type", None)
+            path = str(getattr(action, "path", "") or "").replace("\\", "/")
+            lower = path.lower()
+            if action_type in {"write_file", "apply_patch"} and lower.endswith("/pages/landingpage.vue"):
+                continue
+            if action_type == "write_file" and "/components/landing/" in lower and path != component_file:
+                # Keep feature scope tight: only selected section component is authored by model.
+                continue
+            updated_actions.append(action)
+
+        updated_actions.append(Action(type="write_file", path=landing_rel, content=composed_landing))
+
+        # Hero task hard-scope: only HeroSection component + hero zone composition block.
+        if "hero" in task_text and not component_file.lower().endswith("/components/landing/herosection.vue"):
+            return updated_actions, [
+                "FEATURE hero task scope violation: expected HeroSection component generation for hero zone composition."
+            ]
+        return updated_actions, []
+
+    def _landing_topology_from_payload(self, payload: dict[str, Any]) -> FrontendTopology:
+        topology_plan = payload.get("frontend_topology_plan") if isinstance(payload.get("frontend_topology_plan"), dict) else {}
+        configured = topology_plan.get("composition_zones") if isinstance(topology_plan, dict) else None
+        if not isinstance(configured, list) or not configured:
+            return DEFAULT_LANDING_TOPOLOGY
+        default_map = {zone.zone_component: zone for zone in DEFAULT_LANDING_TOPOLOGY.zones}
+        zones: list[FrontendZone] = []
+        for raw in configured:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            component = raw.strip()
+            if component in default_map:
+                zones.append(default_map[component])
+                continue
+            zone_id = component.replace("Zone", "").strip().lower() or component.lower()
+            zones.append(
+                FrontendZone(
+                    id=zone_id,
+                    zone_component=component,
+                    semantic_type=zone_id,
+                    default_component=f"{component.replace('Zone', '').strip() or 'Section'}Placeholder",
+                    required=True,
+                )
+            )
+        if not zones:
+            return DEFAULT_LANDING_TOPOLOGY
+        return FrontendTopology(layout="landing", shell="PageShell", zones=tuple(zones))
+
+    def _auto_normalize_landing_zone_actions(
+        self,
+        *,
+        work_item: WorkItem,
+        actions: list[Any],
+    ) -> tuple[list[Any], list[str], list[str]]:
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        if work_item.type != "CODE_FRONTEND":
+            return actions, [], []
+        mutation_class = str(payload.get("mutation_class") or "").strip().upper()
+        if mutation_class not in {"FEATURE", "POLISH"}:
+            return actions, [], []
+        stability_mode = _runtime_governance_mode(payload) == "stability"
+        graph_topology = self._landing_topology_from_payload(payload)
+
+        updated_actions: list[Any] = []
+        warnings: list[str] = []
+        violations: list[str] = []
+        for action in actions:
+            if getattr(action, "type", None) != "write_file":
+                updated_actions.append(action)
+                continue
+            path = str(getattr(action, "path", "") or "").strip().replace("\\", "/").lower()
+            content = getattr(action, "content", None)
+            if not (path.endswith("/pages/landingpage.vue") and isinstance(content, str)):
+                updated_actions.append(action)
+                continue
+            topology_signature = _landing_topology_signature(content)
+            required_zone_components = [zone.zone_component for zone in graph_topology.zones if zone.required]
+            missing_zones = [zone for zone in required_zone_components if zone not in topology_signature["zone_components"]]
+            if not missing_zones:
+                updated_actions.append(action)
+                continue
+            normalized_content, normalize_warnings, ok = normalize_landing_graph_content(
+                content=content,
+                topology=graph_topology,
+                stability_mode=stability_mode,
+            )
+            warnings.extend(normalize_warnings)
+            if not ok:
+                violations.append("LandingPage normalization failed: unable to restore required zones.")
+                updated_actions.append(action)
+                continue
+            updated_actions.append(Action(type="write_file", path=str(getattr(action, "path", "")), content=normalized_content))
+        return updated_actions, warnings, violations
+
     def _frontend_writefile_violations(self, *, work_item: WorkItem, actions: list[Any]) -> list[str]:
-        if work_item.type != "CODE_FRONTEND" or not _is_static_frontend_scope(work_item.payload):
+        if work_item.type not in {"CODE_FRONTEND", "GENESIS_FOUNDATION"} or not _is_static_frontend_scope(work_item.payload):
             return []
         violations: list[str] = []
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        task_text = " ".join(
+            str(payload.get(key) or "").strip().lower()
+            for key in ("task_title", "title", "goal", "task_description")
+        )
+        testimonials_task = "testimonial" in task_text
+        hero_cta_task = ("hero" in task_text) and ("cta" in task_text or "call-to-action" in task_text or "button" in task_text)
         topology_plan = (
             (work_item.payload or {}).get("frontend_topology_plan")
             if isinstance(work_item.payload, dict)
@@ -2742,6 +3391,42 @@ class CodexExecutor(TaskExecutor):
             for action in actions
             if getattr(action, "type", None) == "write_file"
         }
+        protected_shells = {
+            "apps/web/src/app.vue",
+            "apps/web/src/layouts/pageshell.vue",
+        }
+        task_source = str(payload.get("task_source") or "").strip().lower()
+        repository_state = str(payload.get("repository_state") or "").strip().upper()
+        mutation_class = str(payload.get("mutation_class") or "").strip().upper()
+        stability_mode = _runtime_governance_mode(payload) == "stability"
+        maturity_registry = _primitive_maturity_registry(payload)
+        feature_mode = (
+            work_item.type == "CODE_FRONTEND"
+            and task_source not in {"genesis", "genesis_setup", "foundation_setup", "base_task"}
+            and not task_source.startswith("genesis.")
+            and repository_state not in {"GENESIS", "EARLY_BUILD"}
+        )
+        landing_mode = mutation_class if mutation_class in {"FEATURE", "POLISH", "RECOVERY"} else ("FEATURE" if feature_mode else "")
+
+        required_landing_zones = list(_LANDING_ZONE_COMPONENTS)
+        topology_plan = payload.get("frontend_topology_plan") if isinstance(payload.get("frontend_topology_plan"), dict) else None
+        if isinstance(topology_plan, dict):
+            composition_zones = topology_plan.get("composition_zones")
+            if isinstance(composition_zones, list):
+                for zone in composition_zones:
+                    if not isinstance(zone, str):
+                        continue
+                    cleaned = zone.strip()
+                    if cleaned and cleaned not in required_landing_zones:
+                        required_landing_zones.append(cleaned)
+
+        zone_completion_violations = self._validate_zone_replacement_completion(
+            work_item=work_item,
+            actions=actions,
+            testimonials_task=testimonials_task,
+        )
+        violations.extend(zone_completion_violations)
+
         for action in actions:
             if getattr(action, "type", None) != "write_file":
                 continue
@@ -2756,6 +3441,62 @@ class CodexExecutor(TaskExecutor):
                     "Use minimal apply_patch hunks instead of full-file rewrites."
                 )
             normalized_path = str(path).strip().lower().replace("\\", "/")
+            if feature_mode and "/src/pages/" in normalized_path and not normalized_path.endswith("/pages/landingpage.vue"):
+                violations.append(
+                    f"CODE_FRONTEND composition zone violation in {path}: feature tasks may not create or replace isolated pages; mutate LandingPage composition zones and section components."
+                )
+            if normalized_path in protected_shells and landing_mode in {"FEATURE", "POLISH", "RECOVERY"}:
+                violations.append(
+                    f"CODE_FRONTEND foundation topology violation in {path}: {landing_mode.lower()} tasks may not fully replace App.vue or PageShell.vue."
+                )
+            if testimonials_task and normalized_path.endswith("/pages/landingpage.vue") and "<TestimonialsPlaceholder" in content:
+                # Handled by semantic zone replacement validator to keep recovery deterministic.
+                pass
+            if landing_mode in {"FEATURE", "POLISH", "RECOVERY"} and normalized_path.endswith("/pages/landingpage.vue"):
+                topology = _landing_topology_signature(content)
+                missing_zones = [zone for zone in required_landing_zones if zone not in topology["zone_components"]]
+                if not bool(topology["has_page_shell"]) and not (
+                    landing_mode in {"FEATURE", "POLISH"} and _runtime_governance_mode(payload) == "stability"
+                ):
+                    violations.append(
+                        f"CODE_FRONTEND foundation topology violation in {path}: LandingPage shell must preserve PageShell."
+                    )
+                if missing_zones:
+                    violations.append(
+                        f"CODE_FRONTEND composition zone violation in {path}: LandingPage composition zones must be preserved ({', '.join(missing_zones)} missing)."
+                    )
+                if "router-view" in content.lower() and landing_mode == "FEATURE":
+                    violations.append(
+                        f"CODE_FRONTEND foundation topology violation in {path}: feature tasks may not alter routing topology inside LandingPage composition."
+                    )
+                if landing_mode == "POLISH":
+                    removed_components = [zone for zone in required_landing_zones if f"<{zone}" not in content]
+                    if removed_components:
+                        violations.append(
+                            f"CODE_FRONTEND polish authority violation in {path}: polish tasks may not remove composition graph nodes ({', '.join(removed_components)} missing)."
+                        )
+                if landing_mode == "RECOVERY":
+                    looks_minimal = ("<main" in content.lower()) and ("<PageShell" not in content)
+                    if looks_minimal:
+                        violations.append(
+                            f"CODE_FRONTEND recovery topology violation in {path}: recovery tasks may not replace LandingPage with minimal topology."
+                        )
+            if testimonials_task and normalized_path.endswith("/components/landing/testimonialssection.vue"):
+                required_primitives = ("SectionContainer", "SectionHeading", "ContentGrid", "TestimonialCard")
+                used_primitives = [name for name in required_primitives if f"<{name}" in content]
+                if stability_mode:
+                    unverified = [name for name in used_primitives if not _primitive_is_verified_visual_or_higher(name, maturity_registry)]
+                    if unverified:
+                        violations.append(
+                            f"CODE_FRONTEND primitive composition violation in {path}: stability mode forbids unverified primitives ({', '.join(unverified)}). "
+                            "Use self-contained Tailwind cards unless primitive maturity is verified_visual or production_ready."
+                        )
+                else:
+                    missing_primitives = [name for name in required_primitives if name not in used_primitives]
+                    if missing_primitives:
+                        violations.append(
+                            f"CODE_FRONTEND primitive composition violation in {path}: testimonials sections must compose governed primitives ({', '.join(missing_primitives)} missing)."
+                        )
             line_count = content.count("\n") + (1 if content else 0)
             has_governed_import = "components/governed/" in content or "components\\\\governed\\\\" in content
             used_components = set(_COMPONENT_TAG_RE.findall(content))
@@ -2797,12 +3538,196 @@ class CodexExecutor(TaskExecutor):
                 and size > MAX_FRONTEND_ROOT_MONOLITH_BYTES
                 and planned_components
                 and not (touched_write_paths & planned_components)
-            ):
+                ):
+                    violations.append(
+                        f"CODE_FRONTEND structural contract violation in {path}: planned topology requires componentized output "
+                        "but no planned component files were written."
+                    )
+            if _EMPTY_CTA_RE.search(content):
                 violations.append(
-                    f"CODE_FRONTEND structural contract violation in {path}: planned topology requires componentized output "
-                    "but no planned component files were written."
+                    f"CODE_FRONTEND feature materialization violation in {path}: empty <PrimaryButton> insertion is not allowed."
+                )
+
+        mutating_payload = ""
+        for action in actions:
+            action_type = getattr(action, "type", None)
+            if action_type == "apply_patch" and isinstance(getattr(action, "patch", None), str):
+                mutating_payload += "\n" + _added_patch_payload(action.patch)
+            elif action_type == "write_file" and isinstance(getattr(action, "content", None), str):
+                mutating_payload += "\n" + action.content
+
+        if hero_cta_task and mutating_payload.strip():
+            if _EMPTY_CTA_RE.search(mutating_payload):
+                violations.append(
+                    "CODE_FRONTEND feature materialization violation: empty PrimaryButton markup detected in hero/CTA task."
+                )
+            meaningful_markers = [
+                "<HeroSection",
+                "<section",
+                "<h1",
+                "<h2",
+                "Get Started",
+                "Request Demo",
+            ]
+            has_non_empty_cta = bool(_NON_EMPTY_CTA_RE.search(mutating_payload))
+            has_material_structure = any(marker.lower() in mutating_payload.lower() for marker in meaningful_markers)
+            added_nontrivial_lines = [
+                line for line in mutating_payload.splitlines()
+                if line.strip() and not line.strip().startswith(("<!--", "//", "/*", "*"))
+            ]
+            if (not has_non_empty_cta) or (not has_material_structure) or len(added_nontrivial_lines) < 4:
+                violations.append(
+                    "CODE_FRONTEND feature materialization violation: hero/CTA task produced negligible or non-perceptible UI delta."
                 )
         return violations
+
+    def _validate_zone_replacement_completion(
+        self,
+        *,
+        work_item: WorkItem,
+        actions: list[Any],
+        testimonials_task: bool,
+    ) -> list[str]:
+        if work_item.type != "CODE_FRONTEND" or not testimonials_task:
+            return []
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        mutation_class = str(payload.get("mutation_class") or "FEATURE").strip().upper()
+        if mutation_class != "FEATURE":
+            return []
+
+        violations: list[str] = []
+        writes_by_path: dict[str, str] = {}
+        for action in actions:
+            if getattr(action, "type", None) != "write_file":
+                continue
+            path = str(getattr(action, "path", "") or "").replace("\\", "/").strip()
+            content = getattr(action, "content", None)
+            if path and isinstance(content, str):
+                writes_by_path[path.lower()] = content
+
+        landing_path = "apps/web/src/pages/landingpage.vue"
+        landing = writes_by_path.get(landing_path)
+        if not landing:
+            return violations
+
+        if "<TestimonialsPlaceholder" in landing:
+            violations.append(
+                "CODE_FRONTEND incomplete zone replacement in apps/web/src/pages/LandingPage.vue: "
+                "TestimonialsPlaceholder must be removed for FEATURE testimonials tasks."
+            )
+
+        mounted = bool(re.search(r"<TestimonialsSection\b", landing))
+        if not mounted:
+            violations.append(
+                "CODE_FRONTEND incomplete zone replacement in apps/web/src/pages/LandingPage.vue: "
+                "TestimonialsSection must be mounted."
+            )
+
+        in_zone = bool(
+            re.search(
+                r"<TestimonialsZone\b[^>]*>[\s\S]*?<TestimonialsSection\b",
+                landing,
+                flags=re.IGNORECASE,
+            )
+        )
+        if mounted and not in_zone:
+            violations.append(
+                "CODE_FRONTEND incomplete zone replacement in apps/web/src/pages/LandingPage.vue: "
+                "TestimonialsSection must be mounted inside TestimonialsZone."
+            )
+
+        has_import = bool(
+            re.search(
+                r"import\s+TestimonialsSection\s+from\s+['\"][^'\"]*TestimonialsSection\.vue['\"]",
+                landing,
+            )
+        )
+        if mounted and not has_import:
+            violations.append(
+                "CODE_FRONTEND incomplete zone replacement in apps/web/src/pages/LandingPage.vue: "
+                "TestimonialsSection import is missing."
+            )
+
+        component_path = "apps/web/src/components/landing/testimonialssection.vue"
+        component_content = writes_by_path.get(component_path)
+        target_files = payload.get("target_files") if isinstance(payload.get("target_files"), list) else []
+        target_lower = {str(item).strip().lower().replace("\\", "/") for item in target_files if isinstance(item, str)}
+        component_reachable = bool(
+            mounted and (
+                component_content is not None
+                or component_path in target_lower
+            )
+        )
+        if mounted and not component_reachable:
+            violations.append(
+                "CODE_FRONTEND incomplete zone replacement in apps/web/src/pages/LandingPage.vue: "
+                "TestimonialsSection component is not reachable from LandingPage mutation graph."
+            )
+
+        if component_content is not None:
+            has_quote = "quote" in component_content.lower()
+            has_name = "name" in component_content.lower()
+            has_role = ("role" in component_content.lower()) or ("company" in component_content.lower())
+            has_cards = bool(
+                re.search(r"v-for\s*=\s*['\"][^'\"]*testimonial", component_content, flags=re.IGNORECASE)
+            ) or len(re.findall(r"<article\b", component_content, flags=re.IGNORECASE)) >= 3
+            if not (has_quote and has_name and has_role and has_cards):
+                violations.append(
+                    "CODE_FRONTEND incomplete zone replacement in apps/web/src/components/landing/TestimonialsSection.vue: "
+                    "rendered testimonial content is incomplete (require visible quote/name/role cards)."
+                )
+        return violations
+
+    def _normalize_frontend_import_actions(
+        self,
+        *,
+        work_item: WorkItem,
+        repo_root: Path,
+        actions: list[Any],
+    ) -> tuple[list[Any], dict[str, Any], list[str]]:
+        telemetry: dict[str, Any] = {
+            "import_resolution_attempts": 0,
+            "resolved_component_imports": [],
+            "unresolved_component_imports": [],
+            "import_normalization_repairs": 0,
+        }
+        if work_item.type not in {"FIX_TEST_FAILURE", "FIX_FRONTEND_SYNTAX"}:
+            return actions, telemetry, []
+
+        updated_actions: list[Any] = []
+        for action in actions:
+            if getattr(action, "type", None) != "write_file":
+                updated_actions.append(action)
+                continue
+            path = str(getattr(action, "path", "") or "").strip().replace("\\", "/")
+            content = getattr(action, "content", None)
+            if not (path.endswith(".vue") and isinstance(content, str) and path.startswith("apps/web/")):
+                updated_actions.append(action)
+                continue
+            normalized = normalize_frontend_imports(
+                repo_root=repo_root,
+                importing_file=path,
+                content=content,
+            )
+            telemetry["import_resolution_attempts"] = int(telemetry["import_resolution_attempts"]) + int(normalized.import_resolution_attempts)
+            telemetry["import_normalization_repairs"] = int(telemetry["import_normalization_repairs"]) + int(normalized.import_normalization_repairs)
+            telemetry["resolved_component_imports"] = sorted(
+                set(telemetry["resolved_component_imports"]) | set(normalized.resolved_component_imports)
+            )
+            telemetry["unresolved_component_imports"] = sorted(
+                set(telemetry["unresolved_component_imports"]) | set(normalized.unresolved_component_imports)
+            )
+            updated_actions.append(
+                Action(type="write_file", path=path, content=normalized.content)
+            )
+
+        violations: list[str] = []
+        if telemetry["unresolved_component_imports"]:
+            unresolved = ", ".join(telemetry["unresolved_component_imports"])
+            violations.append(
+                f"Frontend import normalization could not resolve components: {unresolved}."
+            )
+        return updated_actions, telemetry, violations
 
     def _backend_writefile_violations(self, *, work_item: WorkItem, actions: list[Any]) -> list[str]:
         if not _is_backend_codegen_type(work_item.type):
@@ -2859,11 +3784,18 @@ class CodexExecutor(TaskExecutor):
         *,
         work_item: WorkItem,
         actions: list[Any],
-    ) -> tuple[list[str], list[dict[str, Any]]]:
+    ) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
         if work_item.type != "CODE_FRONTEND":
-            return [], []
+            return [], [], {
+                "content_binding_attempted": False,
+                "content_binding_enabled": False,
+                "content_binding_fallback_used": False,
+            }
         violations: list[str] = []
         binding_records: list[dict[str, Any]] = []
+        binding_enabled = self._content_binding_enabled(work_item)
+        attempted = False
+        fallback_used = False
         for action in actions:
             if getattr(action, "type", None) != "write_file":
                 continue
@@ -2876,29 +3808,75 @@ class CodexExecutor(TaskExecutor):
             # are not compiled as Vue templates, so ContentSlot tags render as empty custom elements.
             if suffix != ".vue":
                 continue
-            literals = extract_literals(content)
+            if not binding_enabled:
+                if "<ContentSlot" in content:
+                    attempted = True
+                    fallback_used = True
+                    action.content = self._strip_content_slots_to_plain_text(content)
+                continue
+            try:
+                attempted = True
+                literals = extract_literals(content)
+            except Exception:
+                # Content extraction must never block code delivery. Keep original component text.
+                fallback_used = True
+                continue
             if not literals:
                 continue
-            bindings = build_binding_registry(rel_path=path, literals=literals)
-            rewritten = rewrite_with_content_slots(content, bindings)
-            binding_violations = validate_binding_rewrite(rewritten.content, bindings)
-            if binding_violations:
-                violations.extend([f"{path}: {msg}" for msg in binding_violations])
-                continue
-            action.content = rewritten.content
-            for entry in bindings:
-                if entry.key not in rewritten.applied_keys:
+            try:
+                bindings = build_binding_registry(rel_path=path, literals=literals)
+                rewritten = rewrite_with_content_slots(content, bindings)
+                binding_violations = validate_binding_rewrite(rewritten.content, bindings)
+                if binding_violations:
+                    # Fallback-safe default: preserve original component content with inline text.
+                    fallback_used = True
                     continue
-                binding_records.append(
-                    {
-                        "environment": "PREVIEW",
-                        "key": entry.key,
-                        "type": "text",
-                        "value": entry.value,
-                        "source": "runtime",
-                    }
-                )
-        return violations, binding_records
+                action.content = rewritten.content
+                for entry in bindings:
+                    if entry.key not in rewritten.applied_keys:
+                        continue
+                    binding_records.append(
+                        {
+                            "environment": "PREVIEW",
+                            "key": entry.key,
+                            "type": "text",
+                            "value": entry.value,
+                            "source": "runtime",
+                        }
+                    )
+            except Exception:
+                # Fallback-safe default: preserve original component content with inline text.
+                fallback_used = True
+                continue
+        return violations, binding_records, {
+            "content_binding_attempted": attempted,
+            "content_binding_enabled": binding_enabled,
+            "content_binding_fallback_used": fallback_used,
+        }
+
+    def _content_binding_enabled(self, work_item: WorkItem) -> bool:
+        if self.settings.content_binding_enabled:
+            return True
+        payload_value = getattr(work_item, "payload", None)
+        payload = payload_value if isinstance(payload_value, dict) else {}
+        return bool(payload.get("content_binding_enabled"))
+
+    def _strip_content_slots_to_plain_text(self, content: str) -> str:
+        def _replacement(match: re.Match[str]) -> str:
+            attrs = match.group(1) or ""
+            bound = _SLOT_FALLBACK_BOUND_RE.search(attrs)
+            if bound:
+                expr = (bound.group(1) or "").strip()
+                if expr:
+                    return f"{{{{ {expr} }}}}"
+            literal = _SLOT_FALLBACK_LITERAL_RE.search(attrs)
+            if literal:
+                value = (literal.group(1) or "").strip()
+                if value:
+                    return value
+            return ""
+
+        return _CONTENT_SLOT_TAG_RE.sub(_replacement, content)
 
     async def _sync_content_bindings(
         self,
@@ -2974,6 +3952,8 @@ class CodexExecutor(TaskExecutor):
             for name in design_packet.get("allowed_components", [])
             if isinstance(name, str) and str(name).strip()
         }
+        if self._content_binding_enabled(work_item):
+            allowed_components.add("ContentSlot")
         if not enforce_inline and not enforce_tokens and not allowed_components:
             return []
 
@@ -3021,7 +4001,7 @@ class CodexExecutor(TaskExecutor):
                             rewritten_patch = rewritten_patch.replace(source_hex.upper(), target_hex.upper())
                         setattr(action, "patch", rewritten_patch)
                         content = self._extract_added_patch_content(rewritten_patch)
-            if enforce_inline and bootstrap_mode:
+            if enforce_inline and (bootstrap_mode or recovery_strategy == "design_token_auto_normalize"):
                 # Bootstrap scaffolds should not fail hard for inline-style drift.
                 # Strip inline style attributes before validation and continue.
                 stripped = _INLINE_STYLE_ATTR_RE.sub("", content)
@@ -3033,6 +4013,15 @@ class CodexExecutor(TaskExecutor):
                         if isinstance(original_patch, str):
                             setattr(action, "patch", _INLINE_STYLE_ATTR_RE.sub("", original_patch))
                     content = stripped
+            stripped_style_blocks = _STYLE_BLOCK_RE.sub("", content)
+            if stripped_style_blocks != content:
+                if action_type == "write_file":
+                    setattr(action, "content", stripped_style_blocks)
+                elif action_type == "apply_patch":
+                    original_patch = getattr(action, "patch", None)
+                    if isinstance(original_patch, str):
+                        setattr(action, "patch", _STYLE_BLOCK_RE.sub("", original_patch))
+                content = stripped_style_blocks
             if enforce_inline and _STYLE_ATTR_RE.search(content):
                 records.append(
                     {
@@ -3049,8 +4038,8 @@ class CodexExecutor(TaskExecutor):
             if enforce_tokens:
                 for raw_hex in _HEX_COLOR_RE.findall(content):
                     lowered = raw_hex.lower()
-                    if bootstrap_mode and recovery_strategy == "design_token_auto_normalize":
-                        # In genesis/early bootstrap flows, treat first-pass color drift as
+                    if recovery_strategy == "design_token_auto_normalize":
+                        # In token-normalization recovery passes, treat first-pass color drift as
                         # auto-normalized to avoid dead loops on deterministic scaffolding.
                         allowed_hex.add(lowered)
                         continue
@@ -3100,7 +4089,7 @@ class CodexExecutor(TaskExecutor):
             return False
         if "PLAN" in work_item.type:
             return False
-        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION", "RUN_TESTS"}:
+        if work_item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION", "RUN_TESTS"}:
             return False
         return True
 
@@ -3167,7 +4156,7 @@ class CodexExecutor(TaskExecutor):
                     boosted_cap,
                     int(getattr(self.settings, "codex_frontend_retry_completion_cap_tokens", boosted_cap)),
                 )
-        elif work_item.type not in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        elif work_item.type not in {"PLAN_DAG", "PLAN_BACKEND_TOPOLOGY", "REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
             boosted_floor = max(boosted_floor, 1600)
         boosted = min(max(current_max_tokens * 2, boosted_floor), boosted_cap)
         if contract is not None and contract.budget.remaining_tokens > 0:
@@ -3245,7 +4234,15 @@ class CodexExecutor(TaskExecutor):
             )
         if work_item.type == "CODE_FRONTEND":
             recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
-            if recovery_strategy == "write_file_preferred":
+            if recovery_strategy == "componentization_repair":
+                guidance.append(
+                    "Recovery override: structural contract violation was detected."
+                    " Extract oversized root-page sections into components and keep the root page as a thin composition shell."
+                )
+                guidance.append(
+                    "Prefer creating governed components such as HeroSection, LeadCaptureForm, PricingSection, and CTASection when relevant."
+                )
+            elif recovery_strategy == "write_file_preferred":
                 guidance.append(
                     "Recovery override: the previous patch failed to apply."
                     " For this retry, prefer write_file for the primary scoped file with complete updated contents."
@@ -3265,7 +4262,7 @@ class CodexExecutor(TaskExecutor):
                     "Recovery override: emit write_file for scoped backend file updates."
                     " Do not emit apply_patch for this retry."
                 )
-        if work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        if work_item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
             guidance.append(
                 "This is a review stage. Return only note actions with concise findings or approval guidance."
             )
@@ -3348,7 +4345,13 @@ class CodexExecutor(TaskExecutor):
             )
         if work_item.type == "CODE_FRONTEND":
             recovery_strategy = str((work_item.payload or {}).get("recovery_strategy") or "").strip().lower()
-            if recovery_strategy == "write_file_preferred" or (static_frontend_scope and patch_drift_error):
+            if recovery_strategy == "componentization_repair":
+                repair_prompt += (
+                    "\nFor this CODE_FRONTEND recovery retry, perform componentization repair."
+                    " Move large root-page sections into reusable component files and reduce the root page to composition."
+                    " Keep edits constrained to allowed files and avoid monolithic index/root rewrites."
+                )
+            elif recovery_strategy == "write_file_preferred" or (static_frontend_scope and patch_drift_error):
                 repair_prompt += (
                     "\nFor this CODE_FRONTEND recovery retry, avoid apply_patch."
                     " Emit write_file for the primary scoped file (index.html when present) with complete updated content."
@@ -3470,17 +4473,26 @@ class CodexExecutor(TaskExecutor):
                 "\nThis is a planning stage. Return only note actions that describe the intended patch, tests, "
                 "and validation sequence. Never emit apply_patch, write_file, or delete_file actions."
             )
-        elif work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        elif work_item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
             repair_prompt += (
                 "\nThis is a review stage. Return only note actions with concise findings or approval guidance. "
                 "Never emit apply_patch, write_file, or delete_file actions."
             )
         elif work_item.type == "WRITE_TESTS":
-            repair_prompt += (
-                "\nWRITE_TESTS may only modify Python test files whose basename starts with test_. "
-                "Touch only scoped test files and prefer write_file with the full updated test contents."
-                " Never modify non-test files such as index.html."
-            )
+            payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+            package_affinity = str(payload.get("package_affinity") or "").strip().lower()
+            if package_affinity.startswith("apps/web"):
+                repair_prompt += (
+                    "\nWRITE_TESTS(frontend) must generate framework-native Vue/Vite tests."
+                    " Modify only scoped JS/TS spec files (for example *.spec.ts) under apps/web."
+                    " Use Vitest + Vue Test Utils conventions, no Python tests, and never modify implementation files in this repair."
+                )
+            else:
+                repair_prompt += (
+                    "\nWRITE_TESTS may only modify Python test files whose basename starts with test_. "
+                    "Touch only scoped test files and prefer write_file with the full updated test contents."
+                    " Never modify non-test files such as index.html."
+                )
         current_prompt = repair_prompt
         current_max_tokens = self.settings.codex_max_tokens
         raw = ""
@@ -3575,9 +4587,18 @@ class CodexExecutor(TaskExecutor):
                 "\nIf a long apply_patch diff risks malformed hunks, prefer write_file for one scoped file with full contents."
             )
         if work_item.type == "WRITE_TESTS":
-            repair_prompt += (
-                "\nWRITE_TESTS may only modify scoped test files. Never modify non-test implementation files."
-            )
+            payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+            package_affinity = str(payload.get("package_affinity") or "").strip().lower()
+            if package_affinity.startswith("apps/web"):
+                repair_prompt += (
+                    "\nWRITE_TESTS(frontend): regenerate scoped frontend tests using Vitest + Vue Test Utils."
+                    " Use JS/TS spec files under apps/web and never emit Python test modules."
+                    " Never modify non-test implementation files."
+                )
+            else:
+                repair_prompt += (
+                    "\nWRITE_TESTS may only modify scoped test files. Never modify non-test implementation files."
+                )
         if enforcement_mode == "strict":
             repair_prompt += "\nStrict enforcement is active. Any contract violation will be rejected."
         else:
@@ -3705,7 +4726,7 @@ class CodexExecutor(TaskExecutor):
         )
         architecture = context.architecture_profile if context and isinstance(context.architecture_profile, dict) else {}
         project_contract = context.project_contract if context and isinstance(context.project_contract, dict) else {}
-        review_stage = work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}
+        review_stage = work_item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}
         if review_stage:
             base = (
                 "Produce JSON per schema. This is a review task. "
@@ -3727,6 +4748,26 @@ class CodexExecutor(TaskExecutor):
                 f" Restrict edits to these files unless validation proves a neighboring file is required: {file_list}. "
                 f"Keep the patch within {edit_budget['file_budget']} files and prefer a {edit_budget['mode']} strategy."
             )
+        mutation_class = str(payload.get("mutation_class") or "").strip().upper()
+        allowed_operations = [str(item).strip() for item in (payload.get("allowed_operations") or []) if isinstance(item, str) and str(item).strip()]
+        forbidden_operations = [str(item).strip() for item in (payload.get("forbidden_operations") or []) if isinstance(item, str) and str(item).strip()]
+        protected_files = [str(item).strip() for item in (payload.get("protected_files") or []) if isinstance(item, str) and str(item).strip()]
+        allowed_zones = [str(item).strip() for item in (payload.get("allowed_zones") or []) if isinstance(item, str) and str(item).strip()]
+        forbidden_zones = [str(item).strip() for item in (payload.get("forbidden_zones") or []) if isinstance(item, str) and str(item).strip()]
+        if mutation_class:
+            base += f" Mutation authority class: {mutation_class}."
+        if allowed_operations:
+            base += " Allowed operations: " + ", ".join(allowed_operations[:6]) + "."
+        if forbidden_operations:
+            base += " Forbidden operations: " + ", ".join(forbidden_operations[:6]) + "."
+        if protected_files:
+            base += " Protected infrastructure files (do not replace outside FOUNDATION): " + ", ".join(protected_files[:4]) + "."
+        if allowed_zones:
+            base += " Allowed zones: " + ", ".join(allowed_zones[:6]) + "."
+        if forbidden_zones:
+            base += " Forbidden zones: " + ", ".join(forbidden_zones[:6]) + "."
+        if bool(payload.get("zone_composer_required")):
+            base += " For LandingPage.vue, edit only inside explicit zone markers <!-- zone:<name>:start --> ... <!-- zone:<name>:end -->."
         if mutation_strategy in MUTATION_STRATEGIES:
             base += f" Mutation strategy: {mutation_strategy}."
             if mutation_strategy == "write_file":
@@ -3826,6 +4867,19 @@ class CodexExecutor(TaskExecutor):
                 base += " Do NOT use inline style attributes."
             if bool(project_enforcement.get("enforce_color_tokens")):
                 base += " Do NOT introduce raw hex colors outside approved tokens."
+                allowed_hex_values = sorted(
+                    _flatten_token_colors(
+                        design_packet.get("token_registry")
+                        if isinstance(design_packet.get("token_registry"), dict)
+                        else {}
+                    )
+                )
+                if allowed_hex_values:
+                    base += (
+                        " If a hex literal is absolutely unavoidable, use only approved values: "
+                        + ", ".join(allowed_hex_values[:12])
+                        + "."
+                    )
             if components:
                 base += " Use approved components when relevant: " + ", ".join(components[:6]) + "."
             if token_names:
@@ -3879,6 +4933,89 @@ class CodexExecutor(TaskExecutor):
                     " For this retry, prefer write_file with full contents for the primary scoped file (typically index.html),"
                     " then keep any remaining edits minimal."
                 )
+        if work_item.type in {"CODE_FRONTEND", "GENESIS_FOUNDATION"} and not review_stage:
+            base += (
+                " Emit exactly one mutating action type per response: either all write_file or all apply_patch, never both."
+                " Do not create or modify root-level frontend files such as LandingPage.vue/App.vue outside package roots."
+                " Keep Vue page/component edits under package source roots (for monorepo typically apps/web/src/pages or apps/web/src/components)."
+            )
+            base += (
+                " Frontend mutation contract: this repository is a governed Vue 3 + Vite + Tailwind system."
+                " Pages compose sections; sections compose governed components."
+                " Use Tailwind utility classes and tokenized classes only."
+                " Forbidden patterns: style=, <style> blocks, raw hex colors, rgb(, and ad-hoc spacing literals."
+            )
+            base += (
+                " Composition governance v1: every section must include a responsive container, max-width wrapper,"
+                " spacing rhythm, typography hierarchy, mobile-safe layout, and overflow protection."
+                " Prefer governed primitives: PageShell, SectionContainer, ContentGrid, ResponsiveStack, TestimonialCard."
+                " Require max-w-*, mx-auto, responsive breakpoints, and bounded SVG/icon sizing classes."
+                " Disallow unbounded giant dimensions and ad-hoc oversized layout utilities."
+            )
+            if _runtime_governance_mode(payload) == "stability":
+                base += (
+                    " Stability mode rendering policy: prioritize (1) visible rendering, (2) responsive layout,"
+                    " (3) stable composition, (4) primitive reuse, (5) abstraction purity."
+                    " Never sacrifice visible rendering for abstraction governance."
+                    " Use self-contained Tailwind implementation by default."
+                    " Only auto-compose primitives when maturity is verified_visual or production_ready."
+                    " Primitive maturity states: experimental, stable, verified_visual, production_ready."
+                )
+            if target_files:
+                canonical_frontend_targets = [
+                    path for path in target_files
+                    if path.startswith("apps/web/src/") or path.startswith("apps/web/index.html")
+                ]
+                if canonical_frontend_targets:
+                    base += (
+                        " Canonical frontend target paths for this task: "
+                        + ", ".join(canonical_frontend_targets[:6])
+                        + "."
+                    )
+            goal_text = " ".join(
+                [
+                    str(payload.get("task_title") or ""),
+                    str(payload.get("goal") or ""),
+                    str(payload.get("task_description") or ""),
+                ]
+            ).lower()
+            if any(token in goal_text for token in ("testimonial", "pricing", "cta", "hero", "section")):
+                base += (
+                    " Topology-constrained component repair is active."
+                    " Mutate only the target component file, the composition shell, and immediate governed neighbors."
+                    " Never mutate index.html, App.vue, or unrelated components for this task."
+                )
+            if "testimonial" in goal_text:
+                base += (
+                    " Placeholder replacement rule: replace <TestimonialsPlaceholder /> in LandingPage composition"
+                    " with the generated testimonials section component instead of creating isolated pages."
+                )
+            base += (
+                " Composition zones are authoritative: HeroZone, FeatureZone, TestimonialsZone, CTAZone."
+                " Feature tasks must mutate inside these zones and preserve the remaining zone graph."
+                " Do not create standalone replacement pages for feature work."
+            )
+        if work_item.type == "GENESIS_FOUNDATION" and not review_stage:
+            base += (
+                " Genesis foundation stage: build a production-grade frontend shell before feature tasks."
+                " Generate Navbar, Footer, PageShell, SectionContainer, responsive layout primitives, typography hierarchy,"
+                " theme-token-ready classes, and LandingPage skeleton."
+                " LandingPage must initially compose: HeroZone, FeatureZone, TestimonialsZone, CTAZone, Footer."
+                " Ensure mobile-safe structure and overflow safety."
+            )
+            prior_failures: list[str] = []
+            last_error = str(getattr(work_item, "last_error", "") or "").strip()
+            if last_error:
+                prior_failures.append(last_error)
+            recovery_reason = str(payload.get("recovery_reason") or "").strip()
+            if recovery_reason:
+                prior_failures.append(f"recovery_reason={recovery_reason}")
+            if prior_failures:
+                base += " Previous attempt failed because: " + "; ".join(prior_failures[:2]) + "."
+                base += (
+                    " Do not repeat prior violations."
+                    " Specifically avoid: style=, <style>, #fff, #000, rgb(."
+                )
         if _is_backend_codegen_type(work_item.type):
             backend_topology_plan = (
                 (work_item.payload or {}).get("backend_topology_plan")
@@ -3903,7 +5040,7 @@ class CodexExecutor(TaskExecutor):
             "imports such as BeautifulSoup or bs4 unless you also update the declared dependencies and the runtime "
             "is known to install them. For HTML validation, prefer html.parser or simple string assertions."
         )
-        if work_item.type == "FIX_TEST_FAILURE":
+        if work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"}:
             fix_prompt = (
                 base
                 + " You are fixing failing tests. Use the failing stack info and previous diff. "
@@ -3916,6 +5053,14 @@ class CodexExecutor(TaskExecutor):
                 + test_dependency_guard
             )
             target_files = _target_files_from_payload(work_item.payload if isinstance(work_item.payload, dict) else {})
+            if work_item.type in {"FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_VISUAL_QUALITY"}:
+                fix_prompt = (
+                    base
+                    + " You are fixing frontend layout composition governance violations. "
+                      "Preserve existing feature topology and section reachability while repairing layout quality. "
+                      "Do not rewrite page ownership layers; make the smallest bounded patch. "
+                      "Use governed primitives and Tailwind-safe composition patterns."
+                )
             if static_frontend_scope or "index.html" in target_files:
                 fix_prompt += (
                     " For static frontend recovery, target index.html first when it is in scope. "
@@ -3923,9 +5068,23 @@ class CodexExecutor(TaskExecutor):
                 )
             return fix_prompt
         if work_item.type == "WRITE_TESTS":
+            payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+            package_affinity = str(payload.get("package_affinity") or "").strip().lower()
+            if package_affinity.startswith("apps/web"):
+                return (
+                    base
+                    + " Framework-native test contract: this is a Vue/Vite frontend package."
+                      " Generate Vitest + Vue Test Utils tests in TypeScript (*.spec.ts) colocated under apps/web (prefer component-local tests directories)."
+                      " Never generate Python test files for frontend Vue components."
+                      " Use jsdom-friendly assertions and behavior-level checks; avoid brittle DOM shape coupling."
+                      " Prefer write_file for full test-file rewrites when repair context is unstable."
+                      " Do not modify implementation files in WRITE_TESTS."
+                )
             return (
                 base
-                + " Keep validation lightweight and directly tied to the requested behavior."
+                + " Framework-native test contract: this is a backend/runtime test surface."
+                  " Generate pytest-compatible Python tests only (test_*.py)."
+                  " Keep validation lightweight and directly tied to the requested behavior."
                   " Prefer behavior-oriented assertions over brittle implementation details; avoid requiring exact CSS class names, selector shapes, or DOM nesting unless the task explicitly requires them."
                   " When multiple valid implementations are possible (for example background image vs inline img), encode acceptance checks that allow equivalent outcomes aligned to the task intent."
                   " For existing large or frequently edited test files, prefer write_file with full file contents over fragile line-numbered patch hunks."
@@ -3977,12 +5136,12 @@ class CodexExecutor(TaskExecutor):
             task_type = "planning"
             ambiguity = "high"
             workflow_type = "interactive_planning"
-        elif work_item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}:
+        elif work_item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
             role = "reviewer"
             task_type = "review"
             ambiguity = "high" if risk_level == "high" else "medium"
             workflow_type = "pr_review"
-        elif work_item.type == "FIX_TEST_FAILURE":
+        elif work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"}:
             role = "coder"
             task_type = "bugfix"
             ambiguity = "medium"
@@ -4065,7 +5224,7 @@ class CodexExecutor(TaskExecutor):
             surface=self._surface_for_work_item(work_item),
             entrypoint="runtime.codex_executor",
             changed_files=risk_paths,
-            tests_failed=work_item.type == "FIX_TEST_FAILURE",
+            tests_failed=work_item.type in {"FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY"},
             metadata=metadata,
         )
 
@@ -4087,10 +5246,16 @@ class CodexExecutor(TaskExecutor):
             "PLAN_DAG": "planning",
             "PLAN_BACKEND_TOPOLOGY": "planning",
             "REVIEW_DIFF": "review",
+            "PREVIEW_VALIDATE": "review",
             "REVIEW_INTEGRATION": "review",
             "WRITE_TESTS": "tests",
             "RUN_TESTS": "tests",
             "FIX_TEST_FAILURE": "tests",
+            "FIX_LAYOUT_COMPOSITION": "frontend",
+            "FIX_ZONE_COMPOSITION": "frontend",
+            "FIX_FRONTEND_SYNTAX": "frontend",
+            "FIX_VISUAL_QUALITY": "frontend",
+            "GENESIS_FOUNDATION": "frontend",
             "CODE_FRONTEND": "frontend",
             "CODE_BACKEND": "backend",
             "GENERATE_ROUTE": "backend",
@@ -4145,9 +5310,9 @@ class CodexExecutor(TaskExecutor):
         return ordered[:12]
 
     def _risk_level_for_work_item(self, work_item: WorkItem, candidate_paths: list[str]) -> str:
-        if contains_sensitive_paths(candidate_paths) or work_item.type == "REVIEW_INTEGRATION":
+        if contains_sensitive_paths(candidate_paths) or work_item.type in {"PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}:
             return "high"
-        if work_item.type in {"CODE_BACKEND", "CODE_FRONTEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING", "FIX_TEST_FAILURE", "REVIEW_DIFF"} or len(candidate_paths) >= 4:
+        if work_item.type in {"CODE_BACKEND", "CODE_FRONTEND", "GENERATE_ROUTE", "GENERATE_SERVICE", "GENERATE_REPOSITORY", "GENERATE_CAPABILITY_BINDING", "FIX_TEST_FAILURE", "FIX_LAYOUT_COMPOSITION", "FIX_ZONE_COMPOSITION", "FIX_FRONTEND_SYNTAX", "FIX_VISUAL_QUALITY", "REVIEW_DIFF"} or len(candidate_paths) >= 4:
             return "medium"
         return "low"
 

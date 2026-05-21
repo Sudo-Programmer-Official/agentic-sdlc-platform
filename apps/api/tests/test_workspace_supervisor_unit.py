@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import shutil
 import uuid
 from pathlib import Path
 
 import pytest
 
 from app.db.models import Run
+from app.services.frontend_composition_integrity import ensure_frontend_foundation_files
 from app.services import workspace_supervisor
 from app.services.workspace_supervisor import WorkspacePaths
 
@@ -116,3 +118,70 @@ async def test_build_run_context_includes_architecture_runtime_meta(monkeypatch,
     assert context.architecture_profile["safe_paths"] == ["apps/web/src"]
     assert context.project_contract is not None
     assert context.project_contract["summary"]["enforcement_enabled"] is True
+
+
+def test_normalize_frontend_workspace_rewrites_missing_app_import(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    src = repo_root / "apps" / "web" / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "main.ts").write_text(
+        'import { createApp } from "vue";\nimport App from "./App.vue";\n\ncreateApp(App).mount("#app");\n',
+        encoding="utf-8",
+    )
+
+    repaired = workspace_supervisor._normalize_frontend_workspace_bootstrap(repo_root)
+
+    updated = (src / "main.ts").read_text(encoding="utf-8")
+    assert './App.vue' in updated
+    assert "createApp(App).mount" in updated
+    assert "apps/web/src/App.vue" in repaired
+
+
+def test_normalize_frontend_workspace_app_shell_uses_landing_page_when_available(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    src = repo_root / "apps" / "web" / "src"
+    (src / "pages").mkdir(parents=True, exist_ok=True)
+    (src / "pages" / "LandingPage.vue").write_text("<template><section>Testimonials</section></template>\n", encoding="utf-8")
+    (src / "main.ts").write_text(
+        'import { createApp } from "vue";\nimport App from "./App.vue";\n\ncreateApp(App).mount("#app");\n',
+        encoding="utf-8",
+    )
+
+    repaired = workspace_supervisor._normalize_frontend_workspace_bootstrap(repo_root)
+
+    app_shell = (src / "App.vue").read_text(encoding="utf-8")
+    assert 'import LandingPage from "./pages/LandingPage.vue"' in app_shell
+    assert "<LandingPage />" in app_shell
+    assert "apps/web/src/App.vue" in repaired
+
+
+def test_normalize_frontend_workspace_bootstraps_missing_main_ts(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    src = repo_root / "apps" / "web" / "src"
+    src.mkdir(parents=True, exist_ok=True)
+
+    repaired = workspace_supervisor._normalize_frontend_workspace_bootstrap(repo_root)
+
+    assert (src / "main.ts").exists()
+    assert (src / "App.vue").exists()
+    content = (src / "main.ts").read_text(encoding="utf-8")
+    assert './App.vue' in content
+    assert "apps/web/src/main.ts" in repaired
+
+
+def test_ensure_frontend_foundation_files_copies_missing_template_files(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    source_template = repo_root / "runtime-templates" / "frontend-foundation"
+    source_template.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        Path.cwd() / "runtime-templates" / "fullstack-monorepo",
+        source_template,
+        dirs_exist_ok=True,
+    )
+    (repo_root / "apps" / "web" / "src").mkdir(parents=True, exist_ok=True)
+
+    copied = ensure_frontend_foundation_files(repo_root=repo_root)
+
+    assert "apps/web/src/layouts/PageShell.vue" in copied
+    assert (repo_root / "apps" / "web" / "src" / "layouts" / "PageShell.vue").exists()
+    assert (repo_root / "runtime-contracts" / "component-manifest.json").exists()

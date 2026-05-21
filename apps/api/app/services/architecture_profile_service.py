@@ -50,6 +50,14 @@ _STARTER_TOPOLOGY_BY_PRESET = {
         ".gitignore",
         "README.md",
     ],
+    "vue_element_plus": [
+        "apps/web/package.json",
+        "apps/web/vite.config.ts",
+        "apps/api/pyproject.toml",
+        "apps/api/app/main.py",
+        ".gitignore",
+        "README.md",
+    ],
     "react_node": [
         "apps/web/package.json",
         "apps/api/package.json",
@@ -781,6 +789,36 @@ def _build_bootstrap_profile(
 ) -> tuple[dict[str, Any], str]:
     manifests = _manifest_index(repo_paths)
     stack = _infer_stack(repo_paths, manifests)
+    if isinstance(blueprint, dict):
+        architecture_blueprint = blueprint.get("architecture_blueprint")
+        if isinstance(architecture_blueprint, dict):
+            stack_spec = architecture_blueprint.get("stack")
+            if isinstance(stack_spec, dict):
+                frontend_framework = stack_spec.get("frontend")
+                if isinstance(frontend_framework, str) and frontend_framework.strip():
+                    stack["frontend_frameworks"] = _unique_strings(
+                        [*stack.get("frontend_frameworks", []), frontend_framework.strip()]
+                    )
+                backend_framework = stack_spec.get("backend")
+                if isinstance(backend_framework, str) and backend_framework.strip():
+                    stack["backend_frameworks"] = _unique_strings(
+                        [*stack.get("backend_frameworks", []), backend_framework.strip()]
+                    )
+                ui_libraries = stack_spec.get("ui_library")
+                if isinstance(ui_libraries, str) and ui_libraries.strip():
+                    stack["frontend_libraries"] = _unique_strings([*stack.get("frontend_libraries", []), ui_libraries.strip()])
+                elif isinstance(ui_libraries, list):
+                    stack["frontend_libraries"] = _unique_strings(
+                        [
+                            *stack.get("frontend_libraries", []),
+                            *[item for item in ui_libraries if isinstance(item, str) and item.strip()],
+                        ]
+                    )
+        preset_key = str(blueprint.get("stack_preset_key") or "").strip().lower()
+        if "element_plus" in preset_key or "element-plus" in preset_key:
+            stack["frontend_frameworks"] = _unique_strings([*stack.get("frontend_frameworks", []), "element-plus"])
+            stack["frontend_libraries"] = _unique_strings([*stack.get("frontend_libraries", []), "element-plus"])
+            stack["confidence"] = "inferred" if stack.get("confidence") == "minimal" else stack.get("confidence")
     packages = _upgrade_package_kinds(_build_package_inventory(repo_paths, preview), repo_paths)
     commands = _infer_commands(preview=preview, repo_paths=repo_paths, packages=packages)
     validation_recipes = _infer_validation_recipes(commands=commands, packages=packages, preview=preview)

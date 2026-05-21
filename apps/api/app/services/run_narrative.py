@@ -35,9 +35,11 @@ PHASE_BY_TYPE = {
     "GENERATE_REPOSITORY": "build",
     "GENERATE_CAPABILITY_BINDING": "build",
     "CODE_BACKEND": "build",
+    "GENESIS_FOUNDATION": "build",
     "CODE_FRONTEND": "build",
     "WRITE_TESTS": "verify",
     "RUN_TESTS": "verify",
+    "PREVIEW_VALIDATE": "review",
     "REVIEW_DIFF": "review",
     "REVIEW_INTEGRATION": "review",
 }
@@ -50,9 +52,11 @@ RATIONALE_BY_TYPE = {
     "GENERATE_REPOSITORY": "Generate the backend repository module bounded by the topology plan.",
     "GENERATE_CAPABILITY_BINDING": "Generate backend capability binding modules bounded by the topology plan.",
     "CODE_BACKEND": "Apply the smallest backend patch needed to satisfy the run goal.",
+    "GENESIS_FOUNDATION": "Establish a production-grade frontend foundation shell before feature-level UI mutation.",
     "CODE_FRONTEND": "Apply the smallest frontend patch needed to satisfy the run goal.",
     "WRITE_TESTS": "Update or add tests so the change is reviewable and reproducible.",
     "RUN_TESTS": "Validate the patch against the relevant test suite before review or delivery.",
+    "PREVIEW_VALIDATE": "Validate preview/runtime readiness before final integration handoff.",
     "REVIEW_DIFF": "Score the generated patch for scope, confidence, and review readiness.",
     "REVIEW_INTEGRATION": "Confirm the composed change is safe to hand off for preview or pull request creation.",
 }
@@ -65,9 +69,11 @@ SUCCESS_CRITERIA_BY_TYPE = {
     "GENERATE_REPOSITORY": ["Repository module is generated within planned ownership boundaries."],
     "GENERATE_CAPABILITY_BINDING": ["Capability binding module is generated within planned ownership boundaries."],
     "CODE_BACKEND": ["Backend changes are applied without expanding beyond the scoped subsystem."],
+    "GENESIS_FOUNDATION": ["Frontend foundation shell is present and ready for incremental feature composition."],
     "CODE_FRONTEND": ["Frontend changes are applied without expanding beyond the scoped subsystem."],
     "WRITE_TESTS": ["Relevant test coverage is updated for the generated patch."],
     "RUN_TESTS": ["Validation tests complete without failures."],
+    "PREVIEW_VALIDATE": ["Preview/runtime readiness checks complete without failures."],
     "REVIEW_DIFF": ["Patch risk and confidence are recorded before review."],
     "REVIEW_INTEGRATION": ["The run is ready for preview or pull request review."],
 }
@@ -80,9 +86,11 @@ EXPECTED_COMMANDS_BY_TYPE = {
     "GENERATE_REPOSITORY": ["generate repository module"],
     "GENERATE_CAPABILITY_BINDING": ["generate capability binding module"],
     "CODE_BACKEND": ["apply backend patch"],
+    "GENESIS_FOUNDATION": ["build frontend foundation shell"],
     "CODE_FRONTEND": ["apply frontend patch"],
     "WRITE_TESTS": ["update tests"],
     "RUN_TESTS": ["run tests"],
+    "PREVIEW_VALIDATE": ["validate preview"],
     "REVIEW_DIFF": ["review diff"],
     "REVIEW_INTEGRATION": ["review integration"],
 }
@@ -268,7 +276,7 @@ def _validation_state(run: Run, work_items: list[WorkItem]) -> str:
     if run.workspace_status == "ERROR":
         return "BLOCKED"
     validation_items = [
-        item for item in work_items if item.type in {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
+        item for item in work_items if item.type in {"WRITE_TESTS", "RUN_TESTS", "PREVIEW_VALIDATE", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
     ]
     effective_validation_items = [item for item in validation_items if not is_superseded_failure(item)]
     if not effective_validation_items:
@@ -293,7 +301,7 @@ def _review_state(run: Run, summary: RunTimelineSummary, work_items: list[WorkIt
         approval_status = run.summary.get("approval_status")
         if isinstance(approval_status, str) and approval_status:
             return approval_status
-    review_items = [item for item in work_items if item.type in {"REVIEW_DIFF", "REVIEW_INTEGRATION"}]
+    review_items = [item for item in work_items if item.type in {"REVIEW_DIFF", "PREVIEW_VALIDATE", "REVIEW_INTEGRATION"}]
     effective_review_items = [item for item in review_items if not is_superseded_failure(item)]
     if any(is_blocking_failure(item) for item in effective_review_items):
         return "CHANGES_REQUESTED"

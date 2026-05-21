@@ -1,0 +1,14 @@
+{
+  "setup_experience": "recommended",
+  "architecture_mode": "guided",
+  "repo_layout": "monorepo",
+  "frontend_stack": "vue_vite",
+  "backend_stack": "fastapi",
+  "capabilities": ["auth", "analytics"],
+  "runtime_defaults": {
+    "component_driven_frontend": true,
+    "module_driven_backend": true,
+    "deterministic_targeting": true,
+    "strict_topology_contracts": true
+  }
+}

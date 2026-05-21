@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import uuid
+from pathlib import Path
 from urllib.parse import quote_plus
 from datetime import date, datetime, timezone, timedelta
 from collections import defaultdict
@@ -68,6 +69,7 @@ from app.db.session import get_session
 from app.schemas.persistence import (
     ProjectCreate,
     ProjectOut,
+    RuntimeLifecycleOut,
     DocumentCreate,
     DocumentOut,
     TaskCreate,
@@ -80,6 +82,7 @@ from app.schemas.persistence import (
     ProjectRepositoryPreflightOut,
     ProjectRepositoryBootstrapRequest,
     ProjectRepositoryBootstrapOut,
+    FoundationPrOut,
     FoundationReadinessOut,
     GitHubConnectInfoOut,
     GitHubInstallationRepositoryOut,
@@ -159,9 +162,12 @@ from app.services.task_lineage import add_task_lineage_traces
 from app.services.pr_service import create_pr_from_artifact
 from app.services.preview_service import (
     DEFAULT_STATIC_START_COMMAND,
+    assess_preview_runtime_readiness,
     get_project_preview_profile,
     get_run_preview,
     launch_run_preview,
+    preview_profile_available,
+    resolve_preview_profile,
     stop_run_preview,
     upsert_project_preview_profile,
 )
@@ -169,6 +175,9 @@ from app.services.run_comparison import compare_runs
 from app.services.run_memory import find_similar_runs
 from app.services.run_narrative import build_run_narrative
 from app.services.run_launch import _schedule_orchestrator_start, launch_run_for_project
+from app.services.runtime_bootstrap_service import bootstrap_project_runtime
+from app.services.repo_provisioning_service import auto_provision_project_repository, reconcile_connected_repository_foundation
+from app.services.runtime_lifecycle_service import set_runtime_state
 from app.services.run_delivery import publish_run_branch_if_ready
 from app.services.run_resume import prepare_run_for_resume
 from app.services.strategy_selection import create_strategy_group, get_strategy_group
@@ -248,6 +257,19 @@ ENVIRONMENT_TEMPLATES: dict[str, dict] = {
             {"key": "OPENAI_API_KEY", "required": False, "scope": "backend"},
         ],
     },
+    "vue_element_plus": {
+        "name": "Vue + Element Plus",
+        "description": "Vue frontend with Element Plus UI and FastAPI backend.",
+        "deployment_targets": ["vercel", "render"],
+        "provider_mappings": {"vercel": "frontend", "render": "backend"},
+        "variables": [
+            {"key": "VITE_API_BASE_URL", "required": True, "scope": "frontend"},
+            {"key": "API_BASE_URL", "required": True, "scope": "backend"},
+            {"key": "DATABASE_URL", "required": True, "scope": "backend"},
+            {"key": "JWT_SECRET", "required": True, "scope": "backend"},
+            {"key": "OPENAI_API_KEY", "required": False, "scope": "backend"},
+        ],
+    },
     "nextjs_supabase": {
         "name": "Next.js + Supabase",
         "description": "Next.js app with Supabase auth and database.",
@@ -307,6 +329,10 @@ class StageUpdate(BaseModel):
 
 class RunResumeRequest(BaseModel):
     start_now: bool = True
+    mode: str = "legacy_auto"
+    failed_work_item_id: str | None = None
+    repair_strategy: str | None = None
+    checkpoint_id: str | None = None
 
 
 class RunRetryPushRequest(BaseModel):
@@ -1040,6 +1066,51 @@ def _project_out(project: Project) -> ProjectOut:
     return data
 
 
+def _runtime_lifecycle_out(project: Project) -> RuntimeLifecycleOut:
+    payload = {}
+    if isinstance(project.project_intent_json, dict):
+        value = project.project_intent_json.get("runtime_lifecycle")
+        if isinstance(value, dict):
+            payload = dict(value)
+    return RuntimeLifecycleOut.model_validate(payload or {})
+
+
+def _runtime_current_state(project: Project) -> str:
+    if isinstance(project.project_intent_json, dict):
+        lifecycle = project.project_intent_json.get("runtime_lifecycle")
+        if isinstance(lifecycle, dict):
+            value = str(lifecycle.get("state") or "CREATED").strip().upper()
+            return value or "CREATED"
+    return "CREATED"
+
+
+async def _runtime_preview_ready(
+    session: AsyncSession,
+    *,
+    project: Project,
+    tenant_id: uuid.UUID,
+    repo_root_override: Path | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    repo = await get_project_repository(session, project_id=project.id, tenant_id=tenant_id)
+    repository_connected = repo is not None
+    profile = await get_project_preview_profile(session, tenant_id=tenant_id, project_id=project.id)
+    ready = preview_profile_available(profile, repository_connected=repository_connected)
+    diagnostics = {
+        "repository_connected": repository_connected,
+        "preview_profile_enabled": bool(profile.enabled) if profile is not None else False,
+        "preview_profile_resolved": bool(ready),
+    }
+    effective_profile = resolve_preview_profile(profile, repository_connected=repository_connected)
+    if ready and repo_root_override is not None and effective_profile is not None and repo_root_override.exists():
+        readiness = await assess_preview_runtime_readiness(
+            repo_root=repo_root_override,
+            profile=effective_profile,
+        )
+        diagnostics.update(readiness)
+        ready = bool(readiness.get("ready"))
+    return ready, diagnostics
+
+
 def _content_item_out(item: ContentItem | ContentItemVersion) -> ContentItemOut:
     updated_at = getattr(item, "updated_at", None) or getattr(item, "created_at", None) or datetime.now(timezone.utc)
     return ContentItemOut(
@@ -1748,6 +1819,164 @@ async def _runnable_queued_items_for_run(session: AsyncSession, run_id: uuid.UUI
         for item in queued_items
         if all(is_dependency_satisfied(dep) for dep in deps_by_child.get(item.id, []))
     ]
+
+
+async def _initialize_project_runtime(
+    *,
+    session: AsyncSession,
+    ctx: Any,
+    project: Project,
+    payload: ProjectCreate,
+) -> None:
+    actor_id = getattr(ctx, "user_id", None)
+    current_state = _runtime_current_state(project)
+    if current_state == "ACTIVE":
+        return
+    if current_state == "ARCHIVED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Archived projects cannot be re-initialized")
+    if current_state in {"FAILED", "PAUSED"}:
+        await set_runtime_state(
+            session,
+            project=project,
+            state="REPAIRING",
+            actor_id=actor_id,
+            diagnostics={"trigger": "initialize-runtime"},
+        )
+
+    intent = payload.project_intent if isinstance(payload.project_intent, dict) else None
+    bootstrap_result = await bootstrap_project_runtime(
+        session,
+        tenant_id=ctx.tenant_id,
+        project_id=project.id,
+        starter_blueprint_enabled=payload.starter_blueprint_enabled,
+        starter_blueprint_key=payload.starter_blueprint_key,
+        starter_stack_preset_key=payload.starter_stack_preset_key,
+        starter_deployment_profile=payload.starter_deployment_profile,
+        project_intent=intent,
+        actor_id=actor_id,
+    )
+    if bootstrap_result.template_bootstrap_meta is not None:
+        await set_runtime_state(
+            session,
+            project=project,
+            state="TEMPLATE_INSTANTIATED",
+            actor_id=actor_id,
+            diagnostics={
+                "template_key": bootstrap_result.template_bootstrap_meta.get("template_key"),
+                "template_version": bootstrap_result.template_bootstrap_meta.get("template_version"),
+            },
+        )
+
+    existing_repo = await get_project_repository(session, project_id=project.id, tenant_id=ctx.tenant_id)
+    if existing_repo is not None:
+        try:
+            await reconcile_connected_repository_foundation(
+                session,
+                project=project,
+                project_repo=existing_repo,
+                template_repo_root=bootstrap_result.template_repo_root,
+                github_adapter=github_adapter,
+            )
+        except Exception as exc:
+            await log_activity(
+                session,
+                project_id=project.id,
+                entity_type="project_repository",
+                entity_id=existing_repo.id,
+                action_type="repo.reconcile_skipped",
+                metadata={"reason": str(exc)},
+            )
+        await set_runtime_state(
+            session,
+            project=project,
+            state="REPO_CONNECTED",
+            actor_id=actor_id,
+        )
+    else:
+        repo_provisioning = await auto_provision_project_repository(
+            session,
+            project=project,
+            project_intent=intent,
+            template_repo_root=bootstrap_result.template_repo_root,
+            actor_id=actor_id,
+            github_adapter=github_adapter,
+            github_allowed_org=settings.github_allowed_org,
+        )
+        if repo_provisioning.connected:
+            await set_runtime_state(
+                session,
+                project=project,
+                state="REPO_CONNECTED",
+                actor_id=actor_id,
+            )
+        elif repo_provisioning.failed:
+            await set_runtime_state(
+                session,
+                project=project,
+                state="FAILED",
+                actor_id=actor_id,
+                error=repo_provisioning.reason or "repository provisioning failed",
+            )
+            return
+
+    if bootstrap_result.contract_derived:
+        await set_runtime_state(
+            session,
+            project=project,
+            state="CONTRACT_DERIVED",
+            actor_id=actor_id,
+        )
+    if bootstrap_result.governance_ready:
+        await set_runtime_state(
+            session,
+            project=project,
+            state="GOVERNANCE_READY",
+            actor_id=actor_id,
+        )
+        preview_ready, preview_diagnostics = await _runtime_preview_ready(
+            session,
+            project=project,
+            tenant_id=ctx.tenant_id,
+            repo_root_override=Path(bootstrap_result.template_repo_root) if bootstrap_result.template_repo_root else None,
+        )
+        if not bool(preview_diagnostics.get("repository_connected")):
+            return
+        if preview_ready:
+            await set_runtime_state(
+                session,
+                project=project,
+                state="PREVIEW_READY",
+                actor_id=actor_id,
+                diagnostics=preview_diagnostics,
+            )
+            await set_runtime_state(
+                session,
+                project=project,
+                state="ACTIVE",
+                actor_id=actor_id,
+            )
+        else:
+            await set_runtime_state(
+                session,
+                project=project,
+                state="FAILED",
+                actor_id=actor_id,
+                diagnostics=preview_diagnostics,
+                error="Preview readiness validation failed",
+            )
+            return
+
+    if bootstrap_result.template_bootstrap_meta is not None:
+        await log_activity(
+            session,
+            project_id=project.id,
+            entity_type="project",
+            entity_id=project.id,
+            action_type="project.template_instantiated",
+            metadata=bootstrap_result.template_bootstrap_meta,
+        )
+
+
 @router.post("/projects", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 @public_router.post("/projects", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 async def create_project(
@@ -1764,39 +1993,18 @@ async def create_project(
         description=payload.description,
         tenant_id=ctx.tenant_id,
         workspace_id=ctx.workspace_id,
+        project_intent_json=payload.project_intent if isinstance(payload.project_intent, dict) else None,
     )
     session.add(project)
     await session.flush()
-    if payload.starter_blueprint_enabled:
-        try:
-            await run_project_genesis(
-                session,
-                tenant_id=ctx.tenant_id,
-                project_id=project.id,
-                blueprint_key=payload.starter_blueprint_key,
-                stack_preset_key=payload.starter_stack_preset_key,
-                deployment_profile=payload.starter_deployment_profile,
-                readiness_enforced=True,
-                created_by=getattr(ctx, "user_id", None),
-            )
-            await bootstrap_architecture_profile(
-                session,
-                tenant_id=ctx.tenant_id,
-                project_id=project.id,
-                refresh_repo_map_requested=False,
-                created_by=getattr(ctx, "user_id", None),
-            )
-            await derive_architecture_profile(
-                session,
-                tenant_id=ctx.tenant_id,
-                project_id=project.id,
-                refresh_repo_map_requested=False,
-                bootstrap_if_missing=True,
-                updated_by=getattr(ctx, "user_id", None),
-            )
-        except ValueError:
-            # Fallback-safe: project creation should still succeed even when starter provisioning fails.
-            pass
+    await set_runtime_state(
+        session,
+        project=project,
+        state="CREATED",
+        actor_id=getattr(ctx, "user_id", None),
+        diagnostics={"starter_blueprint_enabled": bool(payload.starter_blueprint_enabled)},
+    )
+    await _initialize_project_runtime(session=session, ctx=ctx, project=project, payload=payload)
     await log_activity(
         session,
         project_id=project.id,
@@ -1831,6 +2039,36 @@ async def get_project(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return _project_out(project)
+
+
+@router.get("/projects/{project_id}/runtime-lifecycle", response_model=RuntimeLifecycleOut)
+@public_router.get("/projects/{project_id}/runtime-lifecycle", response_model=RuntimeLifecycleOut)
+async def get_project_runtime_lifecycle(
+    project_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)
+) -> RuntimeLifecycleOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return _runtime_lifecycle_out(project)
+
+
+@router.post("/projects/{project_id}/initialize-runtime", response_model=RuntimeLifecycleOut)
+@public_router.post("/projects/{project_id}/initialize-runtime", response_model=RuntimeLifecycleOut)
+async def initialize_project_runtime(
+    project_id: uuid.UUID, ctx=Depends(get_tenant_context), session: AsyncSession = Depends(get_session)
+) -> RuntimeLifecycleOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    payload = ProjectCreate(
+        name=project.name,
+        description=project.description,
+        project_intent=project.project_intent_json if isinstance(project.project_intent_json, dict) else None,
+    )
+    await _initialize_project_runtime(session=session, ctx=ctx, project=project, payload=payload)
+    await session.commit()
+    await session.refresh(project)
+    return _runtime_lifecycle_out(project)
 
 
 @router.get("/projects/{project_id}/content-items", response_model=list[ContentItemOut])
@@ -2705,6 +2943,37 @@ async def bootstrap_project_repo(
     return ProjectRepositoryBootstrapOut(**result.__dict__)
 
 
+@router.post("/projects/{project_id}/repo/foundation-pr", response_model=FoundationPrOut)
+@public_router.post("/projects/{project_id}/repo/foundation-pr", response_model=FoundationPrOut)
+async def trigger_foundation_pr(
+    project_id: uuid.UUID,
+    ctx=Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> FoundationPrOut:
+    project = await session.scalar(_project_scoped(session, ctx, project_id))
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    repo = await get_project_repository(session, project_id=project_id, tenant_id=ctx.tenant_id)
+    if repo is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project repository not connected")
+    manifest_root = (
+        Path(get_settings().workspace_base_dir).expanduser().resolve()
+        / "project-templates"
+        / str(ctx.tenant_id)
+        / str(project_id)
+        / "repo"
+    )
+    result = await reconcile_connected_repository_foundation(
+        session,
+        project=project,
+        project_repo=repo,
+        template_repo_root=str(manifest_root),
+        github_adapter=github_adapter,
+    )
+    await session.commit()
+    return FoundationPrOut(**result.__dict__)
+
+
 @router.get("/integrations/github/connect", response_model=GitHubConnectInfoOut)
 @public_router.get("/integrations/github/connect", response_model=GitHubConnectInfoOut)
 async def get_github_connect_info() -> GitHubConnectInfoOut:
@@ -3527,7 +3796,7 @@ async def resume_existing_run(
         actor_type="USER",
         actor_id=getattr(ctx, "user_id", None),
         tenant_id=ctx.tenant_id,
-        payload={"action": "resume"},
+        payload={"action": "resume", "mode": str(payload.mode or "legacy_auto").strip().lower()},
     )
     try:
         await prepare_run_for_resume(
@@ -3535,6 +3804,10 @@ async def resume_existing_run(
             run,
             actor_type="USER",
             actor_id=getattr(ctx, "user_id", None),
+            mode=payload.mode,
+            failed_work_item_id=payload.failed_work_item_id,
+            repair_strategy=payload.repair_strategy,
+            checkpoint_id=payload.checkpoint_id,
         )
         await session.commit()
         await session.refresh(run)
@@ -3578,7 +3851,14 @@ async def resume_existing_run(
         actor_type="USER",
         actor_id=getattr(ctx, "user_id", None),
         tenant_id=ctx.tenant_id,
-        payload={"action": "resume", "start_now": bool(payload.start_now)},
+        payload={
+            "action": "resume",
+            "start_now": bool(payload.start_now),
+            "mode": str(payload.mode or "legacy_auto").strip().lower(),
+            "failed_work_item_id": payload.failed_work_item_id,
+            "repair_strategy": payload.repair_strategy,
+            "checkpoint_id": payload.checkpoint_id,
+        },
     )
 
     return _run_out(run)
@@ -4216,6 +4496,7 @@ async def create_run_preview(
             tenant_id=ctx.tenant_id,
             run_id=run_id,
             reuse_if_healthy=payload.reuse_if_healthy,
+            repair_action=payload.repair_action,
         )
         await log_activity(
             session,

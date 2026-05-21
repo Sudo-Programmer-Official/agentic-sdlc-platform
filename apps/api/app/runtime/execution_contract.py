@@ -15,7 +15,7 @@ from app.db.models import Run, WorkItem
 from app.runtime.run_state import BudgetMode, ContractLifecycleState, RetryState, ValidationState
 from app.services.work_item_state import is_blocking_failure, is_non_blocking_failure, is_superseded_failure
 
-VALIDATION_WORK_ITEM_TYPES = {"WRITE_TESTS", "RUN_TESTS", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
+VALIDATION_WORK_ITEM_TYPES = {"FOUNDATION_VALIDATE", "FRAMEWORK_VALIDATE", "WRITE_TESTS", "RUN_TESTS", "PREVIEW_VALIDATE", "REVIEW_DIFF", "REVIEW_INTEGRATION"}
 DEFAULT_CONTRACT_VERSION = 1
 DEFAULT_CODEX_MAX_RUN_TOKENS = 200_000
 DEFAULT_CODEX_MAX_RUN_COST_CENTS = 50.0
@@ -29,12 +29,20 @@ AI_BUDGETED_WORK_ITEM_TYPES = {
     "GENERATE_SERVICE",
     "GENERATE_REPOSITORY",
     "GENERATE_CAPABILITY_BINDING",
+    "GENESIS_FOUNDATION",
     "CODE_BACKEND",
     "CODE_FRONTEND",
+    "FOUNDATION_VALIDATE",
+    "FRAMEWORK_VALIDATE",
     "WRITE_TESTS",
+    "PREVIEW_VALIDATE",
     "REVIEW_DIFF",
     "REVIEW_INTEGRATION",
     "FIX_TEST_FAILURE",
+    "FIX_LAYOUT_COMPOSITION",
+    "FIX_ZONE_COMPOSITION",
+    "FIX_FRONTEND_SYNTAX",
+    "FIX_VISUAL_QUALITY",
 }
 
 
@@ -118,6 +126,42 @@ def _coerce_command_index(value: Any) -> dict[str, dict[str, Any]]:
             "paths": _coerce_string_list(raw.get("paths")),
         }
     return commands
+
+
+def _project_intent(summary: dict[str, Any]) -> dict[str, Any]:
+    value = summary.get("project_intent")
+    return value if isinstance(value, dict) else {}
+
+
+def _intent_capabilities(intent: dict[str, Any]) -> list[str]:
+    raw = intent.get("capabilities")
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _intent_risk_level(intent: dict[str, Any], default: str) -> str:
+    architecture_mode = str(intent.get("architecture_mode") or "").strip().lower()
+    setup_experience = str(intent.get("setup_experience") or "").strip().lower()
+    if architecture_mode == "manual" or setup_experience in {"advanced", "existing_repo"}:
+        return "MEDIUM"
+    if architecture_mode == "guided" and setup_experience == "recommended":
+        return "LOW"
+    return default
+
+
+def _intent_preview_command(intent: dict[str, Any]) -> str | None:
+    frontend_stack = str(intent.get("frontend_stack") or "").strip().lower()
+    repo_layout = str(intent.get("repo_layout") or "").strip().lower()
+    if "next" in frontend_stack:
+        return "npm -C apps/web run build" if repo_layout == "monorepo" else "npm run build"
+    if "nuxt" in frontend_stack:
+        return "npm -C apps/web run build" if repo_layout == "monorepo" else "npm run build"
+    if "react" in frontend_stack or "vue" in frontend_stack:
+        return "npm -C apps/web run build" if repo_layout == "monorepo" else "npm run build"
+    if "static" in frontend_stack or frontend_stack == "html":
+        return "python3 -c \"import pathlib,sys;sys.exit(0 if pathlib.Path('index.html').exists() else 1)\""
+    return None
 
 
 def _prefixes_from_commands(command_index: dict[str, dict[str, Any]]) -> list[str]:
@@ -455,11 +499,18 @@ class ExecutionContract:
     command_index: dict[str, dict[str, Any]]
     build_command: str | None
     test_command: str | None
+    preview_command: str | None
     lint_command: str | None
     allowed_command_prefixes: list[str]
     file_budget: int
     hard_file_budget: int
     risk_level: str
+    mutation_class: str
+    allowed_operations: list[str]
+    forbidden_operations: list[str]
+    protected_files: list[str]
+    allowed_zones: list[str]
+    forbidden_zones: list[str]
     assumptions_used: list[str]
     validation_state: str
     retry_state: str
@@ -482,11 +533,18 @@ class ExecutionContract:
             "command_index": {key: dict(value) for key, value in self.command_index.items()},
             "build_command": self.build_command,
             "test_command": self.test_command,
+            "preview_command": self.preview_command,
             "lint_command": self.lint_command,
             "allowed_command_prefixes": list(self.allowed_command_prefixes),
             "file_budget": self.file_budget,
             "hard_file_budget": self.hard_file_budget,
             "risk_level": self.risk_level,
+            "mutation_class": self.mutation_class,
+            "allowed_operations": list(self.allowed_operations),
+            "forbidden_operations": list(self.forbidden_operations),
+            "protected_files": list(self.protected_files),
+            "allowed_zones": list(self.allowed_zones),
+            "forbidden_zones": list(self.forbidden_zones),
             "assumptions_used": list(self.assumptions_used),
             "validation_state": self.validation_state,
             "retry_state": self.retry_state,
@@ -522,6 +580,7 @@ class ExecutionContract:
             command_index=_coerce_command_index(value.get("command_index")),
             build_command=value.get("build_command") if isinstance(value.get("build_command"), str) else None,
             test_command=value.get("test_command") if isinstance(value.get("test_command"), str) else None,
+            preview_command=value.get("preview_command") if isinstance(value.get("preview_command"), str) else None,
             lint_command=value.get("lint_command") if isinstance(value.get("lint_command"), str) else None,
             allowed_command_prefixes=_coerce_string_list(value.get("allowed_command_prefixes")),
             file_budget=max(1, int(value.get("file_budget") or 5)),
@@ -530,6 +589,12 @@ class ExecutionContract:
                 int(value.get("hard_file_budget") or 15),
             ),
             risk_level=str(value.get("risk_level") or "LOW").upper(),
+            mutation_class=str(value.get("mutation_class") or "FEATURE").upper(),
+            allowed_operations=_coerce_string_list(value.get("allowed_operations")),
+            forbidden_operations=_coerce_string_list(value.get("forbidden_operations")),
+            protected_files=_coerce_string_list(value.get("protected_files")),
+            allowed_zones=_coerce_string_list(value.get("allowed_zones")),
+            forbidden_zones=_coerce_string_list(value.get("forbidden_zones")),
             assumptions_used=_coerce_string_list(value.get("assumptions_used")),
             validation_state=_coerce_state(
                 value.get("validation_state"),
@@ -572,6 +637,7 @@ def build_execution_contract(
 ) -> ExecutionContract:
     cfg = settings or get_settings()
     summary = run_summary if isinstance(run_summary, dict) else {}
+    intent = _project_intent(summary)
     architecture = architecture_profile if isinstance(architecture_profile, dict) else {}
     resolved_project_contract = (
         project_contract
@@ -617,6 +683,17 @@ def build_execution_contract(
         kind="lint",
         scope_paths=scope_paths,
     )
+    preview_command = _resolve_named_command(
+        command_index,
+        preferred_keys=["preview", "frontend_preview", "static_preview", "dev", "frontend_start", "start"],
+        kind="preview",
+        scope_paths=scope_paths,
+    ) or _resolve_named_command(
+        command_index,
+        preferred_keys=["preview", "frontend_preview", "static_preview", "dev", "frontend_start", "start"],
+        kind="serve",
+        scope_paths=scope_paths,
+    ) or _intent_preview_command(intent)
 
     architecture_summary = architecture.get("summary")
     assumptions_used = []
@@ -625,6 +702,27 @@ def build_execution_contract(
     if isinstance(resolved_project_contract, dict):
         project_assumptions = _coerce_string_list(resolved_project_contract.get("assumptions_used"))
         assumptions_used = _unique_paths(assumptions_used + project_assumptions)
+    intent_assumptions: list[str] = []
+    if intent:
+        setup_experience = str(intent.get("setup_experience") or "").strip()
+        architecture_mode = str(intent.get("architecture_mode") or "").strip()
+        repo_layout = str(intent.get("repo_layout") or "").strip()
+        frontend_stack = str(intent.get("frontend_stack") or "").strip()
+        backend_stack = str(intent.get("backend_stack") or "").strip()
+        capabilities = _intent_capabilities(intent)
+        if setup_experience:
+            intent_assumptions.append(f"Setup experience: {setup_experience}")
+        if architecture_mode:
+            intent_assumptions.append(f"Architecture mode: {architecture_mode}")
+        if repo_layout:
+            intent_assumptions.append(f"Repo layout: {repo_layout}")
+        if frontend_stack:
+            intent_assumptions.append(f"Frontend stack: {frontend_stack}")
+        if backend_stack:
+            intent_assumptions.append(f"Backend stack: {backend_stack}")
+        if capabilities:
+            intent_assumptions.append(f"Capabilities: {', '.join(capabilities[:6])}")
+    assumptions_used = _unique_paths(assumptions_used + intent_assumptions)
 
     allowed_command_prefixes = _unique_paths(
         _default_allowed_prefixes(cfg)
@@ -633,6 +731,7 @@ def build_execution_contract(
             {
                 "build": {"command": build_command} if build_command else {},
                 "test": {"command": test_command} if test_command else {},
+                "preview": {"command": preview_command} if preview_command else {},
                 "lint": {"command": lint_command} if lint_command else {},
             }
         )
@@ -653,6 +752,12 @@ def build_execution_contract(
     lifecycle_state = previous.lifecycle_state if previous is not None else ContractLifecycleState.PENDING
 
     goal = summary.get("goal") or plan.get("goal")
+    mutation_class = str(summary.get("mutation_class") or "FEATURE").upper()
+    allowed_operations = _coerce_string_list(summary.get("allowed_operations")) or ["apply_patch", "write_file"]
+    forbidden_operations = _coerce_string_list(summary.get("forbidden_operations"))
+    protected_files = _coerce_string_list(summary.get("protected_files"))
+    allowed_zones = _coerce_string_list(summary.get("allowed_zones"))
+    forbidden_zones = _coerce_string_list(summary.get("forbidden_zones"))
     return ExecutionContract(
         version=DEFAULT_CONTRACT_VERSION,
         goal=goal.strip() if isinstance(goal, str) and goal.strip() else None,
@@ -669,11 +774,18 @@ def build_execution_contract(
         command_index=command_index,
         build_command=build_command,
         test_command=test_command,
+        preview_command=preview_command,
         lint_command=lint_command,
         allowed_command_prefixes=allowed_command_prefixes,
         file_budget=file_budget,
         hard_file_budget=hard_file_budget,
-        risk_level=str(plan.get("risk_level") or "LOW").upper(),
+        risk_level=_intent_risk_level(intent, str(plan.get("risk_level") or "LOW").upper()),
+        mutation_class=mutation_class,
+        allowed_operations=allowed_operations,
+        forbidden_operations=forbidden_operations,
+        protected_files=protected_files,
+        allowed_zones=allowed_zones,
+        forbidden_zones=forbidden_zones,
         assumptions_used=assumptions_used,
         validation_state=validation_state,
         retry_state=retry_state,

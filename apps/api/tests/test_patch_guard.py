@@ -174,3 +174,18 @@ def test_patch_guard_blocks_route_level_capability_resolution():
 
     assert decision.ok is False
     assert any("route resolved capability directly" in violation for violation in decision.violations)
+
+
+def test_patch_guard_blocks_destructive_delete_of_runtime_files():
+    decision = evaluate_patch_guard(
+        actions=[
+            Action(
+                type="delete_file",
+                path="apps/api/app/runtime/codex_executor.py",
+            )
+        ],
+        allowed_files=["apps/api/app/runtime/codex_executor.py"],
+    )
+
+    assert decision.ok is False
+    assert any("Destructive delete violation" in violation for violation in decision.violations)

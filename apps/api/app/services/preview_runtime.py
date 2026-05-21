@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -10,6 +11,7 @@ class PreviewProjectType(str, Enum):
     STATIC_HTML = "STATIC_HTML"
     VITE_APP = "VITE_APP"
     MONOREPO = "MONOREPO"
+    MONOREPO_VITE_FASTAPI = "MONOREPO_VITE_FASTAPI"
     DIST_BUILD = "DIST_BUILD"
     BACKEND_ONLY = "BACKEND_ONLY"
     INVALID = "INVALID"
@@ -76,6 +78,39 @@ def _index_references_vite_entry(root: Path) -> bool:
     return "/src/main.ts" in lower or "/src/main.js" in lower
 
 
+def _index_module_entry_candidates(root: Path) -> list[str]:
+    html = root / "index.html"
+    if not html.exists():
+        return []
+    try:
+        content = html.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    matches = re.findall(
+        r'<script[^>]*type=["\']module["\'][^>]*src=["\'](/src/[^"\']+)["\']',
+        content,
+        flags=re.IGNORECASE,
+    )
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw in matches:
+        rel = raw.lstrip("/")
+        if rel.startswith("src/") and rel not in seen:
+            candidates.append(rel)
+            seen.add(rel)
+    return candidates
+
+
+def resolve_vite_entrypoint(frontend_root: Path) -> str | None:
+    for candidate in _index_module_entry_candidates(frontend_root):
+        if (frontend_root / candidate).exists():
+            return candidate
+    for fallback in ("src/main.ts", "src/main.js", "src/main.tsx", "src/main.jsx", "src/main.mjs"):
+        if (frontend_root / fallback).exists():
+            return fallback
+    return None
+
+
 def _find_monorepo_frontend_root(repo_root: Path) -> Path | None:
     candidates = [
         repo_root / "apps" / "web",
@@ -88,6 +123,21 @@ def _find_monorepo_frontend_root(repo_root: Path) -> Path | None:
         if candidate.exists() and _has_vite_markers(candidate):
             return candidate
     return None
+
+
+def _has_fastapi_markers(root: Path) -> bool:
+    if not root.exists():
+        return False
+    if (root / "requirements.txt").exists() and (root / "main.py").exists():
+        return True
+    app_main = root / "app" / "main.py"
+    if app_main.exists():
+        try:
+            content = app_main.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return "FastAPI" in content
+    return False
 
 
 def resolve_preview_runtime_contract(
@@ -107,8 +157,18 @@ def resolve_preview_runtime_contract(
 
     discovered = _find_monorepo_frontend_root(repo_root)
     if discovered is not None and discovered != configured_frontend_root:
+        backend_candidates = [
+            repo_root / "apps" / "api",
+            repo_root / "api",
+            repo_root / "backend",
+        ]
+        backend_present = any(_has_fastapi_markers(candidate) for candidate in backend_candidates)
         return PreviewRuntimeContract(
-            project_type=PreviewProjectType.MONOREPO,
+            project_type=(
+                PreviewProjectType.MONOREPO_VITE_FASTAPI
+                if backend_present
+                else PreviewProjectType.MONOREPO
+            ),
             strategy=PreviewStrategy.VITE_DEV,
             frontend_root=discovered,
             requires_node_modules=True,

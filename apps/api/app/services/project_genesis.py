@@ -36,6 +36,18 @@ DEFAULT_STACK_PRESETS: list[dict[str, Any]] = [
         },
     },
     {
+        "key": "vue_element_plus",
+        "label": "Vue + Element Plus",
+        "runtime": "fullstack",
+        "config_json": {
+            "frontend": {"framework": "vue", "ui_library": "element-plus", "path": "apps/web"},
+            "backend": {"framework": "fastapi", "path": "apps/api"},
+            "packages": ["ui", "shared", "config", "types"],
+            "ci": "github_actions",
+            "deployment": "local_preview",
+        },
+    },
+    {
         "key": "react_node",
         "label": "React + Node",
         "runtime": "fullstack",

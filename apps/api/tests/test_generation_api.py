@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.api.v1 import generation as generation_module
+from app.api.v1 import persistence as persistence_module
 from app.db.base import Base
 from app.db.models import AIJobRun, ArchitectureProfile, Document, Project, ProjectRepository, ProjectBlueprint, ProjectGenesisRun, ProjectTopologySnapshot, Run, RunSummary, Task, Trace
 from app.db.models.tenant import Tenant  # noqa: F401
@@ -17,6 +19,9 @@ from app.main import app
 from app.schemas.generation import GeneratedTask
 from app.services.ai_policy import AIContextPack, AIJobPolicy, PreparedAIExecution
 from app.services.llm_generator import LLMTaskGenerator, TASK_SCHEMA
+from app.core.config import get_settings
+from app.services import repo_provisioning_service
+from app.services.runtime_lifecycle_service import set_runtime_state
 
 
 @pytest.fixture
@@ -50,6 +55,32 @@ async def db_session(tmp_path):
         app.dependency_overrides.pop(get_tenant_context, None)
         await session.close()
         await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def stub_runtime_readiness(monkeypatch):
+    async def fake_assess_preview_runtime_readiness(**_kwargs):
+        return {
+            "ready": True,
+            "repository_connected": True,
+            "preview_profile_enabled": True,
+            "preview_profile_resolved": True,
+            "dependencies_ready_frontend": True,
+            "dependencies_ready_backend": True,
+            "preview_runtime_ready": True,
+            "backend_runtime_ready": True,
+            "frontend_install_status": "cached",
+            "backend_install_status": "cached",
+            "runtime_boot_duration_seconds": 0.25,
+            "dependency_repair_attempts": 0,
+            "cached_hydration_state": {"frontend": "hit", "backend": "hit"},
+        }
+
+    monkeypatch.setattr(
+        persistence_module,
+        "assess_preview_runtime_readiness",
+        fake_assess_preview_runtime_readiness,
+    )
 
 
 @pytest.mark.anyio
@@ -138,7 +169,33 @@ async def test_foundation_readiness_reports_repo_profile_and_missing_checks(db_s
                         {"name": "apps/api", "kind": "backend"},
                     ]
                 },
-                "commands": {"test": {"command": "pytest -q"}, "web": {"command": "npm run build"}},
+                "commands": {
+                    "test": {"command": "pytest -q"},
+                    "web": {"command": "npm run build"},
+                    "preview": {"command": "npm -C apps/web run dev"},
+                    "backend_start": {"command": "python3 apps/api/main.py"}
+                },
+            },
+        )
+    )
+    session.add(
+        Run(
+            project_id=project.id,
+            tenant_id=tenant_id,
+            status="COMPLETED",
+            executor="codex",
+            summary={
+                "preview": {
+                    "status": "READY",
+                    "diagnostics": {
+                        "dependencies_ready_frontend": True,
+                        "dependencies_ready_backend": True,
+                        "preview_runtime_ready": True,
+                        "backend_runtime_ready": True,
+                        "frontend_install_status": "cached",
+                        "backend_install_status": "cached",
+                    },
+                }
             },
         )
     )
@@ -152,6 +209,16 @@ async def test_foundation_readiness_reports_repo_profile_and_missing_checks(db_s
     assert data["status"] == "READY"
     assert data["repo_connected"] is True
     assert data["architecture_profile_present"] is True
+    frontend_check = next(item for item in data["checks"] if item["key"] == "dependencies_ready_frontend")
+    backend_check = next(item for item in data["checks"] if item["key"] == "dependencies_ready_backend")
+    preview_check = next(item for item in data["checks"] if item["key"] == "preview_runtime_ready")
+    backend_runtime_check = next(item for item in data["checks"] if item["key"] == "backend_runtime_ready")
+    executable_check = next(item for item in data["checks"] if item["key"] == "foundation_executable_ready")
+    assert frontend_check["status"] == "PASS"
+    assert backend_check["status"] == "PASS"
+    assert preview_check["status"] == "PASS"
+    assert backend_runtime_check["status"] == "PASS"
+    assert executable_check["status"] == "PASS"
 
 
 @pytest.mark.anyio
@@ -209,6 +276,507 @@ async def test_project_genesis_blueprint_flow_creates_setup_tasks_and_records_bl
 
     blueprint = await session.scalar(select(ProjectBlueprint).where(ProjectBlueprint.project_id == project.id))
     assert blueprint is not None
+
+
+@pytest.mark.anyio
+async def test_create_project_instantiates_runtime_template(db_session, tmp_path, monkeypatch):
+    _session, _tenant_id = db_session
+    template_root = tmp_path / "runtime-templates"
+    source = template_root / "fullstack-monorepo"
+    (source / "apps" / "web").mkdir(parents=True, exist_ok=True)
+    (source / "README.md").write_text("# template\n", encoding="utf-8")
+
+    bootstrap_root = tmp_path / "workspace-bootstrap"
+    monkeypatch.setenv("RUNTIME_TEMPLATES_ROOT", str(template_root))
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(bootstrap_root))
+    get_settings.cache_clear()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/v1/projects",
+            json={
+                "name": "Template Instantiation Project",
+                "starter_blueprint_enabled": True,
+                "project_intent": {
+                    "setup_experience": "recommended",
+                    "template_key": "fullstack-monorepo",
+                    "template_version": 1,
+                },
+            },
+        )
+
+    assert create_resp.status_code == 201
+    created = create_resp.json()
+    project_id = created["id"]
+    manifest_path = Path(bootstrap_root) / "project-templates" / str(_tenant_id) / project_id / "runtime_template_manifest.json"
+    repo_root = manifest_path.parent / "repo"
+    assert manifest_path.exists()
+    assert (repo_root / "README.md").exists()
+    assert (repo_root / "apps" / "web").exists()
+    project_row = await _session.scalar(select(Project).where(Project.id == uuid.UUID(project_id)))
+    lifecycle = ((project_row.project_intent_json or {}).get("runtime_lifecycle") if project_row else None) or {}
+    assert lifecycle.get("state") == "GOVERNANCE_READY"
+    assert any(item.get("state") == "TEMPLATE_INSTANTIATED" for item in lifecycle.get("timeline", []))
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_create_project_auto_creates_repo_for_new_repo_intent(db_session, tmp_path, monkeypatch):
+    _session, _tenant_id = db_session
+    template_root = tmp_path / "runtime-templates"
+    source = template_root / "fullstack-monorepo"
+    (source / "apps" / "web").mkdir(parents=True, exist_ok=True)
+    (source / "README.md").write_text("# template\n", encoding="utf-8")
+    bootstrap_root = tmp_path / "workspace-bootstrap"
+    monkeypatch.setenv("RUNTIME_TEMPLATES_ROOT", str(template_root))
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(bootstrap_root))
+    monkeypatch.setenv("GITHUB_ALLOWED_ORG", "acme")
+    get_settings.cache_clear()
+
+    async def fake_auto_provision(
+        session,
+        *,
+        project,
+        project_intent,
+        template_repo_root,
+        actor_id,
+        github_adapter,
+        github_allowed_org,
+    ):
+        repo = ProjectRepository(
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+            provider="github",
+            repo_url="https://github.com/acme/auto-repo-project.git",
+            repo_full_name="acme/auto-repo-project",
+            default_branch="main",
+            installation_id=1234,
+            auth_strategy="runtime_default",
+            created_by=actor_id,
+        )
+        session.add(repo)
+        await session.flush()
+        return SimpleNamespace(attempted=True, connected=True, failed=False, reason=None)
+
+    monkeypatch.setattr(persistence_module, "auto_provision_project_repository", fake_auto_provision)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/projects",
+            json={
+                "name": "Auto Repo Project",
+                "starter_blueprint_enabled": True,
+                "project_intent": {
+                    "setup_experience": "recommended",
+                    "repo_type": "new_repo",
+                    "repo_owner": "acme",
+                    "repo_name": "auto-repo-project",
+                    "installation_id": 1234,
+                },
+            },
+        )
+
+    assert resp.status_code == 201
+    created = resp.json()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        repo_resp = await client.get(f"/api/v1/projects/{created['id']}/repo")
+    assert repo_resp.status_code == 200
+    repo = repo_resp.json()
+    assert repo["repo_full_name"] == "acme/auto-repo-project"
+    assert repo["repo_url"] == "https://github.com/acme/auto-repo-project.git"
+    project_row = await _session.scalar(select(Project).where(Project.id == uuid.UUID(created["id"])))
+    lifecycle = ((project_row.project_intent_json or {}).get("runtime_lifecycle") if project_row else None) or {}
+    assert lifecycle.get("state") == "ACTIVE"
+    assert any(item.get("state") == "REPO_CONNECTED" for item in lifecycle.get("timeline", []))
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_create_project_new_repo_intent_without_owner_does_not_fail_runtime(db_session, tmp_path, monkeypatch):
+    _session, _tenant_id = db_session
+    template_root = tmp_path / "runtime-templates"
+    source = template_root / "fullstack-monorepo"
+    (source / "apps" / "web").mkdir(parents=True, exist_ok=True)
+    (source / "README.md").write_text("# template\n", encoding="utf-8")
+    bootstrap_root = tmp_path / "workspace-bootstrap"
+    monkeypatch.setenv("RUNTIME_TEMPLATES_ROOT", str(template_root))
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(bootstrap_root))
+    monkeypatch.delenv("GITHUB_ALLOWED_ORG", raising=False)
+    get_settings.cache_clear()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/projects",
+            json={
+                "name": "Repo Owner Missing Project",
+                "starter_blueprint_enabled": True,
+                "project_intent": {
+                    "setup_experience": "recommended",
+                    "repo_type": "new_repo",
+                    "repo_name": "repo-owner-missing-project",
+                },
+            },
+        )
+
+    assert resp.status_code == 201
+    created = resp.json()
+    project_row = await _session.scalar(select(Project).where(Project.id == uuid.UUID(created["id"])))
+    lifecycle = ((project_row.project_intent_json or {}).get("runtime_lifecycle") if project_row else None) or {}
+    assert lifecycle.get("state") != "FAILED"
+    assert not any(item.get("state") == "FAILED" for item in lifecycle.get("timeline", []))
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_auto_provision_connect_existing_repo_mode_attaches_repo(db_session, monkeypatch):
+    session, tenant_id = db_session
+    project = Project(
+        name="Connect Existing Repo",
+        tenant_id=tenant_id,
+    )
+    session.add(project)
+    await session.flush()
+
+    async def fake_connect_repo(
+        session,
+        *,
+        project,
+        provider,
+        repo_url,
+        default_branch,
+        repo_full_name=None,
+        installation_id=None,
+        auth_strategy=None,
+        created_by=None,
+    ):
+        repo = ProjectRepository(
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+            provider=provider,
+            repo_url=repo_url,
+            repo_full_name=repo_full_name,
+            default_branch=default_branch,
+            installation_id=installation_id,
+            auth_strategy=auth_strategy or "runtime_default",
+            created_by=created_by,
+        )
+        session.add(repo)
+        await session.flush()
+        return repo
+
+    monkeypatch.setattr(
+        repo_provisioning_service,
+        "preflight_repo_access",
+        lambda **kwargs: SimpleNamespace(ok=True, error=None),
+    )
+    monkeypatch.setattr(repo_provisioning_service, "connect_repo", fake_connect_repo)
+    monkeypatch.setattr(
+        repo_provisioning_service,
+        "_classify_repository_shape",
+        lambda **kwargs: repo_provisioning_service.RepoShapeClassification(kind="nearly_empty", tracked_files=1),
+    )
+    pr_calls: list[dict] = []
+    find_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        repo_provisioning_service,
+        "_bootstrap_template_into_existing_repo",
+        lambda **kwargs: repo_provisioning_service.ExistingRepoBootstrapResult(
+            created=True,
+            commit_sha="abc123",
+            reason="bootstrapped",
+            branch_name="foundation/connect-existing-repo",
+            local_clone_path="/tmp/workspaces/project/repo",
+        ),
+    )
+
+    result = await repo_provisioning_service.auto_provision_project_repository(
+        session,
+        project=project,
+        project_intent={
+            "repo_type": "new_repo",
+            "repository_mode": "connect_existing",
+            "repo_url": "https://github.com/abhishek-jha-ai/growth-marketing.git",
+            "repo_full_name": "abhishek-jha-ai/growth-marketing",
+            "default_branch": "main",
+            "installation_id": 1234,
+        },
+        template_repo_root="/tmp/runtime-template",
+        actor_id="ui-user",
+        github_adapter=SimpleNamespace(
+            find_open_pull_request=lambda **kwargs: find_calls.append(kwargs)
+            or {"html_url": "https://github.com/abhishek-jha-ai/growth-marketing/pull/1", "number": 1},
+            create_pull_request=lambda **kwargs: pr_calls.append(kwargs)
+            or {"html_url": "https://github.com/abhishek-jha-ai/growth-marketing/pull/1", "number": 1},
+        ),
+        github_allowed_org=None,
+    )
+    assert result.connected is True
+    assert len(find_calls) == 1
+    assert len(pr_calls) == 0
+    connected_repo = await session.scalar(select(ProjectRepository).where(ProjectRepository.project_id == project.id))
+    assert connected_repo is not None
+    assert connected_repo.repo_full_name == "abhishek-jha-ai/growth-marketing"
+
+
+@pytest.mark.anyio
+async def test_get_project_runtime_lifecycle_endpoint_returns_timeline(db_session):
+    session, tenant_id = db_session
+    project = Project(
+        name="Lifecycle endpoint project",
+        tenant_id=tenant_id,
+        project_intent_json={
+            "runtime_lifecycle": {
+                "state": "ACTIVE",
+                "updated_at": "2026-05-19T00:00:00+00:00",
+                "timeline": [
+                    {
+                        "state": "CREATED",
+                        "from_state": None,
+                        "ts": "2026-05-18T23:59:00+00:00",
+                        "diagnostics": {"starter_blueprint_enabled": True},
+                        "error": None,
+                    },
+                    {
+                        "state": "ACTIVE",
+                        "from_state": "GOVERNANCE_READY",
+                        "ts": "2026-05-19T00:00:00+00:00",
+                        "diagnostics": {},
+                        "error": None,
+                    },
+                ],
+                "last_error": None,
+                "retry_count": 0,
+            }
+        },
+    )
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/v1/projects/{project.id}/runtime-lifecycle")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "ACTIVE"
+    assert len(body["timeline"]) == 2
+    assert body["timeline"][0]["state"] == "CREATED"
+
+
+@pytest.mark.anyio
+async def test_initialize_runtime_endpoint_advances_lifecycle(db_session, tmp_path, monkeypatch):
+    session, tenant_id = db_session
+    template_root = tmp_path / "runtime-templates"
+    source = template_root / "fullstack-monorepo"
+    (source / "apps" / "web").mkdir(parents=True, exist_ok=True)
+    (source / "README.md").write_text("# template\n", encoding="utf-8")
+    bootstrap_root = tmp_path / "workspace-bootstrap"
+    monkeypatch.setenv("RUNTIME_TEMPLATES_ROOT", str(template_root))
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(bootstrap_root))
+    get_settings.cache_clear()
+
+    project = Project(
+        name="Initialize runtime project",
+        tenant_id=tenant_id,
+        project_intent_json={
+            "setup_experience": "recommended",
+            "template_key": "fullstack-monorepo",
+            "template_version": 1,
+        },
+    )
+    session.add(project)
+    await session.flush()
+    await persistence_module.set_runtime_state(
+        session,
+        project=project,
+        state="CREATED",
+        actor_id="test-user",
+        diagnostics={"starter_blueprint_enabled": True},
+    )
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/api/v1/projects/{project.id}/initialize-runtime")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] in {"GOVERNANCE_READY", "ACTIVE"}
+    states = [item["state"] for item in body["timeline"]]
+    assert "TEMPLATE_INSTANTIATED" in states
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_initialize_runtime_from_failed_state_enters_repairing_and_recovers(db_session, tmp_path, monkeypatch):
+    session, tenant_id = db_session
+    template_root = tmp_path / "runtime-templates"
+    source = template_root / "fullstack-monorepo"
+    (source / "apps" / "web").mkdir(parents=True, exist_ok=True)
+    (source / "README.md").write_text("# template\n", encoding="utf-8")
+    bootstrap_root = tmp_path / "workspace-bootstrap"
+    monkeypatch.setenv("RUNTIME_TEMPLATES_ROOT", str(template_root))
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(bootstrap_root))
+    get_settings.cache_clear()
+
+    project = Project(
+        name="Repairing runtime project",
+        tenant_id=tenant_id,
+        project_intent_json={
+            "setup_experience": "recommended",
+            "template_key": "fullstack-monorepo",
+            "template_version": 1,
+            "runtime_lifecycle": {
+                "state": "FAILED",
+                "updated_at": "2026-05-19T00:00:00+00:00",
+                "timeline": [],
+                "last_error": "previous bootstrap failure",
+                "retry_count": 1,
+            },
+        },
+    )
+    session.add(project)
+    await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/api/v1/projects/{project.id}/initialize-runtime")
+    assert resp.status_code == 200
+    body = resp.json()
+    states = [item["state"] for item in body["timeline"]]
+    assert "REPAIRING" in states
+    assert "TEMPLATE_INSTANTIATED" in states
+    assert body["state"] in {"GOVERNANCE_READY", "ACTIVE"}
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_initialize_runtime_skips_auto_provision_when_repo_already_connected(db_session, tmp_path, monkeypatch):
+    session, tenant_id = db_session
+    template_root = tmp_path / "runtime-templates"
+    source = template_root / "fullstack-monorepo"
+    (source / "apps" / "web").mkdir(parents=True, exist_ok=True)
+    (source / "README.md").write_text("# template\n", encoding="utf-8")
+    bootstrap_root = tmp_path / "workspace-bootstrap"
+    monkeypatch.setenv("RUNTIME_TEMPLATES_ROOT", str(template_root))
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(bootstrap_root))
+    get_settings.cache_clear()
+
+    project = Project(
+        name="Existing connected repo project",
+        tenant_id=tenant_id,
+        project_intent_json={
+            "setup_experience": "recommended",
+            "repo_type": "new_repo",
+            "template_key": "fullstack-monorepo",
+            "template_version": 1,
+            "runtime_lifecycle": {
+                "state": "FAILED",
+                "updated_at": "2026-05-19T00:00:00+00:00",
+                "timeline": [],
+                "last_error": "repo_owner is required for auto repository creation when github_allowed_org is unset",
+                "retry_count": 1,
+            },
+        },
+    )
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            provider="github",
+            repo_url="https://github.com/abhishek-jha-ai/growth-marketing.git",
+            repo_full_name="abhishek-jha-ai/growth-marketing",
+            default_branch="main",
+            installation_id=111321279,
+            auth_strategy="runtime_default",
+            created_by="ui-user",
+        )
+    )
+    await session.commit()
+    async def fake_reconcile(*args, **kwargs):
+        return None
+    monkeypatch.setattr(persistence_module, "reconcile_connected_repository_foundation", fake_reconcile)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/api/v1/projects/{project.id}/initialize-runtime")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    states = [item["state"] for item in body["timeline"]]
+    assert "REPAIRING" in states
+    assert "REPO_CONNECTED" in states
+    assert body["state"] in {"GOVERNANCE_READY", "ACTIVE"}
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_initialize_runtime_existing_repo_runs_foundation_reconcile(db_session, tmp_path, monkeypatch):
+    session, tenant_id = db_session
+    template_root = tmp_path / "runtime-templates"
+    source = template_root / "fullstack-monorepo"
+    (source / "apps" / "web").mkdir(parents=True, exist_ok=True)
+    (source / "README.md").write_text("# template\n", encoding="utf-8")
+    bootstrap_root = tmp_path / "workspace-bootstrap"
+    monkeypatch.setenv("RUNTIME_TEMPLATES_ROOT", str(template_root))
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", str(bootstrap_root))
+    get_settings.cache_clear()
+
+    project = Project(
+        name="Existing repo reconcile project",
+        tenant_id=tenant_id,
+        project_intent_json={
+            "setup_experience": "recommended",
+            "template_key": "fullstack-monorepo",
+            "template_version": 1,
+            "runtime_lifecycle": {"state": "CREATED", "timeline": [], "retry_count": 0},
+        },
+    )
+    session.add(project)
+    await session.flush()
+    session.add(
+        ProjectRepository(
+            tenant_id=tenant_id,
+            project_id=project.id,
+            provider="github",
+            repo_url="https://github.com/abhishek-jha-ai/growth-marketing.git",
+            repo_full_name="abhishek-jha-ai/growth-marketing",
+            default_branch="main",
+            installation_id=111321279,
+            auth_strategy="runtime_default",
+            created_by="ui-user",
+        )
+    )
+    await session.commit()
+
+    reconcile_calls: list[dict] = []
+
+    async def fake_reconcile(*args, **kwargs):
+        reconcile_calls.append(kwargs)
+
+    monkeypatch.setattr(persistence_module, "reconcile_connected_repository_foundation", fake_reconcile)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/api/v1/projects/{project.id}/initialize-runtime")
+    assert resp.status_code == 200
+    assert len(reconcile_calls) == 1
+    assert reconcile_calls[0]["project_repo"].repo_full_name == "abhishek-jha-ai/growth-marketing"
+    get_settings.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_runtime_lifecycle_rejects_invalid_state_jump(db_session):
+    session, tenant_id = db_session
+    project = Project(name="Invalid transition project", tenant_id=tenant_id)
+    session.add(project)
+    await session.flush()
+    await set_runtime_state(
+        session,
+        project=project,
+        state="CREATED",
+        actor_id="test-user",
+        diagnostics={"starter_blueprint_enabled": False},
+    )
+    with pytest.raises(ValueError, match="Invalid runtime lifecycle transition"):
+        await set_runtime_state(session, project=project, state="ACTIVE", actor_id="test-user")
 
 
 @pytest.mark.anyio

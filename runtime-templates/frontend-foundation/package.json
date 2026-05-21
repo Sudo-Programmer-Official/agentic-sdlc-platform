@@ -1,0 +1,12 @@
+{
+  "name": "agentic-runtime-foundation",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev:web": "npm -C apps/web run dev -- --host 0.0.0.0 --port 4173",
+    "build:web": "npm -C apps/web run build",
+    "test:web": "npm -C apps/web run test",
+    "start:api": "python3 apps/api/main.py",
+    "test:api": "pytest -q apps/api/tests"
+  }
+}

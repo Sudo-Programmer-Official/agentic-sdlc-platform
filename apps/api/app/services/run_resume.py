@@ -21,6 +21,14 @@ DEFAULT_RESUME_VERSION = 1
 MAX_RESUME_CHECKPOINTS = 12
 SAFE_CHECKPOINT_KINDS = {"baseline", "safe"}
 REQUEUEABLE_STATUSES = {"RUNNING", "CLAIMED", "QUEUED", "CANCELED"}
+RESUME_MODES = {
+    "legacy_auto",
+    "retry_failed_step",
+    "resume_downstream",
+    "replay_with_repair",
+    "replay_exact",
+    "rollback_and_resume",
+}
 
 
 def _now_iso() -> str:
@@ -443,7 +451,14 @@ async def prepare_run_for_resume(
     *,
     actor_type: str = "USER",
     actor_id: str | None = None,
+    mode: str = "legacy_auto",
+    failed_work_item_id: str | None = None,
+    repair_strategy: str | None = None,
+    checkpoint_id: str | None = None,
 ) -> Run:
+    mode = str(mode or "legacy_auto").strip().lower()
+    if mode not in RESUME_MODES:
+        raise ValueError("Unsupported resume mode")
     if run.status not in {"FAILED", "CANCELED", "PAUSED"}:
         raise ValueError("Only failed, canceled, or paused runs can be resumed")
 
@@ -455,6 +470,11 @@ async def prepare_run_for_resume(
     checkpoint_records = await _load_checkpoint_records(session, run)
     checkpoints = _merged_checkpoints(summary, checkpoint_records)
     checkpoint = _latest_safe_checkpoint(checkpoints)
+    if checkpoint_id:
+        requested = str(checkpoint_id).strip()
+        checkpoint = next((item for item in checkpoints if str(item.get("checkpoint_id") or "") == requested), None)
+        if checkpoint is None:
+            raise ValueError("Requested resume checkpoint was not found")
     durable_checkpoint = (
         _record_by_checkpoint_id(checkpoint_records).get(str(checkpoint.get("checkpoint_id") or ""))
         if checkpoint is not None
@@ -466,24 +486,64 @@ async def prepare_run_for_resume(
             select(WorkItem).where(WorkItem.run_id == run.id).order_by(WorkItem.created_at.asc(), WorkItem.id.asc())
         )
     ).scalars().all()
+    by_id = {str(item.id): item for item in work_items}
     if any(item.status in {"RUNNING", "CLAIMED"} for item in work_items):
         raise ValueError("Run still has active work items")
 
     workspace_rehydrated = False
     restore_source = "paused_continue"
-    if run.status in {"FAILED", "CANCELED"}:
+    if run.status in {"FAILED", "CANCELED"} or mode == "rollback_and_resume":
         if checkpoint is None:
             raise ValueError("No safe checkpoint available for resume")
         workspace_rehydrated = await _ensure_resume_workspace(session, run)
         restore_source = _restore_workspace_to_checkpoint(run, checkpoint, patch_blob=_checkpoint_blob(durable_checkpoint))
 
+    failed_blocking = [item for item in work_items if item.status == "FAILED" and is_blocking_failure(item)]
+    target_failed: WorkItem | None = None
+    if failed_work_item_id:
+        target_failed = by_id.get(str(failed_work_item_id).strip())
+        if target_failed is None:
+            raise ValueError("Requested failed work item was not found")
+    elif failed_blocking:
+        target_failed = failed_blocking[-1]
+
+    downstream_ids: set[str] = set()
+    if target_failed is not None:
+        from app.db.models import WorkItemEdge
+        edge_rows = (
+            await session.execute(
+                select(WorkItemEdge.from_work_item_id, WorkItemEdge.to_work_item_id).where(WorkItemEdge.run_id == run.id)
+            )
+        ).all()
+        graph: dict[str, list[str]] = {}
+        for src, dst in edge_rows:
+            graph.setdefault(str(src), []).append(str(dst))
+        queue = [str(target_failed.id)]
+        seen = set(queue)
+        while queue:
+            node = queue.pop(0)
+            for child in graph.get(node, []):
+                if child in seen:
+                    continue
+                seen.add(child)
+                downstream_ids.add(child)
+                queue.append(child)
+
     requeued_ids: list[str] = []
     for item in work_items:
-        should_requeue = item.status in REQUEUEABLE_STATUSES or (
-            item.status == "FAILED" and is_blocking_failure(item)
-        )
+        should_requeue = item.status in REQUEUEABLE_STATUSES or (item.status == "FAILED" and is_blocking_failure(item))
         if run.status == "PAUSED" and item.status in {"RUNNING", "CLAIMED"}:
             should_requeue = True
+        if mode == "retry_failed_step":
+            should_requeue = target_failed is not None and str(item.id) == str(target_failed.id)
+        elif mode == "resume_downstream":
+            should_requeue = str(item.id) in downstream_ids and item.status in {"CANCELED", "QUEUED", "FAILED"}
+        elif mode == "replay_with_repair":
+            should_requeue = target_failed is not None and str(item.id) == str(target_failed.id)
+        elif mode == "replay_exact":
+            should_requeue = target_failed is not None and str(item.id) == str(target_failed.id)
+        elif mode == "rollback_and_resume":
+            should_requeue = item.status in REQUEUEABLE_STATUSES or (item.status == "FAILED" and is_blocking_failure(item))
         if not should_requeue:
             continue
         item.status = "QUEUED"
@@ -493,6 +553,18 @@ async def prepare_run_for_resume(
         item.finished_at = None
         item.last_error = None
         item.result = {}
+        if mode == "replay_with_repair" and target_failed is not None and str(item.id) == str(target_failed.id):
+            payload = dict(item.payload or {})
+            payload["recovery_action"] = "resume_repair_continue"
+            if repair_strategy:
+                payload["recovery_strategy"] = str(repair_strategy).strip().lower()
+                payload["recovery_reason"] = "manual_repair_injection"
+            item.payload = payload
+        elif mode == "replay_exact" and target_failed is not None and str(item.id) == str(target_failed.id):
+            payload = dict(item.payload or {})
+            payload["recovery_action"] = "resume_replay_exact"
+            payload["resume_replay_exact"] = True
+            item.payload = payload
         session.add(item)
         requeued_ids.append(str(item.id))
 
@@ -504,11 +576,21 @@ async def prepare_run_for_resume(
         {
             "resumed_at": _now_iso(),
             "previous_status": previous,
+            "resume_mode": mode,
             "checkpoint_id": checkpoint.get("checkpoint_id") if checkpoint else None,
             "requeued_work_item_ids": requeued_ids,
             "checkpoint_storage_mode": checkpoint.get("storage_mode") if checkpoint else None,
             "restore_source": restore_source,
             "workspace_rehydrated": workspace_rehydrated,
+            "failed_work_item_id": str(target_failed.id) if target_failed is not None else None,
+            "repair_strategy": str(repair_strategy).strip().lower() if repair_strategy else None,
+            "downstream_reuse_ratio": round(
+                (
+                    (sum(1 for item in work_items if item.status in {"DONE", "SKIPPED"}))
+                    / max(1, len(work_items))
+                ),
+                4,
+            ),
         }
     )
     summary["resume_history"] = history[-10:]
@@ -516,9 +598,13 @@ async def prepare_run_for_resume(
         **previous_state,
         "resume_count": int(previous_state.get("resume_count") or 0) + 1,
         "last_resume_at": _now_iso(),
+        "last_resume_mode": mode,
         "last_resume_checkpoint_id": checkpoint.get("checkpoint_id") if checkpoint else None,
         "last_resume_restore_source": restore_source,
         "last_resume_workspace_rehydrated": workspace_rehydrated,
+        "last_resume_failed_work_item_id": str(target_failed.id) if target_failed is not None else None,
+        "last_resume_repair_strategy": str(repair_strategy).strip().lower() if repair_strategy else None,
+        "last_resume_requeued_count": len(requeued_ids),
     }
     run.status = "QUEUED"
     run.finished_at = None
@@ -535,11 +621,14 @@ async def prepare_run_for_resume(
         payload={
             "previous": previous,
             "new": "QUEUED",
+            "resume_mode": mode,
             "checkpoint_id": checkpoint.get("checkpoint_id") if checkpoint else None,
             "requeued_work_item_ids": requeued_ids,
             "checkpoint_storage_mode": checkpoint.get("storage_mode") if checkpoint else None,
             "restore_source": restore_source,
             "workspace_rehydrated": workspace_rehydrated,
+            "failed_work_item_id": str(target_failed.id) if target_failed is not None else None,
+            "repair_strategy": str(repair_strategy).strip().lower() if repair_strategy else None,
         },
     )
     await sync_run_execution_contract_state(session, run)

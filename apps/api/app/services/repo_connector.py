@@ -763,3 +763,104 @@ def bootstrap_repo_remote(
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def bootstrap_repo_from_local_source(
+    *,
+    source_dir: Path,
+    provider: str,
+    repo_url: str,
+    default_branch: str,
+    repo_full_name: str | None = None,
+    installation_id: int | None = None,
+    auth_strategy: str | None = None,
+    commit_message: str = "chore(repo): bootstrap from runtime template",
+) -> RepoBootstrapResult:
+    normalized_provider = _normalize_provider(provider)
+    base_branch = (default_branch or "main").strip() or "main"
+    access = resolve_repo_runtime_access(
+        provider=normalized_provider,
+        repo_url=repo_url,
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
+        auth_strategy=auth_strategy,
+    )
+
+    if not source_dir.exists() or not source_dir.is_dir():
+        return RepoBootstrapResult(
+            ok=False,
+            created=False,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            message="Runtime template source directory is unavailable.",
+            error=str(source_dir),
+        )
+
+    try:
+        existing_heads = _run_git(["ls-remote", "--heads", access.transport_url], git_config=access.git_config)
+    except Exception as exc:
+        return RepoBootstrapResult(
+            ok=False,
+            created=False,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            message="Could not inspect remote repository heads.",
+            error=str(exc),
+        )
+
+    if existing_heads.strip():
+        return RepoBootstrapResult(
+            ok=True,
+            created=False,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            message="Repository already has commits; bootstrap skipped.",
+        )
+
+    root = Path(tempfile.mkdtemp(prefix="agentic-sdlc-repo-template-bootstrap-"))
+    repo_dir = root / "repo"
+    try:
+        shutil.copytree(
+            source_dir,
+            repo_dir,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                ".venv",
+                "node_modules",
+                "dist",
+                "__pycache__",
+                ".pytest_cache",
+                ".mypy_cache",
+                ".ruff_cache",
+            ),
+        )
+        _run_git(["init", "-b", base_branch], cwd=repo_dir)
+        _run_git(["add", "-A"], cwd=repo_dir)
+        _run_git(["commit", "-m", (commit_message or "chore(repo): bootstrap from runtime template").strip()], cwd=repo_dir)
+        commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo_dir)
+        _run_git(["remote", "add", "origin", access.transport_url], cwd=repo_dir)
+        _run_git(["push", "-u", "origin", base_branch], cwd=repo_dir, git_config=access.git_config)
+        return RepoBootstrapResult(
+            ok=True,
+            created=True,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            commit_sha=commit_sha,
+            message="Repository initialized from runtime template.",
+        )
+    except Exception as exc:
+        return RepoBootstrapResult(
+            ok=False,
+            created=False,
+            provider=normalized_provider,
+            repo_url=access.clean_repo_url,
+            default_branch=base_branch,
+            message="Failed to bootstrap repository from runtime template.",
+            error=str(exc),
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

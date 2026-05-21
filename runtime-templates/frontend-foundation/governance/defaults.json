@@ -1,0 +1,27 @@
+{
+  "patch_guard": {
+    "enforce_layer_boundaries": true,
+    "reject_monolith_rewrites": true,
+    "require_package_affinity": true,
+    "require_layer_affinity": true
+  },
+  "topology_contract": {
+    "frontend": {
+      "component_root": "apps/web/src/components",
+      "section_root": "apps/web/src/sections",
+      "page_root": "apps/web/src/pages"
+    },
+    "backend": {
+      "routes_root": "apps/api/app/routes",
+      "services_root": "apps/api/app/services",
+      "repositories_root": "apps/api/app/repositories",
+      "schemas_root": "apps/api/app/schemas",
+      "capabilities_root": "apps/api/app/capabilities"
+    }
+  },
+  "drift_contract": {
+    "detect_preview_drift": true,
+    "detect_topology_drift": true,
+    "allow_one_click_repair": true
+  }
+}

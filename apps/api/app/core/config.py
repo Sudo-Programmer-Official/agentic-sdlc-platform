@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     test_timeout_seconds: int = 180
     test_output_max_bytes: int = 200_000
     workspace_base_dir: str = "/tmp/agentic-sdlc-workspaces"
+    runtime_templates_root: str | None = None
     workspace_repo_source: str | None = None
     workspace_simulation_mode: str = "ephemeral"
     workspace_cleanup_policy: str = "retain"
@@ -143,6 +144,9 @@ class Settings(BaseSettings):
     run_auto_push_branch_on_completion: bool = True
     runtime_never_fail_runs: bool = False
     runtime_goal_orchestration_enabled: bool = False
+    foundation_readiness_gate_enabled: bool = False
+    runtime_governance_active_product_default_mode: str = "stability"
+    runtime_emergency_ship_mode_enabled: bool = False
     runtime_goal_max_recovery_cycles: int = 6
     runtime_validation_replay_max_per_run: int = 1
     runtime_test_retry_max_per_signature: int = 2
@@ -154,6 +158,7 @@ class Settings(BaseSettings):
     runtime_recovery_max_runtime_minutes: int = 90
     runtime_recovery_max_cost_estimate_cents: float = 160.0
     runtime_recovery_memory_enabled: bool = False
+    content_binding_enabled: bool = False
     runtime_recovery_memory_min_samples: int = 3
     runtime_recovery_memory_min_success_rate: float = 0.7
     external_reference_domain_allowlist: str = (

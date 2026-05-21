@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Run, RunEvent
+from app.services.runtime_execution_ledger import project_runtime_ledger_from_event
 
 
 async def record_event(
@@ -42,4 +43,17 @@ async def record_event(
         correlation_id=correlation_id,
     )
     session.add(event)
+    try:
+        await project_runtime_ledger_from_event(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            run_id=run_id,
+            work_item_id=work_item_id,
+            event_type=event_type,
+            payload=payload,
+        )
+    except Exception:
+        # Ledger projection is best-effort and must not break runtime event persistence.
+        pass
     return event

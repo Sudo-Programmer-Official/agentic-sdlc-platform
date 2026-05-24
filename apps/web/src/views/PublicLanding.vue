@@ -8,27 +8,17 @@
       <div class="hero-copy glass-panel">
         <div class="hero-brand">
           <img src="/brand/logo-64.png" alt="Prompt2PR logo" class="hero-logo" />
-          <div class="eyebrow">Prompt2PR · Autonomous Software Operations</div>
+          <div class="eyebrow">Prompt2PR · Agentic SDLC Infrastructure</div>
         </div>
-        <h1>From Prompt to Production.<br />Governed. Recoverable. Deployable.</h1>
+        <h1>Governed Agentic SDLC.<br />From Prompt to Production.</h1>
         <p>
-          Prompt2PR is the future operating system for software delivery: autonomous execution, deterministic recovery,
-          deployment governance, and continuous engineering memory in one lifecycle.
+          Operationalize software delivery with governed runtime orchestration, deterministic recovery loops,
+          deployment policy gates, and continuous engineering memory.
         </p>
-        <div class="hero-image-frame hero-motion" aria-label="Animated operational lifecycle visual">
-          <div class="hero-motion-bg" />
-          <div class="hero-motion-track">
-            <div class="motion-node done">Intent</div>
-            <div class="motion-node active">Generate</div>
-            <div class="motion-node active">Validate</div>
-            <div class="motion-node active">Recover</div>
-            <div class="motion-node pending">Deploy</div>
-            <div class="motion-node pending">Govern</div>
-          </div>
-          <div class="hero-motion-pulse pulse-a" />
-          <div class="hero-motion-pulse pulse-b" />
-          <div class="hero-motion-caption">Readiness 92% · Recovery Active · Policy Enforced</div>
-          <div class="hero-image-glow" />
+        <div class="hero-proof-strip">
+          <span>Governed Runtime</span>
+          <span>Deterministic Recovery</span>
+          <span>Deployment Readiness 92%</span>
         </div>
         <div class="hero-ctas">
           <el-button type="primary" size="large" @click="goStart">Deploy Your First App</el-button>
@@ -37,41 +27,16 @@
         </div>
       </div>
 
-      <div class="hero-visual">
-        <article class="mc-float mc-a glass-panel">
-          <div class="card-title">Mission Control</div>
-          <div class="card-row"><span>Active Run</span><strong>RUN-7D2A</strong></div>
-          <div class="card-row"><span>Status</span><strong class="ok">RECOVERED</strong></div>
-          <div class="card-row"><span>Confidence</span><strong>88%</strong></div>
-        </article>
-
-        <article class="mc-float mc-b glass-panel">
-          <div class="card-title">Deployment Governance</div>
-          <div class="card-row"><span>Readiness</span><strong>92%</strong></div>
-          <div class="card-row"><span>Preview</span><strong class="ok">SAFE</strong></div>
-          <div class="card-row"><span>Production</span><strong class="warn">BLOCKED</strong></div>
-        </article>
-
-        <article class="mc-float mc-c glass-panel">
-          <div class="card-title">Recovery Intelligence</div>
-          <div class="card-row"><span>Retry Loop</span><strong class="ok">BOUNDED</strong></div>
-          <div class="card-row"><span>Rollback</span><strong>AVAILABLE</strong></div>
-          <div class="card-row"><span>Policy</span><strong>ENFORCED</strong></div>
-        </article>
-
-        <div class="lifecycle-canvas glass-panel">
-          <div class="canvas-title">Operational Lifecycle</div>
-          <div class="lifecycle-track">
-            <div v-for="(step, idx) in lifecycleSteps" :key="step.key" class="node" :class="step.state" :style="{ animationDelay: `${idx * 120}ms` }">
-              <span>{{ step.label }}</span>
-            </div>
-          </div>
-          <div class="canvas-meta">
-            <div class="meta-pill">Deploy Confidence <strong>{{ deployConfidence }}%</strong></div>
-            <div class="meta-pill">Recovery Loop <strong>Active</strong></div>
-            <div class="meta-pill">Readiness <strong>{{ readinessScore }}%</strong></div>
-          </div>
-        </div>
+      <div class="hero-visual glass-panel">
+        <div class="hero-visual-label">Operational AI Infrastructure</div>
+        <img
+          src="/brand/hero-agentic-sdlc-ad-landscape.png"
+          alt="Agentic SDLC mission control showcase"
+          class="hero-showcase-image"
+        />
+        <p class="hero-visual-caption">
+          Production-grade orchestration, recovery governance, and runtime policy controls in one operator surface.
+        </p>
       </div>
     </section>
 
@@ -316,16 +281,6 @@ import { getAuthToken, loadRecentProjectsScoped } from "../api/lifecycle";
 
 const router = useRouter();
 const isSignedIn = computed(() => Boolean(getAuthToken()));
-const lifecycleSteps = [
-  { key: "prompt", label: "Prompt", state: "done" },
-  { key: "plan", label: "Plan", state: "done" },
-  { key: "generate", label: "Generate", state: "active" },
-  { key: "validate", label: "Validate", state: "active" },
-  { key: "recover", label: "Recover", state: "active" },
-  { key: "deploy", label: "Deploy", state: "pending" },
-  { key: "promote", label: "Promote", state: "pending" },
-  { key: "monitor", label: "Monitor", state: "pending" },
-];
 const capabilities = [
   {
     title: "Autonomous Runtime",
@@ -625,9 +580,9 @@ function ownerTone(owner: string) {
   position: relative;
   overflow: hidden;
   min-height: 100vh;
-  background: radial-gradient(1200px 500px at 15% -5%, #dbeafe 0%, transparent 60%),
-    radial-gradient(1000px 450px at 85% 0%, #cffafe 0%, transparent 55%),
-    linear-gradient(180deg, #f8fafc 0%, #ffffff 40%, #f8fafc 100%);
+  background: radial-gradient(980px 520px at 12% -8%, rgba(59, 130, 246, 0.22) 0%, transparent 62%),
+    radial-gradient(920px 460px at 88% 0%, rgba(129, 140, 248, 0.2) 0%, transparent 58%),
+    linear-gradient(180deg, #081126 0%, #0b1730 45%, #0d1b38 100%);
   max-width: 1240px;
   margin: 0 auto;
   padding: 32px 16px 96px;
@@ -657,6 +612,11 @@ function ownerTone(owner: string) {
   grid-template-columns: 1fr;
 }
 .hero-copy { border-radius: 24px; padding: 28px; }
+.hero-copy.glass-panel {
+  background: linear-gradient(142deg, rgba(12, 24, 44, 0.86), rgba(14, 26, 48, 0.78));
+  border: 1px solid rgba(150, 186, 244, 0.26);
+  box-shadow: 0 20px 48px rgba(2, 8, 20, 0.38);
+}
 .hero-brand {
   display: inline-flex;
   align-items: center;
@@ -672,7 +632,7 @@ function ownerTone(owner: string) {
   font-size: 11px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: #64748b;
+  color: #a8c1e6;
   font-weight: 600;
 }
 h1 {
@@ -680,10 +640,27 @@ h1 {
   font-size: clamp(32px, 5vw, 56px);
   line-height: 1.02;
   font-weight: 700;
-  color: #0f172a;
+  color: #f3f8ff;
 }
 p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
+.hero-copy p { color: #c5d5ec; }
 .hero-ctas { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 10px; }
+.hero-proof-strip {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hero-proof-strip span {
+  border-radius: 999px;
+  border: 1px solid rgba(151, 188, 244, 0.38);
+  background: rgba(17, 34, 60, 0.72);
+  color: #ddeafe;
+  padding: 7px 11px;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 600;
+}
 .hero-image-frame {
   position: relative;
   margin-top: 16px;
@@ -789,6 +766,32 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
   min-height: 420px;
   border-radius: 24px;
   padding: 20px;
+}
+.hero-visual.glass-panel {
+  background: linear-gradient(145deg, rgba(10, 22, 42, 0.9), rgba(10, 22, 42, 0.72));
+  border: 1px solid rgba(149, 184, 240, 0.24);
+  box-shadow: 0 22px 52px rgba(1, 8, 22, 0.44);
+}
+.hero-visual-label {
+  margin-bottom: 12px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #b8d0f1;
+  font-weight: 700;
+}
+.hero-showcase-image {
+  width: 100%;
+  display: block;
+  border-radius: 16px;
+  border: 1px solid rgba(153, 188, 244, 0.28);
+}
+.hero-visual-caption {
+  margin-top: 10px;
+  margin-bottom: 0;
+  color: #c5d5ec;
+  font-size: 14px;
+  line-height: 1.55;
 }
 .mc-float {
   position: absolute;

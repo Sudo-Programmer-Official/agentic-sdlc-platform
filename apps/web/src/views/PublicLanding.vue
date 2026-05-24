@@ -23,6 +23,8 @@
         <div class="hero-ctas">
           <el-button type="primary" size="large" @click="goStart">Deploy Your First App</el-button>
           <el-button size="large" plain @click="goMissionControl">Watch Live Flow</el-button>
+          <a class="demo-link-btn" href="https://www.loom.com/share/5f454ac5ac6a4714985bbe3bf3cf5ec9" target="_blank" rel="noreferrer">Live Demo 1</a>
+          <a class="demo-link-btn" href="https://www.loom.com/share/c3af40790788421da93701131e6e219b" target="_blank" rel="noreferrer">Live Demo 2</a>
           <el-button v-if="isSignedIn && lastProjectId" size="large" plain @click="resumeProject">Resume Last Project</el-button>
         </div>
       </div>
@@ -120,6 +122,10 @@
     <section class="screenshots-rail glass-panel">
       <div class="eyebrow">Product Screenshots</div>
       <h3>Real product surfaces across runtime, deployment, and operations.</h3>
+      <div class="demo-links-inline">
+        <a href="https://www.loom.com/share/5f454ac5ac6a4714985bbe3bf3cf5ec9" target="_blank" rel="noreferrer">Watch Live Demo 1</a>
+        <a href="https://www.loom.com/share/c3af40790788421da93701131e6e219b" target="_blank" rel="noreferrer">Watch Live Demo 2</a>
+      </div>
       <div class="screenshots-viewer">
         <div class="screenshots-frame">
           <img :src="activeScreenshot.src" :alt="activeScreenshot.alt" loading="lazy" />
@@ -710,6 +716,24 @@ h1 {
 p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
 .hero-copy p { color: #c5d5ec; }
 .hero-ctas { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 10px; }
+.demo-link-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(149, 184, 240, 0.45);
+  background: rgba(13, 29, 54, 0.8);
+  color: #e6efff;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.demo-link-btn:hover {
+  background: rgba(20, 40, 72, 0.9);
+  border-color: rgba(149, 184, 240, 0.7);
+}
 .hero-proof-strip {
   margin-top: 14px;
   display: flex;
@@ -1062,6 +1086,30 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
 }
 .screenshots-viewer {
   margin-top: 12px;
+}
+.demo-links-inline {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.demo-links-inline a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 6px 12px;
+  border: 1px solid rgba(149, 184, 240, 0.45);
+  color: #dbe8ff;
+  background: rgba(13, 29, 54, 0.72);
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.demo-links-inline a:hover {
+  border-color: rgba(149, 184, 240, 0.75);
+  background: rgba(20, 40, 72, 0.86);
 }
 .screenshots-frame {
   border-radius: 14px;

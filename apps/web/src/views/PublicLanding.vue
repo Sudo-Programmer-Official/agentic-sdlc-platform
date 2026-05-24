@@ -120,10 +120,31 @@
     <section class="screenshots-rail glass-panel">
       <div class="eyebrow">Product Screenshots</div>
       <h3>Real product surfaces across runtime, deployment, and operations.</h3>
-      <div class="screenshots-grid">
-        <article v-for="shot in screenshots" :key="shot.src" class="screenshot-card">
-          <img :src="shot.src" :alt="shot.alt" loading="lazy" />
-        </article>
+      <div class="screenshots-viewer">
+        <div class="screenshots-frame">
+          <img :src="activeScreenshot.src" :alt="activeScreenshot.alt" loading="lazy" />
+        </div>
+        <div class="screenshots-controls">
+          <button type="button" class="shot-nav" @click="prevScreenshot">← Previous</button>
+          <div class="shot-counter">{{ activeScreenshotIndex + 1 }} / {{ screenshots.length }}</div>
+          <button type="button" class="shot-nav" @click="nextScreenshot">Next →</button>
+        </div>
+        <div class="screenshots-strip-wrap">
+          <button type="button" class="strip-nav" aria-label="Scroll thumbnails left" @click="scrollThumbs('prev')">←</button>
+          <div ref="thumbRail" class="screenshots-strip" aria-label="Screenshot thumbnails">
+            <button
+              v-for="(shot, idx) in screenshots"
+              :key="shot.src"
+              type="button"
+              class="shot-thumb"
+              :class="{ active: idx === activeScreenshotIndex }"
+              @click="activeScreenshotIndex = idx"
+            >
+              <img :src="shot.src" :alt="shot.alt" loading="lazy" />
+            </button>
+          </div>
+          <button type="button" class="strip-nav" aria-label="Scroll thumbnails right" @click="scrollThumbs('next')">→</button>
+        </div>
       </div>
     </section>
 
@@ -285,7 +306,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { getAuthToken, loadRecentProjectsScoped } from "../api/lifecycle";
 
@@ -354,6 +375,23 @@ const screenshots = Array.from({ length: 12 }, (_, idx) => {
     alt: `Prompt2PR product screenshot ${idx + 1}`,
   };
 });
+const activeScreenshotIndex = ref(0);
+const thumbRail = ref<HTMLElement | null>(null);
+const activeScreenshot = computed(() => screenshots[activeScreenshotIndex.value] || screenshots[0]);
+
+function nextScreenshot() {
+  activeScreenshotIndex.value = (activeScreenshotIndex.value + 1) % screenshots.length;
+}
+
+function prevScreenshot() {
+  activeScreenshotIndex.value = (activeScreenshotIndex.value - 1 + screenshots.length) % screenshots.length;
+}
+
+function scrollThumbs(direction: "prev" | "next") {
+  if (!thumbRail.value) return;
+  const distance = Math.round(thumbRail.value.clientWidth * 0.72);
+  thumbRail.value.scrollBy({ left: direction === "next" ? distance : -distance, behavior: "smooth" });
+}
 const comparisonMetrics = [
   {
     metric: "Time to first deployable preview",
@@ -1022,23 +1060,102 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
   gap: 10px;
   grid-template-columns: 1fr;
 }
-.screenshot-card {
+.screenshots-viewer {
+  margin-top: 12px;
+}
+.screenshots-frame {
   border-radius: 14px;
   overflow: hidden;
   border: 1px solid #dbe5f3;
-  background: #f8fafc;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  background: rgba(13, 29, 54, 0.8);
+  box-shadow: 0 16px 30px rgba(2, 8, 20, 0.35);
 }
-.screenshot-card img {
+.screenshots-frame img {
   display: block;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
-  aspect-ratio: 16 / 10;
-  transition: transform 220ms ease;
+  max-height: 740px;
+  object-fit: contain;
+  background: #0b172d;
 }
-.screenshot-card:hover img {
-  transform: scale(1.02);
+.screenshots-controls {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.shot-nav {
+  border-radius: 10px;
+  border: 1px solid rgba(149, 184, 240, 0.35);
+  background: rgba(13, 29, 54, 0.8);
+  color: #e6efff;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.shot-nav:hover {
+  border-color: rgba(149, 184, 240, 0.6);
+  background: rgba(20, 40, 72, 0.9);
+}
+.shot-counter {
+  font-size: 12px;
+  color: #bdd2ee;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.screenshots-strip-wrap {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.strip-nav {
+  border-radius: 10px;
+  border: 1px solid rgba(149, 184, 240, 0.35);
+  background: rgba(13, 29, 54, 0.8);
+  color: #e6efff;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+.strip-nav:hover {
+  border-color: rgba(149, 184, 240, 0.6);
+  background: rgba(20, 40, 72, 0.9);
+}
+.screenshots-strip {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  padding: 2px;
+}
+.shot-thumb {
+  flex: 0 0 160px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(149, 184, 240, 0.24);
+  padding: 0;
+  background: rgba(13, 29, 54, 0.65);
+  cursor: pointer;
+  opacity: 0.7;
+}
+.shot-thumb.active {
+  opacity: 1;
+  border-color: rgba(96, 165, 250, 0.9);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35);
+}
+.shot-thumb img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
 }
 
 .comparison-rail {
@@ -1694,6 +1811,117 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
   border-bottom-color: #93c5fd;
 }
 
+/* Dark surface sync: match lower cards with hero visual language */
+.story-card,
+.problem-solve,
+.cap-card,
+.ops-pipeline,
+.metric-card,
+.comparison-rail,
+.outcomes-rail,
+.faq-rail,
+.journey-rail,
+.business-flow,
+.voices-rail,
+.brand-rail,
+.trust-rail,
+.screenshots-rail {
+  background: linear-gradient(145deg, rgba(10, 22, 42, 0.86), rgba(10, 22, 42, 0.74));
+  border: 1px solid rgba(149, 184, 240, 0.24);
+  box-shadow: 0 20px 48px rgba(1, 8, 22, 0.38);
+}
+
+.story-card h3,
+.problem-solve h3,
+.cap-card h4,
+.ops-pipeline h3,
+.metrics-rail h3,
+.comparison-rail h3,
+.outcomes-rail h3,
+.faq-rail h3,
+.journey-rail h3,
+.business-flow h3,
+.voices-rail h3,
+.brand-rail h3,
+.metric-value,
+.comparison-metric,
+.journey-title,
+.business-flow-title,
+.voice-role,
+.brand-card__title,
+.lane-copy,
+.business-flow-proof,
+.outcome-value {
+  color: #e6efff;
+}
+
+.story-card p,
+.cap-card p,
+.pipeline-node__hint,
+.metric-detail,
+.comparison-note,
+.outcomes-lead,
+.outcome-card p,
+.faq-a,
+.journey-detail,
+.business-flow-detail,
+.voice-impact,
+.brand-card p,
+.trust-item,
+.hero-visual-caption {
+  color: #b9cce8;
+}
+
+.comparison-card,
+.outcome-card,
+.faq-card,
+.journey-card,
+.business-flow-card,
+.voice-card,
+.brand-card,
+.trust-item,
+.metric-pill,
+.pipeline-loop,
+.pipeline-node,
+.comparison-col {
+  background: rgba(13, 29, 54, 0.72);
+  border-color: rgba(149, 184, 240, 0.22);
+}
+
+.lane-problem,
+.lane-solution {
+  background: rgba(13, 29, 54, 0.72);
+  border-color: rgba(149, 184, 240, 0.22);
+}
+
+.comparison-value.muted,
+.journey-owner,
+.business-flow-owner,
+.pipeline-node__label,
+.comparison-label,
+.lane-label,
+.metric-label,
+.brand-card__label,
+.business-flow-step,
+.faq-q,
+.trust-item {
+  color: #c7d9f3;
+}
+
+.problem-solve .eyebrow,
+.comparison-rail .eyebrow,
+.outcomes-rail .eyebrow,
+.faq-rail .eyebrow,
+.journey-rail .eyebrow,
+.business-flow .eyebrow,
+.voices-rail .eyebrow,
+.brand-rail .eyebrow,
+.trust-rail .eyebrow,
+.metrics-rail .eyebrow,
+.screenshots-rail .eyebrow {
+  color: #a8c1e6;
+}
+
 @keyframes floaty {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-6px); }
@@ -1732,7 +1960,6 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
   .story-grid { grid-template-columns: 1fr 1fr; }
   .cap-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .metrics-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .screenshots-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .comparison-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .outcomes-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .faq-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1814,6 +2041,9 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
   }
   .pipeline-metrics {
     grid-template-columns: 1fr;
+  }
+  .shot-thumb {
+    flex-basis: 120px;
   }
 }
 </style>

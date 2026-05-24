@@ -595,6 +595,7 @@ function ownerTone(owner: string) {
 <style scoped>
 .landing-v2-cinematic {
   position: relative;
+  isolation: isolate;
   overflow: hidden;
   min-height: 100vh;
   background: radial-gradient(980px 520px at 12% -8%, rgba(59, 130, 246, 0.22) 0%, transparent 62%),
@@ -603,6 +604,15 @@ function ownerTone(owner: string) {
   max-width: 1240px;
   margin: 0 auto;
   padding: 32px 16px 96px;
+}
+.landing-v2-cinematic::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(980px 520px at 12% -8%, rgba(59, 130, 246, 0.22) 0%, transparent 62%),
+    radial-gradient(920px 460px at 88% 0%, rgba(129, 140, 248, 0.2) 0%, transparent 58%),
+    linear-gradient(180deg, #081126 0%, #0b1730 45%, #0d1b38 100%);
 }
 .ambient {
   position: absolute;

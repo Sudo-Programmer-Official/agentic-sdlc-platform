@@ -117,6 +117,16 @@
       </div>
     </section>
 
+    <section class="screenshots-rail glass-panel">
+      <div class="eyebrow">Product Screenshots</div>
+      <h3>Real product surfaces across runtime, deployment, and operations.</h3>
+      <div class="screenshots-grid">
+        <article v-for="shot in screenshots" :key="shot.src" class="screenshot-card">
+          <img :src="shot.src" :alt="shot.alt" loading="lazy" />
+        </article>
+      </div>
+    </section>
+
     <section class="comparison-rail glass-panel">
       <div class="eyebrow">Prompt2PR vs Manual / Prompt-Only Coding</div>
       <h3>Why governed software operations outperform ad-hoc coding workflows.</h3>
@@ -337,6 +347,13 @@ const metrics = [
   { label: "Rollback Coverage", value: "96%", detail: "Deployments with validated rollback path available." },
   { label: "Operator Clarity", value: "High", detail: "Explicit blockers, warnings, and next actions surfaced." },
 ];
+const screenshots = Array.from({ length: 12 }, (_, idx) => {
+  const n = String(idx + 1).padStart(2, "0");
+  return {
+    src: `/brand/ss-${n}.png`,
+    alt: `Prompt2PR product screenshot ${idx + 1}`,
+  };
+});
 const comparisonMetrics = [
   {
     metric: "Time to first deployable preview",
@@ -975,6 +992,43 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
   font-size: 12px;
   color: #475569;
   line-height: 1.45;
+}
+
+.screenshots-rail {
+  margin-top: 28px;
+  border-radius: 20px;
+  padding: 18px;
+  position: relative;
+  z-index: 1;
+}
+.screenshots-rail h3 {
+  margin-top: 8px;
+  font-size: 22px;
+  color: #0f172a;
+}
+.screenshots-grid {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr;
+}
+.screenshot-card {
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid #dbe5f3;
+  background: #f8fafc;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+.screenshot-card img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  aspect-ratio: 16 / 10;
+  transition: transform 220ms ease;
+}
+.screenshot-card:hover img {
+  transform: scale(1.02);
 }
 
 .comparison-rail {
@@ -1668,6 +1722,7 @@ p { margin-top: 14px; color: #334155; font-size: 15px; line-height: 1.7; }
   .story-grid { grid-template-columns: 1fr 1fr; }
   .cap-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .metrics-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .screenshots-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .comparison-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .outcomes-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .faq-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
